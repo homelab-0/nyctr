@@ -55,7 +55,8 @@ def wait_for_app():
     while time.monotonic() < deadline:
         try:
             return Client().request("/api/health")
-        except (urllib.error.URLError, TimeoutError, AssertionError):
+        except (urllib.error.URLError, ConnectionError, TimeoutError, AssertionError):
+            # Docker may accept a connection before a restarted app can answer.
             time.sleep(1)
     raise RuntimeError("Application did not become healthy within 90 seconds")
 
