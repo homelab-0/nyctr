@@ -102,6 +102,10 @@ local fake providers**. The application mode is not a claim of production testin
 The stack has its own database, synthetic bootstrap account, ephemeral test CA,
 and internal Docker network. Its HTTPS fixtures model UniFi and NextDNS reads;
 certificate verification stays enabled for connector traffic.
+The browser reaches the application through a loopback-only proxy with a fixed
+Nyctr upstream. Nyctr, PostgreSQL, and the provider fixture remain on the internal
+network; the proxy supplies browser access without giving those services an
+external route.
 
 ```sh
 docker compose -p nyctr-cloudex-acceptance \

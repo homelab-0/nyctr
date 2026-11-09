@@ -6,6 +6,32 @@ x-application-image: &application-image
     dockerfile: Dockerfile
 
 services:
+  ingress:
+    image: nginx:1.30.6-alpine3.24
+    user: "10001:10001"
+    # Skip image startup scripts: the complete config is read-only and all temp paths use /tmp.
+    entrypoint: [nginx]
+    command: [-g, "daemon off;"]
+    ports:
+      - "127.0.0.1:${NYCTR_ACCEPTANCE_PORT:-8091}:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      nyctr:
+        condition: service_healthy
+    networks: [ingress, isolated]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/api/health"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   certificates:
     <<: *application-image
     user: "0:0"
@@ -53,8 +79,6 @@ services:
 
   nyctr:
     <<: *application-image
-    ports:
-      - "127.0.0.1:${NYCTR_ACCEPTANCE_PORT:-8091}:8080"
     environment:
       NYCTR_MODE: live
       NYCTR_DATABASE_URL: postgresql+psycopg://nyctr_acceptance:nyctr-acceptance-db-only@database:5432/nyctr_acceptance
@@ -105,6 +129,8 @@ services:
     restart: unless-stopped
 
 networks:
+  ingress:
+    driver: bridge
   isolated:
     internal: true
 

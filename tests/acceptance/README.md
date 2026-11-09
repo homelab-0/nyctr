@@ -105,6 +105,9 @@ run diagnostics, or recollect evidence. PostgreSQL remains in a separate named
 volume. The UI stays available for inspection of the explorer, integrations,
 partial reports, failed checks, and the administrator block inbox.
 
+If you recreate the application container instead of restarting it, restart
+`ingress` after the application is healthy so nginx resolves its new container IP.
+
 The fixture emits one stable event timestamp per process. It expires from the
 inbox after 24 hours, as real observations do. For a fresh event, restart the
 fixture and rerun the regular checker to collect again; for a completely clean
@@ -114,11 +117,26 @@ synthetic counts; use a fresh project for a repeatable run.
 
 ## Isolation and TLS
 
-- The Docker network is `internal: true`. Application, fixture, and database
-  runtime containers have no external route. Image build/pull operations still
-  need the normal package registries before the runtime starts.
-- Only the app is published, bound to `127.0.0.1`. PostgreSQL and the fixture have
-  no published ports.
+- Application, fixture, database, and certificate initialization containers join
+  only the `isolated` network (`internal: true`) and have no external route.
+  Image build/pull operations still need the normal package registries before
+  the runtime starts.
+- Only the small `ingress` nginx service joins both a normal bridge and the
+  isolated network. It alone publishes the UI port, bound to `127.0.0.1`, and
+  forwards requests to the fixed `http://nyctr:8080` upstream. The application,
+  PostgreSQL, and fixture have no published ports. The ingress is a reverse proxy,
+  not a configurable destination or CONNECT tunnel.
+- This separate ingress supplies the default-gateway network Docker uses for
+  published ports while keeping the application isolated. Internal-only
+  containers can appear healthy even when their requested host port is not
+  published. See Docker's [networking documentation](https://docs.docker.com/compose/how-tos/networking/)
+  and the [Moby maintainer explanation](https://github.com/moby/moby/discussions/53256).
+- The proxy preserves the original Host header including the port, passes normal
+  cookies and CSRF headers, and allows 120 seconds for upstream responses so
+  bounded diagnostics can complete. Its health check reaches the application
+  through that same proxy path. It runs as a non-root user with a read-only
+  filesystem, no capabilities, and temporary files in a small `/tmp` tmpfs;
+  the image's configuration-modifying entrypoint scripts are bypassed.
 - A short-lived CA and leaf are generated in a named test volume. The leaf SANs
   are exactly `fixture` and `api.nextdns.io`; `untrusted-fixture` is deliberately
   absent so the negative TLS case follows the production verification path.
@@ -141,7 +159,7 @@ Inspect this project's containers without accessing another environment:
 
 ```sh
 docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml ps
-docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml logs --tail=100 nyctr fixture certificates
+docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml logs --tail=100 ingress nyctr fixture certificates
 ```
 
 Stop while retaining synthetic PostgreSQL state and test certificates:
