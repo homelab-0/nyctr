@@ -45,10 +45,15 @@ The first deployment either bootstraps a local administrator from environment
 or uses configured OIDC. Remove local bootstrap credential environment values
 after provisioning. They are not an account password-rotation interface.
 
-For a private console CA, mount the CA bundle as read-only and set
-`NYCTR_CONNECTOR_CA_BUNDLE` in a local Compose override. The server must also
-explicitly allow the console's hostname through `NYCTR_CONNECTOR_HOSTS`.
-NextDNS uses its fixed official HTTPS origin.
+For a private console CA, prepare a PEM bundle containing **both the private
+console CA certificates and public CA roots**, mount it as read-only, and set
+`NYCTR_CONNECTOR_CA_BUNDLE` to its container path in a local Compose override.
+This bundle replaces the default CA trust for all connector clients, including
+NextDNS; a private-only bundle prevents verification of public provider
+certificates. Keep the combined bundle's certificates updated. Leave this setting
+unset when all connector certificates are already publicly trusted. The server
+must also explicitly allow the console's hostname through
+`NYCTR_CONNECTOR_HOSTS`. NextDNS uses its fixed official HTTPS origin.
 
 ### Trusted reverse proxies and login limits
 
