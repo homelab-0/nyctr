@@ -1,0 +1,14 @@
+apiVersion: v2
+name: nyctr
+description: Self-hosted Nyctr alpha with read-only network integrations
+type: application
+version: 0.1.0
+appVersion: "0.1.0-alpha.1"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/homelab-0/nyctr
+sources:
+  - https://github.com/homelab-0/nyctr
+keywords:
+  - network
+  - security
+  - self-hosted

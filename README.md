@@ -66,12 +66,12 @@ These screenshots show the running application with synthetic demonstration data
 | Network explorer | Interactive graph, resource inspector, focused neighborhoods, finding context | Large-graph layouts, temporal comparison, path simulation |
 | Identity | Local accounts, cookie sessions, administrator/member roles, optional OIDC | Account administration, richer role and group policies |
 | Evidence | Persistent resources, typed relationships, observations and source timestamps | Historical snapshots, drift and coverage analysis |
-| UniFi Network | Read-only inventory and configured-policy adapter | Port posture, event receiver, broader policy analysis |
-| NextDNS | Read-only profile and blocked-query adapter | Stronger endpoint attribution and policy evaluation |
+| UniFi Network | Read-only inventory and configured-policy adapter; guided connection diagnostics | Port posture, event receiver, broader policy analysis |
+| NextDNS | Read-only profile and blocked-query adapter; diagnostics for read access and logging coverage | Stronger endpoint attribution and policy evaluation |
 | Member portal | Authorized recent blocks, assigned devices, persistent requests | Background risk evaluation and temporary access |
 | Change handling | Internal request review and audit; no provider write operations | Exact-plan approval, isolated execution, verification and expiry |
 | AI | Architectural boundary documented; no model called in this version | BYO provider through LiteLLM/Spektr, evidence-backed explanations |
-| Packaging | One application Dockerfile, PostgreSQL Compose setup, CI | Published images, Helm chart, signed releases and upgrade tooling |
+| Packaging | Application Dockerfile, PostgreSQL Compose, Helm chart, isolated acceptance stack, versioned image-release workflow | Published release validation, upgrade tooling and operational hardening |
 
 Synthetic findings in demo mode demonstrate the workflow. The initial live
 collectors do not constitute a complete reachability engine or vulnerability scan.
@@ -138,10 +138,36 @@ The application's connector code only sends GET requests. Use the narrowest
 provider-side permissions available for the selected API; the application cannot
 make an unrestricted provider key read only at the provider itself.
 
+Use **Run diagnostics** on a saved integration to check configuration, credentials,
+verified HTTPS reads, supported response shapes, and evidence gaps. Results
+distinguish implemented adapter capabilities from reads verified in that check.
+Diagnostics do not import the examined inventory or refresh collection health;
+**Collect snapshot** is a separate action. A successful connection does not prove
+firewall-event coverage, user attribution, end-to-end access, or a safe destination.
+
 Read [deployment](deploy/README.md), [integration setup](docs/integrations.md), and
 [authentication configuration](services/api/README.md) before collecting real data.
 No live integration has been validated against the maintainer's network as part
 of the initial implementation; tests use synthetic provider responses.
+
+## Deployment packages and independent testing
+
+The [Helm chart](charts/nyctr/README.md) supports an existing PostgreSQL database,
+Secret references, OIDC, and optional Ingress or Gateway API routing. It keeps
+one application replica during alpha and validates explicit live-mode settings.
+It does not provision an identity provider or a production database for you.
+
+The [release workflow](docs/releases.md) validates a tagged source version before
+publishing AMD64/ARM64 images with SBOM and provenance metadata. A workflow in the
+repository is not proof that a release image has been published: use only a
+completed release's recorded image digest. The source-build quick start above
+works before the first published image.
+
+For independent testing, use the [Cloudex acceptance handoff](docs/testing/cloudex.md).
+It covers a fresh Docker install, browser workflows, application restarts, and
+an [isolated provider fixture stack](tests/acceptance/README.md). Synthetic UniFi
+and NextDNS HTTPS endpoints run inside an internal Docker network; no homelab
+route, production credential, or real browsing history is required.
 
 ## Architecture
 
@@ -207,7 +233,11 @@ docker build -t nyctr:dev .
 ```
 
 CI runs the backend checks, frontend build, and container integration smoke test.
-The container smoke test exercises the built application with PostgreSQL.
+Container smoke tests exercise the built application with PostgreSQL on AMD64 and
+ARM64. Helm rendering checks and an isolated Kubernetes installation exercise the
+chart separately. Provider acceptance tests check real HTTPS exchanges with local
+synthetic servers, not vendor infrastructure. See [testing](docs/testing/cloudex.md)
+for commands and the distinction between automated coverage and browser review.
 
 ## Design principles
 

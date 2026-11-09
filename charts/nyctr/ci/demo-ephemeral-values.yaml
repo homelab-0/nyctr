@@ -1,0 +1,12 @@
+# Local isolated demo only; port-forward on loopback, never expose an Ingress.
+image:
+  repository: nyctr
+  tag: ci-smoke
+  pullPolicy: Never
+mode: demo
+publicUrl: http://localhost:8080
+demo:
+  allowKnownCredentials: true
+  ephemeralDatabase: true
+networkPolicy:
+  enabled: false

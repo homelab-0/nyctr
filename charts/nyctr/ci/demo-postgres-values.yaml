@@ -1,0 +1,15 @@
+# Isolated kind/CI fixture only. A separate test fixture creates nyctr-db.
+image:
+  repository: nyctr
+  tag: ci-smoke
+  pullPolicy: Never
+mode: demo
+publicUrl: http://localhost:8080
+demo:
+  allowKnownCredentials: true
+  ephemeralDatabase: false
+database:
+  existingSecret: nyctr-db
+  urlKey: database-url
+networkPolicy:
+  enabled: false

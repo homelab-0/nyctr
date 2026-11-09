@@ -17,6 +17,21 @@ This roadmap identifies dependencies and acceptance criteria, not release dates.
 Exit gate: application boots from a fresh database; member isolation and read-only
 transport tests pass; packaged frontend and API work together.
 
+### Deployable alpha
+
+- Versioned container publication workflow with exact-source validation,
+  multi-platform builds, SBOM metadata and provenance attestation.
+- Helm packaging for external PostgreSQL, existing Secrets, OIDC settings,
+  explicit proxy trust and optional Ingress/Gateway API routing.
+- Guided integration diagnostics that distinguish verified reads from
+  implemented capabilities and incomplete evidence.
+- Isolated Docker provider fixtures and an independent browser-testing handoff.
+- Chart rendering, isolated Kubernetes installation and persistence checks.
+
+Exit gate: clean installation and the isolated acceptance suite pass for the
+tested source revision. Publishing an image is a separate release action.
+Synthetic fixtures do not establish real-vendor compatibility or homelab reach.
+
 ## 2. Collection and network posture
 
 - Durable background collection, scheduling, bounded retries and health reporting.
@@ -61,8 +76,8 @@ of pre-existing or independently changed provider configuration.
 - AWS networking (VPCs, routes, security groups, NACLs and observations).
 - Azure networking (VNets, subnets, NSGs, routes and observations).
 - Multiple sites and organizations with explicit tenancy boundaries.
-- Helm packaging and documented integration with GitOps deployment workflows.
-- Retention policies, audit export, backups, upgrades, release signing and SBOMs.
+- Chart upgrade compatibility and broader GitOps deployment workflows.
+- Retention policies, audit export, backups, upgrades and release verification.
 - Large-graph performance, accessibility review, localization and mobile polish.
 
 ## Out of scope without a separate design decision

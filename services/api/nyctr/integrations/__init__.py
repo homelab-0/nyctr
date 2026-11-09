@@ -67,7 +67,8 @@ async def collect(provider: str, integration_id: str, config: dict[str, Any], ap
 
             return await collect_nextdns(integration_id, clean, api_key)
     except TimeoutError:
-        raise IntegrationError("Collection timed out; narrow its site scope or log lookback.") from None
+        raise IntegrationError("Collection timed out; narrow its site scope or log lookback.",
+                               category="timeout") from None
 
 
 __all__ = ["IntegrationError", "Snapshot", "capabilities_for", "collect", "validate_config"]

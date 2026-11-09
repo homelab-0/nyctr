@@ -51,6 +51,7 @@ equipment or an actual identity provider. PostgreSQL is the deployment target.
 | `NYCTR_STATIC_DIR` | Optional built frontend directory containing `index.html`; API routes retain precedence. |
 | `NYCTR_CONNECTOR_SECRET_<NAME>` | Server-only integration credential. Persist only its variable name in connection settings. |
 | `NYCTR_CONNECTOR_HOSTS` | Explicit comma-separated UniFi HTTPS host allowlist; see the integration setup documentation. |
+| `NYCTR_CONNECTOR_CA_BUNDLE` | Optional server-side path to a PEM CA bundle used to validate connector HTTPS certificates. Use a valid chain and matching hostname; TLS verification cannot be disabled. |
 | `NYCTR_OIDC_ISSUER` | Exact HTTPS issuer identifier, including trailing slash where required by your provider. |
 | `NYCTR_OIDC_CLIENT_ID` | OIDC client identifier. |
 | `NYCTR_OIDC_CLIENT_SECRET` | Confidential client secret. Configure in the deployment secret store. |
@@ -113,6 +114,57 @@ inbox cleanup does not erase the request or its audit trail. Duplicate requests
 from the same user for the same event return the original request. An expired
 event cannot create a new request. Request review accepts only `reviewed` or
 `denied`; execution and temporary exceptions are not present in this version.
+
+## Integration diagnostics
+
+`POST /api/integrations/{integration_id}/diagnostics` checks a saved integration
+without importing its inventory or observations. It requires an administrator
+session and the usual CSRF header, accepts no credentials from the browser, and
+is disabled in demo mode. The existing per-integration collection lease excludes
+simultaneous diagnostics and collection. A completed check restores the prior
+collection status, error and last-success time; it does not turn an older failed
+collection into a successful one.
+
+The diagnostic revalidates the saved configuration and restricted secret
+reference, then uses the existing GET-only collector with verified HTTPS and
+bounded pagination, response sizes and deadlines. The adapter's 60-second limit
+and the endpoint's outer 90-second limit also apply to diagnostics. It does not
+test arbitrary URLs or follow provider redirects.
+
+Completed reports use HTTP 200, including reports that diagnose a failure. The
+response contains `checked_at`, `duration_ms`, fixed stage `checks`, a
+`capabilities` list, explicit `evidence_gaps`, and optional `snapshot_counts`.
+Authentication/CSRF denials use 401/403, missing integrations use 404, and demo
+mode or an already-busy integration uses 409. No provider bodies, source device
+names, browsing domains, API keys or raw exception messages appear in a report.
+The audit records the outcome, fixed failure categories and counts only.
+
+Each check separates configuration, server credential availability, connectivity,
+TLS, provider authentication and response-contract parsing. A received HTTPS
+401/403 response verifies a transport exchange but reports failed provider
+authentication. A connection failure without a typed TLS cause leaves TLS
+unknown. DNS resolution and routing are not presented as independently verified
+tests. HTTP 200 alone does not establish accepted credentials or valid data.
+
+Capabilities report adapter implementation separately from this diagnostic's
+verification. `verified` means the relevant bounded source data passed the
+implemented parser; `unknown` means it was not established; `unavailable` covers
+explicitly disabled logging or features that are not implemented. The overall
+`outcome` is `verified` when the supported reads complete, `partial` when some
+reads succeed but coverage is incomplete, and `failed` when no supported read is
+verified. This is not a security score or an assertion of complete network
+posture. Counts are returned only after a complete in-memory snapshot exists;
+failed partial collections return `snapshot_counts: null`.
+
+NextDNS upstream identity remains unverified, absent policy sections remain
+unknown, and source-disabled logging is shown explicitly. An empty log query
+does not prove an absence of blocked connections. UniFi discovery with no visible
+sites verifies only discovery, since inventory endpoints were not exercised.
+Configured UniFi policies never stand in for observed firewall events or proven
+end-to-end reachability. The current adapter has no firewall-event receiver.
+
+Diagnostics are a synchronous, ephemeral check. They do not add scheduled work,
+persist a diagnostic report, change provider configuration, or grant access.
 
 ## Collection and schema lifecycle
 

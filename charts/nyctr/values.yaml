@@ -1,0 +1,101 @@
+# Defaults intentionally cannot install until image, identity and live settings
+# are explicit. This chart creates no credentials, database server or TLS issuer.
+mode: live
+replicaCount: 1
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/homelab-0/nyctr
+  # Set exactly one. No implicit appVersion/latest image is selected.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Live mode requires an HTTPS origin with no path, query or trailing slash.
+publicUrl: ""
+# Exact proxy IPs as observed by the pod, not hostnames, CIDRs or '*'.
+forwardedAllowIps: []
+sessionHours: 12
+blockRetentionHours: 24
+
+database:
+  # Existing Secret in this namespace containing a postgresql+psycopg:// URL.
+  existingSecret: ""
+  urlKey: database-url
+
+auth:
+  local:
+    enabled: true
+    # Set only after a local administrator exists in this database, when removing
+    # bootstrap credentials. This does not create or reset any account.
+    existingAccount: false
+    bootstrap:
+      existingSecret: ""
+      emailKey: bootstrap-email
+      passwordKey: bootstrap-password
+  oidc:
+    enabled: false
+    issuer: ""
+    clientId: ""
+    existingSecret: ""
+    clientSecretKey: client-secret
+    adminGroups: []
+    # Empty permits any valid identity from the issuer; set an explicit list for
+    # a restricted workspace. Admin groups are also allowed by the application.
+    allowedGroups: []
+    groupsClaim: groups
+
+connectors:
+  hosts: []
+  # Each entry contains envName, existingSecret and key. Example envName:
+  # NYCTR_CONNECTOR_SECRET_UNIFI. Values are never placed in Helm values.
+  secrets: []
+  caBundle:
+    existingSecret: ""
+    key: ca-bundle.crt
+
+demo:
+  allowKnownCredentials: false
+  # Optional isolated demo only. Data is lost when the pod is replaced.
+  # Leave false with database.existingSecret to test external PostgreSQL.
+  ephemeralDatabase: false
+
+service:
+  port: 8080
+serviceAccount:
+  annotations: {}
+podAnnotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Existing TLS Secret; the chart does not provision certificates.
+  tlsSecretName: ""
+
+httpRoute:
+  enabled: false
+  annotations: {}
+  # Existing Gateway HTTPS listener(s). sectionName is mandatory to avoid
+  # inadvertently attaching to an HTTP listener. TLS is managed by the Gateway.
+  parentRefs: []
+  requestTimeout: 100s
+
+networkPolicy:
+  # Ingress only. Egress rules remain an operator responsibility.
+  enabled: true
+  # Explicit proxy namespace/pod selectors or ipBlock entries. Empty denies
+  # incoming pod traffic; live mode requires a list when this policy is enabled.
+  ingressFrom: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+nodeSelector: {}
+tolerations: []

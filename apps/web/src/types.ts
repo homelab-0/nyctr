@@ -62,6 +62,37 @@ export interface Integration {
   secret_ref: string;
   capabilities: string[];
 }
+/** One bounded connection check; a passed check is not a network posture assessment. */
+export interface IntegrationDiagnosticCheck {
+  id: string;
+  label: string;
+  status: 'passed' | 'failed' | 'unknown' | 'unavailable';
+  category: string;
+  summary: string;
+  guidance: string | null;
+}
+/** Separates adapter implementation from evidence actually verified by this diagnostic run. */
+export interface IntegrationDiagnosticCapability {
+  id: string;
+  label: string;
+  implementation: 'implemented' | 'not_implemented';
+  verification: 'verified' | 'unavailable' | 'unknown';
+  summary: string;
+}
+/** Sanitized, transient results of an explicit administrator probe; no snapshot is imported. */
+export interface IntegrationDiagnosticsReport {
+  integration_id: string;
+  provider: string;
+  checked_at: string;
+  duration_ms: number;
+  outcome: 'verified' | 'partial' | 'failed';
+  summary: string;
+  read_only: true;
+  checks: IntegrationDiagnosticCheck[];
+  capabilities: IntegrationDiagnosticCapability[];
+  evidence_gaps: { id: string; title: string; summary: string }[];
+  snapshot_counts: { resources: number; relationships: number; observations: number } | null;
+}
 export interface Block {
   id: string;
   device_id: string | null;

@@ -16,6 +16,21 @@ proposal describing the user problem, available evidence, and supported APIs.
 Do not include private network inventories, real browsing history, passwords,
 API tokens or exported authentication sessions in reports, screenshots or fixtures.
 
+## Packaged application testing
+
+Use the [independent Docker acceptance guide](docs/testing/cloudex.md) for a fresh
+installation, browser workflows, connector diagnostics against local HTTPS
+fixtures, and restart persistence. This suite needs no access to a homelab,
+production provider, or identity provider. Record the exact tested commit and
+which scenarios actually ran.
+
+Changes to the Helm chart should run `python -m pytest tests/deployment -q` with
+Helm available. CI checks Helm 3 and 4, installs the chart in a disposable kind
+cluster, and exercises PostgreSQL persistence. The container jobs run natively
+on AMD64 and ARM64; the provider acceptance job uses an internal Docker network.
+Release metadata checks run with `python -m pytest tests/release -q`. Creating a
+pull request does not publish an image or deploy the application.
+
 ## Integration contributions
 
 Adapters normalize provider data into the shared resource, relationship and

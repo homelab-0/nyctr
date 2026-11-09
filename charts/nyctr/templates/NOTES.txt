@@ -1,0 +1,28 @@
+Nyctr is an alpha. This chart creates no provider write operations or background workers.
+
+{{- if eq .Values.mode "demo" }}
+
+DEMO MODE: known synthetic credentials are enabled. Never expose this service publicly.
+For local access only:
+  kubectl -n {{ .Release.Namespace }} port-forward --address 127.0.0.1 service/{{ include "nyctr.fullname" . }} {{ (urlParse .Values.publicUrl).host | splitList ":" | last }}:{{ .Values.service.port }}
+Open {{ .Values.publicUrl }}. The demo accounts are documented in the repository README.
+{{- if .Values.demo.ephemeralDatabase }}
+The demo database is ephemeral and is lost when the pod is replaced.
+{{- else }}
+The referenced PostgreSQL database must be dedicated to this demo, never a live database.
+{{- end }}
+{{- else }}
+
+Live-mode configuration targets {{ .Values.publicUrl }}.
+Verify TLS, proxy header normalization, actual proxy peer IPs and network restrictions.
+Secret values and external PostgreSQL connectivity are not validated by Helm rendering.
+{{- if .Values.httpRoute.enabled }}
+Verify the HTTPRoute Accepted/ResolvedRefs conditions and the parent Gateway's HTTPS listener.
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+Chart NetworkPolicy is disabled; enforce proxy-only access using your existing network controls.
+{{- end }}
+{{- end }}
+
+The selected image must already exist in the registry or be loaded for the isolated test.
+Run only one application replica. Upgrades intentionally use Recreate and may interrupt service.

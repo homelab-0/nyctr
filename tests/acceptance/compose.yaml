@@ -1,0 +1,113 @@
+# Disposable acceptance environment only. Never use these credentials or this CA in a deployment.
+x-application-image: &application-image
+  image: nyctr:acceptance
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+
+services:
+  certificates:
+    <<: *application-image
+    user: "0:0"
+    command: [python, /acceptance/create_certs.py, --directory, /acceptance-certs]
+    volumes:
+      - ./create_certs.py:/acceptance/create_certs.py:ro
+      - test-certificates:/acceptance-certs
+    networks: [isolated]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  fixture:
+    <<: *application-image
+    command: [python, /acceptance/fixture.py, --cert-directory, /acceptance-certs]
+    volumes:
+      - ./fixture.py:/acceptance/fixture.py:ro
+      - test-certificates:/acceptance-certs:ro
+    depends_on:
+      certificates:
+        condition: service_completed_successfully
+    networks:
+      isolated:
+        aliases:
+          - fixture
+          - api.nextdns.io
+          - untrusted-fixture
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import ssl,urllib.request; c=ssl.create_default_context(cafile='/acceptance-certs/combined-ca.pem'); urllib.request.urlopen('https://fixture/healthz', context=c, timeout=3)"
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  nyctr:
+    <<: *application-image
+    ports:
+      - "127.0.0.1:${NYCTR_ACCEPTANCE_PORT:-8091}:8080"
+    environment:
+      NYCTR_MODE: live
+      NYCTR_DATABASE_URL: postgresql+psycopg://nyctr_acceptance:nyctr-acceptance-db-only@database:5432/nyctr_acceptance
+      NYCTR_PUBLIC_URL: "http://localhost:${NYCTR_ACCEPTANCE_PORT:-8091}"
+      # HTTP is limited to the loopback-only acceptance UI, never a live deployment.
+      NYCTR_COOKIE_SECURE: "false"
+      NYCTR_BOOTSTRAP_ADMIN_EMAIL: tester@nyctr.test
+      NYCTR_BOOTSTRAP_ADMIN_PASSWORD: nyctr-acceptance-only
+      NYCTR_CONNECTOR_HOSTS: fixture,untrusted-fixture
+      NYCTR_CONNECTOR_CA_BUNDLE: /acceptance-certs/combined-ca.pem
+      NYCTR_CONNECTOR_SECRET_ACCEPTANCE: fake-readonly
+      NYCTR_CONNECTOR_SECRET_REJECTED: fake-rejected
+    volumes:
+      - test-certificates:/acceptance-certs:ro
+    depends_on:
+      database:
+        condition: service_healthy
+      fixture:
+        condition: service_healthy
+    networks: [isolated]
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      start_period: 10s
+      retries: 30
+    restart: unless-stopped
+
+  database:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: nyctr_acceptance
+      POSTGRES_USER: nyctr_acceptance
+      POSTGRES_PASSWORD: nyctr-acceptance-db-only
+    volumes:
+      - acceptance-data:/var/lib/postgresql/data
+    networks: [isolated]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U nyctr_acceptance -d nyctr_acceptance"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+networks:
+  isolated:
+    internal: true
+
+volumes:
+  acceptance-data:
+  test-certificates:

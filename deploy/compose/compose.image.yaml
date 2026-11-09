@@ -1,0 +1,5 @@
+# Overlay after compose.yaml (and the production overlay, when applicable).
+# Pass --no-build so Compose uses this exact image instead of rebuilding source.
+services:
+  nyctr:
+    image: ${NYCTR_IMAGE:?Set a published image digest or an explicitly built local image}

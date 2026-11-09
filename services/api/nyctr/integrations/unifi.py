@@ -43,6 +43,12 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                 raise IntegrationError("The configured site is not visible to this UniFi API key.")
         if len(sites) > 16:
             raise IntegrationError("More than 16 sites are visible; configure a specific site_id.")
+        # Validate the site namespace before calling discovery a verified capability.
+        for site in sites:
+            source_id(site.get("id"))
+        core.record_capability("sites:read")
+        if not sites:
+            core.record_gap("unifi_no_visible_sites")
         for site in sites:
             sid = source_id(site.get("id"))
             site_resource = resource(integration_id, PROVIDER, "site", sid, site.get("name", sid), now)
@@ -130,4 +136,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                     ))
     snapshot.resources = list({node["id"]: node for node in snapshot.resources}.values())
     snapshot.relationships = list({edge["id"]: edge for edge in snapshot.relationships}.values())
+    if sites:
+        for capability in ("devices:read", "networks:read", "clients:read", "firewall_policies:read"):
+            core.record_capability(capability)
     return snapshot

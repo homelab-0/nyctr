@@ -17,6 +17,27 @@ Kubernetes, inject these using your secret management system rather than storing
 them in Git. Secret rotation takes effect when the running process receives the
 updated environment; restart the deployment after environment-secret changes.
 
+## Connection diagnostics
+
+On a saved live-mode integration, **Run diagnostics** performs the same bounded
+GET-only reads used by collection and reports configuration, credential,
+transport/TLS, response-contract and capability evidence. It does not import
+resources or observations, refresh the collection timestamp, or change the
+previous collection-health outcome. An audit entry records the sanitized check
+result. A collection or another diagnostic already in progress returns a busy
+response rather than starting overlapping work.
+
+The capability table separates what an adapter implements from what this check
+actually verified. For example, no visible UniFi sites leaves per-site reads
+unverified, and a NextDNS profile with logging disabled cannot provide a verified
+blocked-query stream. A passed check is not an end-to-end traffic test or a
+destination safety decision. Use **Collect snapshot** separately to import data.
+
+For independent acceptance testing, use [local HTTPS fixtures](../tests/acceptance/README.md).
+They exercise the real connector transport with synthetic endpoints and retain
+certificate verification. They require no access to actual provider accounts or
+the maintainer's network.
+
 ## UniFi Network
 
 The initial adapter targets the supplied **UniFi Network API 11.0.97** contract:
