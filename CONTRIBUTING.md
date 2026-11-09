@@ -36,6 +36,9 @@ layout. Implement loading, empty and failure states. Keep dangerous or unavailab
 actions out of ambiguous success flows. Graph functionality must support pan,
 zoom, focus and inspection without accidental text selection.
 
+Run `npm --prefix apps/web run format` before submitting frontend changes.
+CI checks the formatting with `format:check` alongside the TypeScript build.
+
 ## Review expectations
 
 Authorization, identity attribution, retention, risk explanation and provider

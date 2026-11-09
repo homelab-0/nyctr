@@ -1,0 +1,164 @@
+"""OIDC authorization-code + PKCE flow with server-stored, browser-bound state.
+
+Issuer discovery is configuration-controlled. Identity comes from verified issuer
+and subject, never by linking an untrusted email to an existing administrator.
+"""
+
+import base64
+import hashlib
+import hmac
+import secrets
+from datetime import timedelta
+from urllib.parse import urlencode, urlsplit
+
+import httpx
+from authlib.oidc.core import CodeIDToken
+from fastapi import APIRouter, HTTPException, Request
+from joserfc import jwt
+from joserfc.jwk import KeySet
+from sqlalchemy import delete, select
+from starlette.responses import RedirectResponse
+
+from .models import OIDCFlow, User, utc, utcnow
+from .security import COOKIE_NAME, digest, issue_session
+
+router = APIRouter(prefix="/api/auth/oidc")
+FLOW_COOKIE = "nyctr_oidc"
+ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA")
+
+
+def secure_endpoint(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
+        raise ValueError("Invalid identity-provider endpoint")
+    return value
+
+
+async def discovery(client, settings):
+    url = settings.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration"
+    response = await client.get(url)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("issuer") != settings.oidc_issuer:
+        raise ValueError("Identity-provider issuer mismatch")
+    for key in ["authorization_endpoint", "token_endpoint", "jwks_uri"]:
+        secure_endpoint(data[key])
+    if "S256" not in data.get("code_challenge_methods_supported", ["S256"]):
+        raise ValueError("Identity provider does not support S256 PKCE")
+    return data
+
+
+def validate_id_token(token: dict, jwks: dict, settings, nonce: str):
+    decoded = jwt.decode(token["id_token"], KeySet.import_key_set(jwks), algorithms=ALGORITHMS)
+    claims = CodeIDToken(decoded.claims, decoded.header,
+                         options={"iss": {"essential": True, "value": settings.oidc_issuer},
+                                  "aud": {"essential": True, "value": settings.oidc_client_id}},
+                         params={"client_id": settings.oidc_client_id, "nonce": nonce,
+                                 "access_token": token.get("access_token")})
+    claims.validate(leeway=30)
+    # Explicit equality remains deliberate even if the upstream library changes.
+    if not isinstance(claims.get("nonce"), str) or not hmac.compare_digest(claims["nonce"], nonce):
+        raise ValueError("Invalid nonce")
+    if not isinstance(claims.get("sub"), str) or not claims["sub"] or len(claims["sub"]) > 255:
+        raise ValueError("Invalid subject")
+    return claims
+
+
+def roles_for_claims(claims, settings):
+    raw = claims.get(settings.oidc_groups_claim, [])
+    groups = set(raw) if isinstance(raw, list) and all(isinstance(x, str) for x in raw) else set()
+    if settings.allowed_groups and not groups.intersection(settings.allowed_groups | settings.admin_groups):
+        raise HTTPException(403, "Your identity-provider group does not have access to Nyctr")
+    return "admin" if groups.intersection(settings.admin_groups) else "member"
+
+
+@router.get("/login")
+async def login(request: Request):
+    settings = request.app.state.settings
+    if not settings.oidc_enabled:
+        raise HTTPException(404, "OIDC is not configured")
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False,
+                                     transport=getattr(request.app.state, "oidc_transport", None)) as client:
+            metadata = await discovery(client, settings)
+    except Exception:
+        raise HTTPException(502, "Unable to load identity-provider configuration") from None
+    state, binding = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    nonce, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
+    with request.app.state.session_factory() as db:
+        db.execute(delete(OIDCFlow).where(OIDCFlow.expires_at <= utcnow()))
+        db.add(OIDCFlow(state_hash=digest(state), binding_hash=digest(binding), nonce=nonce,
+                        code_verifier=verifier, expires_at=utcnow() + timedelta(minutes=10)))
+        db.commit()
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    url = metadata["authorization_endpoint"]
+    url += ("&" if "?" in url else "?") + urlencode({
+        "response_type": "code", "client_id": settings.oidc_client_id,
+        "redirect_uri": settings.public_url + "/api/auth/oidc/callback",
+        "scope": "openid profile email", "state": state, "nonce": nonce,
+        "code_challenge": challenge, "code_challenge_method": "S256",
+    })
+    response = RedirectResponse(url, status_code=302)
+    response.set_cookie(FLOW_COOKIE, binding, httponly=True, secure=settings.cookie_secure,
+                        samesite="lax", max_age=600, path="/api/auth/oidc")
+    return response
+
+
+@router.get("/callback")
+async def callback(request: Request, state: str = "", code: str = ""):
+    settings = request.app.state.settings
+    if not settings.oidc_enabled:
+        raise HTTPException(404, "OIDC is not configured")
+    if not state or not code or len(state) > 256 or len(code) > 8192:
+        raise HTTPException(400, "Invalid sign-in response")
+    with request.app.state.session_factory() as db:
+        flow = db.get(OIDCFlow, digest(state))
+        binding = request.cookies.get(FLOW_COOKIE, "")
+        if (not flow or utc(flow.expires_at) <= utcnow() or not binding
+                or not hmac.compare_digest(flow.binding_hash, digest(binding))):
+            raise HTTPException(400, "Sign-in expired or state was invalid. Start again.")
+        nonce, verifier = flow.nonce, flow.code_verifier
+        # Atomic consume prevents simultaneous code replay across API replicas.
+        deleted = db.execute(delete(OIDCFlow).where(OIDCFlow.state_hash == digest(state)))
+        if deleted.rowcount != 1:
+            raise HTTPException(400, "Sign-in response was already used")
+        db.commit()
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False,
+                                         transport=getattr(request.app.state, "oidc_transport", None)) as client:
+                metadata = await discovery(client, settings)
+                methods = metadata.get("token_endpoint_auth_methods_supported", ["client_secret_basic"])
+                data = {"grant_type": "authorization_code", "code": code, "code_verifier": verifier,
+                        "redirect_uri": settings.public_url + "/api/auth/oidc/callback"}
+                if "client_secret_basic" in methods:
+                    auth = httpx.BasicAuth(settings.oidc_client_id, settings.oidc_client_secret)
+                elif "client_secret_post" in methods:
+                    auth = None
+                    data.update(client_id=settings.oidc_client_id, client_secret=settings.oidc_client_secret)
+                else:
+                    raise ValueError("Unsupported token endpoint authentication")
+                exchanged = await client.post(metadata["token_endpoint"], data=data, auth=auth)
+                exchanged.raise_for_status()
+                keys = await client.get(metadata["jwks_uri"])
+                keys.raise_for_status()
+                claims = validate_id_token(exchanged.json(), keys.json(), settings, nonce)
+        except Exception:
+            raise HTTPException(401, "Identity-provider response could not be verified") from None
+        role = roles_for_claims(claims, settings)
+        user = db.scalar(select(User).where(User.oidc_issuer == settings.oidc_issuer,
+                                            User.oidc_subject == claims["sub"]))
+        email = str(claims.get("email", claims["sub"]))[:320]
+        name = str(claims.get("name") or claims.get("preferred_username") or email)[:160]
+        if not user:
+            user = User(oidc_issuer=settings.oidc_issuer, oidc_subject=claims["sub"],
+                        email=email, name=name, role=role)
+            db.add(user)
+            db.flush()
+        elif not user.active:
+            raise HTTPException(403, "This account is disabled")
+        else:
+            user.role, user.email, user.name = role, email, name
+        response = RedirectResponse("/#/overview" if role == "admin" else "/#/portal", status_code=302)
+        response.delete_cookie(FLOW_COOKIE, path="/api/auth/oidc")
+        issue_session(db, user, response, settings, request.cookies.get(COOKIE_NAME, ""))
+        return response

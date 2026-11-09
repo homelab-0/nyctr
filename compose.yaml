@@ -1,0 +1,40 @@
+# Local evaluation only. Live deployment uses deploy/compose/compose.production.yaml.
+name: nyctr
+services:
+  nyctr:
+    build:
+      context: .
+    image: nyctr:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${NYCTR_PORT:-8080}:8080"
+    environment:
+      NYCTR_MODE: demo
+      NYCTR_DATABASE_URL: postgresql+psycopg://nyctr:nyctr-local-demo@database:5432/nyctr
+      NYCTR_PUBLIC_URL: http://localhost:${NYCTR_PORT:-8080}
+      NYCTR_COOKIE_SECURE: "false"
+    depends_on:
+      database:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+  database:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nyctr
+      POSTGRES_USER: nyctr
+      POSTGRES_PASSWORD: nyctr-local-demo
+    volumes:
+      - demo-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U nyctr -d nyctr"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+volumes:
+  demo-data:
