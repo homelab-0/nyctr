@@ -9,8 +9,8 @@ proposal describing the user problem, available evidence, and supported APIs.
 1. Fork or create a feature branch from `main`.
 2. Follow the README development setup and use synthetic demo data.
 3. Make one coherent change, including its documentation and relevant tests.
-4. Run the backend tests and frontend build. Exercise the container if packaging
-   changes. Include actual results and any limitations in your pull request.
+4. Run the backend tests, frontend tests, and frontend build. Exercise the container
+   if packaging changes. Include actual results and any limitations in your pull request.
 5. Open a pull request describing the problem, behavior, and verification.
 
 Do not include private network inventories, real browsing history, passwords,
@@ -37,7 +37,8 @@ actions out of ambiguous success flows. Graph functionality must support pan,
 zoom, focus and inspection without accidental text selection.
 
 Run `npm --prefix apps/web run format` before submitting frontend changes.
-CI checks the formatting with `format:check` alongside the TypeScript build.
+Run `npm --prefix apps/web test` for the frontend regression suite. CI checks
+formatting with `format:check` alongside the tests and TypeScript build.
 
 ## Review expectations
 

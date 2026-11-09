@@ -29,6 +29,7 @@ import {
   Success,
 } from '../components/ui';
 
+/** Collects user intent for one observed block; submission records a request, never an exception. */
 function RequestForm({
   block,
   onClose,
@@ -42,6 +43,7 @@ function RequestForm({
   const [duration, setDuration] = useState(60);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Persists the reason and requested duration after the API rechecks ownership and freshness. */
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setPending(true);
@@ -115,6 +117,11 @@ function RequestForm({
   );
 }
 
+/**
+ * Presents the API-authorized observation inbox for administrators or members.
+ * Local expiry keeps an open screen current; the server owns identity checks and
+ * request eligibility. Expiry hides inbox entries without deleting request history.
+ */
 export default function Blocks({ traffic = false }: { traffic?: boolean }) {
   const { user } = useAuth();
   const member = user?.role === 'member';
@@ -124,6 +131,7 @@ export default function Blocks({ traffic = false }: { traffic?: boolean }) {
   const [request, setRequest] = useState<Block | null>(null);
   const [saved, setSaved] = useState(false);
   const [now, setNow] = useState(Date.now());
+  /** Advances the display clock so observations stop appearing requestable while this view stays open. */
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 30000);
     return () => window.clearInterval(interval);

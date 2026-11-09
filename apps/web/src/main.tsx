@@ -4,11 +4,14 @@ import App from './App';
 import { AuthProvider } from './auth';
 import './styles.css';
 
+/** Replaces a failed client render with recovery guidance without deleting server-owned records. */
 class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
   state = { failed: false };
+  /** Switches to the recovery screen without exposing exception text or network evidence. */
   static getDerivedStateFromError() {
     return { failed: true };
   }
+  /** Keeps normal children mounted until a render error requires a full workspace reload. */
   render() {
     if (this.state.failed)
       return (

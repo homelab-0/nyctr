@@ -10,6 +10,11 @@ CURRENT_SCHEMA_VERSION = 1
 
 
 def make_engine(database_url: str):
+    """Create a pooled database engine with SQLite settings suitable for API tests.
+
+    In-memory SQLite shares a connection across test threads; every SQLite
+    connection enables foreign-key enforcement.
+    """
     kwargs = {"pool_pre_ping": True}
     if database_url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
@@ -19,11 +24,17 @@ def make_engine(database_url: str):
     if engine.dialect.name == "sqlite":
         @event.listens_for(engine, "connect")
         def foreign_keys(connection, _record):
+            """Enable SQLite referential-integrity checks whenever a connection is opened."""
             connection.execute("PRAGMA foreign_keys=ON")
     return engine
 
 
 def migrate(engine):
+    """Initialize schema version 1 in an empty database or validate its existing version.
+
+    PostgreSQL advisory locking serializes initialization across replicas. Unknown
+    schemas and unsupported versions raise RuntimeError instead of being altered.
+    """
     with engine.begin() as connection:
         if engine.dialect.name == "postgresql":
             # Serialize initial schema creation across API replicas.
@@ -40,4 +51,5 @@ def migrate(engine):
 
 
 def session_factory(engine):
+    """Build request-scoped sessions whose loaded values remain usable after commit."""
     return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)

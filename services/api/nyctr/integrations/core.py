@@ -32,6 +32,7 @@ class IntegrationError(Exception):
 
 @dataclass
 class Snapshot:
+    """Normalized evidence returned only after a provider collection succeeds."""
     resources: list[dict[str, Any]] = field(default_factory=list)
     relationships: list[dict[str, Any]] = field(default_factory=list)
     blocks: list[dict[str, Any]] = field(default_factory=list)
@@ -39,20 +40,28 @@ class Snapshot:
 
 
 def utc_now() -> datetime:
+    """Return an aware UTC collection time, replaceable in deterministic tests."""
     return datetime.now(UTC)
 
 
 def iso(value: datetime) -> str:
+    """Serialize a timestamp in UTC for the adapter snapshot contract."""
     return value.astimezone(UTC).isoformat()
 
 
 def source_id(value: Any) -> str:
+    """Validate a bounded source identifier without altering its original value."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,255}", value):
         raise IntegrationError("The provider returned an invalid resource identifier.")
     return value
 
 
 def object_id(integration_id: str, kind: str, value: Any) -> str:
+    """Namespace a source ID while remaining within the database identifier limit.
+
+    Hash overlong source IDs in a disjoint format so shared prefixes remain
+    distinguishable; the original identifier is retained separately as evidence.
+    """
     namespace = source_id(integration_id)
     remote_id = source_id(value)
     if len(namespace) > 128 or not re.fullmatch(r"[a-z_]{1,40}", kind):
@@ -80,6 +89,7 @@ def resource(
     evidence_kind: str = "configured",
     attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build an unowned resource with bounded identity and explicit source evidence."""
     return {
         "id": object_id(integration_id, kind, remote_id),
         "name": str(name)[:255],
@@ -106,6 +116,7 @@ def relationship(
     evidence_kind: str = "configured",
     attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build a stable typed evidence link without asserting network reachability."""
     fingerprint = hashlib.sha256(f"{source}|{kind}|{target}".encode()).hexdigest()[:32]
     return {
         "id": f"{integration_id}:relation:{fingerprint}",
@@ -125,6 +136,11 @@ def selected(row: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
 
 
 def validate_unifi_url(value: Any) -> str:
+    """Require a documented HTTPS base path and an explicitly allowed console host.
+
+    Reject credential-bearing URLs, unexpected paths, and forbidden literal
+    addresses before any API key can be sent to the destination.
+    """
     if not isinstance(value, str) or len(value) > 2048:
         raise IntegrationError("UniFi requires an HTTPS integration base URL.")
     try:
@@ -175,6 +191,7 @@ def validate_unifi_url(value: Any) -> str:
 
 
 def make_http_client(api_key: str) -> httpx.AsyncClient:
+    """Create a verified-TLS client that never redirects or inherits proxy settings."""
     if not isinstance(api_key, str) or not api_key or any(c in api_key for c in "\r\n"):
         raise IntegrationError("The configured API key is missing or invalid.")
     ca_bundle = os.getenv("NYCTR_CONNECTOR_CA_BUNDLE")
@@ -196,17 +213,24 @@ class ReadClient:
     """GET-only, same-origin requests; external pagination URLs are never followed."""
 
     def __init__(self, client: httpx.AsyncClient, base_url: str):
+        """Bind a validated provider origin to per-collection request and record budgets."""
         self.client = client
         self.base_url = base_url.rstrip("/")
         self.requests = 0
         self.records = 0
 
     def count_records(self, count: int) -> None:
+        """Charge returned rows against the shared collection budget or fail closed."""
         self.records += count
         if self.records > MAX_RECORDS:
             raise IntegrationError("Collection exceeded its record budget; narrow the integration scope.")
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Read a local provider path with bounded size and sanitized failures.
+
+        Reject redirects and provider-level errors even when HTTP reports success;
+        never include response contents or credentials in public exceptions.
+        """
         if not path.startswith("/") or path.startswith("//") or any(x in path for x in ("?", "#", "\\", "..")):
             raise IntegrationError("Invalid connector request path.")
         self.requests += 1
@@ -244,6 +268,7 @@ class ReadClient:
 
 
 def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Require a bounded list of JSON objects before pagination imports any rows."""
     rows = payload.get("data")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise IntegrationError("Provider returned an invalid list response.")
@@ -253,6 +278,7 @@ def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def offset_pages(client: ReadClient, path: str) -> list[dict[str, Any]]:
+    """Read bounded UniFi pages, rejecting repeats or inconsistent source totals."""
     results: list[dict[str, Any]] = []
     offset = 0
     seen: set[str] = set()
@@ -284,6 +310,7 @@ async def offset_pages(client: ReadClient, path: str) -> list[dict[str, Any]]:
 
 
 async def cursor_pages(client: ReadClient, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read bounded NextDNS pages with cursors used only as query values."""
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     query = dict(params)

@@ -16,10 +16,12 @@ import '@xyflow/react/dist/style.css';
 import type { Graph, Resource } from '../types';
 import { label } from '../api';
 import { kindIcon } from './ui';
+import { indexGraph, layoutGraph } from './graph-layout';
 
 type ResourceNodeData = { resource: Resource; emphasized: boolean; [key: string]: unknown };
 type ResourceFlowNode = Node<ResourceNodeData, 'resource'>;
-const ResourceNode = memo(({ data, selected }: NodeProps<ResourceFlowNode>) => {
+/** Keeps evidence provenance and missing-snapshot status visible on each selectable resource. */
+const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<ResourceFlowNode>) {
   const resource = data.resource;
   const Icon = kindIcon(resource.kind);
   const historical = resource.attributes.missing_from_latest_snapshot === true;
@@ -47,56 +49,13 @@ const ResourceNode = memo(({ data, selected }: NodeProps<ResourceFlowNode>) => {
   );
 });
 const nodeTypes = { resource: ResourceNode };
-const kindRanks: Record<string, number> = {
-  site: 0,
-  gateway: 1,
-  switch: 2,
-  access_point: 3,
-  network: 3,
-  host: 4,
-  client: 4,
-  workload: 5,
-  policy: 5,
-  dns_profile: 5,
-  domain: 6,
-};
+const EMPTY_EMPHASIZED_IDS: readonly string[] = [];
 
-function layout(graph: Graph, focus?: string) {
-  const ranks = new Map<string, number>();
-  if (focus && graph.nodes.some((n) => n.id === focus)) {
-    ranks.set(focus, 0);
-    const queue = [focus];
-    while (queue.length) {
-      const id = queue.shift()!;
-      for (const edge of graph.edges) {
-        const next = edge.source === id ? edge.target : edge.target === id ? edge.source : null;
-        if (next && !ranks.has(next)) {
-          ranks.set(next, ranks.get(id)! + 1);
-          queue.push(next);
-        }
-      }
-    }
-  }
-  const groups = new Map<number, Resource[]>();
-  for (const resource of graph.nodes) {
-    const rank = ranks.get(resource.id) ?? kindRanks[resource.kind] ?? 4;
-    groups.set(rank, [...(groups.get(rank) || []), resource]);
-  }
-  const positions = new Map<string, { x: number; y: number }>();
-  const columns = [...groups.keys()].sort((a, b) => a - b);
-  const maxHeight = Math.max(1, ...[...groups.values()].map((items) => items.length));
-  columns.forEach((rank, column) => {
-    const items = groups.get(rank)!.sort((a, b) => a.name.localeCompare(b.name));
-    items.forEach((resource, row) =>
-      positions.set(resource.id, {
-        x: column * 300,
-        y: row * 128 + (maxHeight - items.length) * 64,
-      }),
-    );
-  });
-  return positions;
-}
-
+/**
+ * Renders an evidence-aware graph with canvas panning, selection, and focus drill-down.
+ * Selection updates do not recompute topology or layout. Missing endpoints are
+ * omitted from rendering; inferred relationships retain their distinct styling.
+ */
 export function NetworkGraph({
   graph,
   selectedId,
@@ -105,7 +64,7 @@ export function NetworkGraph({
   onSelectEdge,
   onFocus,
   focus,
-  emphasizedIds = [],
+  emphasizedIds = EMPTY_EMPHASIZED_IDS,
   compact = false,
 }: {
   graph: Graph;
@@ -115,30 +74,28 @@ export function NetworkGraph({
   onSelectEdge?: (id: string) => void;
   onFocus?: (resource: Resource) => void;
   focus?: string;
-  emphasizedIds?: string[];
+  emphasizedIds?: readonly string[];
   compact?: boolean;
 }) {
+  const index = useMemo(() => indexGraph(graph), [graph]);
+  const positions = useMemo(() => layoutGraph(graph, focus, index), [graph, focus, index]);
+  const emphasized = useMemo(() => new Set(emphasizedIds), [emphasizedIds]);
   const nodes: ResourceFlowNode[] = useMemo(() => {
-    const positions = layout(graph, focus);
     return graph.nodes.map((resource) => ({
       id: resource.id,
       type: 'resource',
       position: positions.get(resource.id)!,
-      data: { resource, emphasized: emphasizedIds.includes(resource.id) },
+      data: { resource, emphasized: emphasized.has(resource.id) },
       selected: selectedId === resource.id,
       draggable: false,
       connectable: false,
       ariaLabel: `${resource.name}, ${label(resource.kind)}, ${label(resource.evidence_kind)} evidence`,
     }));
-  }, [graph, focus, selectedId, emphasizedIds]);
+  }, [graph.nodes, positions, selectedId, emphasized]);
   const edges: Edge[] = useMemo(
     () =>
       graph.edges
-        .filter(
-          (edge) =>
-            graph.nodes.some((n) => n.id === edge.source) &&
-            graph.nodes.some((n) => n.id === edge.target),
-        )
+        .filter((edge) => index.nodeIds.has(edge.source) && index.nodeIds.has(edge.target))
         .map((edge) => ({
           id: edge.id,
           source: edge.source,
@@ -169,7 +126,7 @@ export function NetworkGraph({
           labelBgPadding: [7, 4],
           labelBgBorderRadius: 4,
         })),
-    [graph, selectedEdge],
+    [graph.edges, index, selectedEdge],
   );
   return (
     <div

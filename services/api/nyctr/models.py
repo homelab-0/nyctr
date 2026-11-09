@@ -13,34 +13,41 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def uid() -> str:
+    """Generate a random UUID string for application-owned records."""
     return str(uuid4())
 
 
 def utcnow() -> datetime:
+    """Return the current timezone-aware UTC timestamp for persistence and expiry checks."""
     return datetime.now(UTC)
 
 
 def utc(value: datetime) -> datetime:
+    """Normalize timestamps to UTC, interpreting timezone-naive database values as UTC."""
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class Base(DeclarativeBase):
+    """Declarative base shared by the versioned Nyctr database schema."""
     pass
 
 
 class SchemaVersion(Base):
+    """Record which explicit schema migration has been applied to the database."""
     __tablename__ = "schema_versions"
     version: Mapped[int] = mapped_column(Integer, primary_key=True)
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Workspace(Base):
+    """Bind the database to demo or live mode so sample identities cannot become live accounts."""
     __tablename__ = "workspace"
     id: Mapped[str] = mapped_column(String(20), primary_key=True, default="default")
     mode: Mapped[str] = mapped_column(String(10))
 
 
 class User(Base):
+    """Store a local or issuer-and-subject identity with its current authorization role."""
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     email: Mapped[str] = mapped_column(String(320), index=True)
@@ -54,6 +61,7 @@ class User(Base):
 
 
 class LoginSession(Base):
+    """Store a revocable session-token hash, CSRF secret, user binding, and absolute expiry."""
     __tablename__ = "login_sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
@@ -63,6 +71,7 @@ class LoginSession(Base):
 
 
 class LoginAttempt(Base):
+    """Maintain an atomic account or peer login quota until its fixed window resets."""
     __tablename__ = "login_attempts"
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     count: Mapped[int] = mapped_column(Integer, default=0)
@@ -70,6 +79,7 @@ class LoginAttempt(Base):
 
 
 class OIDCFlow(Base):
+    """Bind a short-lived sign-in flow to browser state, nonce, and PKCE verifier."""
     __tablename__ = "oidc_flows"
     state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     binding_hash: Mapped[str] = mapped_column(String(64))
@@ -79,6 +89,7 @@ class OIDCFlow(Base):
 
 
 class Integration(Base):
+    """Persist connector configuration and collection state without storing its credential."""
     __tablename__ = "integrations"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     provider: Mapped[str] = mapped_column(String(40))
@@ -93,6 +104,7 @@ class Integration(Base):
 
 
 class Resource(Base):
+    """Represent integration-namespaced inventory and its evidence, classification, and owner."""
     __tablename__ = "resources"
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     integration_id: Mapped[str] = mapped_column(ForeignKey("integrations.id"), index=True)
@@ -109,6 +121,7 @@ class Resource(Base):
 
 
 class Relationship(Base):
+    """Store a typed evidence-bearing relationship without implying successful reachability."""
     __tablename__ = "relationships"
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     integration_id: Mapped[str] = mapped_column(ForeignKey("integrations.id"), index=True)
@@ -122,6 +135,11 @@ class Relationship(Base):
 
 
 class DeviceGrant(Base):
+    """Authorize a user for a device over a half-open time interval.
+
+    A null end time represents a current grant; historical grants support
+    event-time authorization without backdating a new assignment.
+    """
     __tablename__ = "device_grants"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     device_id: Mapped[str] = mapped_column(ForeignKey("resources.id"), index=True)
@@ -131,6 +149,7 @@ class DeviceGrant(Base):
 
 
 class Observation(Base):
+    """Retain a block event until inbox expiry, with explicit attribution and unknown risk support."""
     __tablename__ = "observations"
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     integration_id: Mapped[str] = mapped_column(ForeignKey("integrations.id"), index=True)
@@ -148,6 +167,7 @@ class Observation(Base):
 
 
 class Finding(Base):
+    """Store a reviewable issue linked to resources, relationships, and supporting evidence."""
     __tablename__ = "findings"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     title: Mapped[str] = mapped_column(String(255))
@@ -160,6 +180,11 @@ class Finding(Base):
 
 
 class AccessRequest(Base):
+    """Retain a user request and event snapshot independently of observation cleanup.
+
+    The user/event uniqueness constraint makes repeat submissions idempotent.
+    Review status records an internal decision and never authorizes execution.
+    """
     __tablename__ = "access_requests"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     block_id: Mapped[str] = mapped_column(String(255))
@@ -176,6 +201,7 @@ class AccessRequest(Base):
 
 
 class Audit(Base):
+    """Record an application action and sanitized metadata for administrator review."""
     __tablename__ = "audit"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

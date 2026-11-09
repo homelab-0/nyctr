@@ -5,6 +5,11 @@ import { useApi } from '../api';
 import type { AuthConfig } from '../types';
 import { Badge, Brand, ErrorState, Field, InlineError, Loading } from '../components/ui';
 
+/**
+ * Displays only authentication methods enabled by the server's public configuration.
+ * Known demo identities are offered exclusively in demo mode; passwords remain in
+ * form state and are sent only to the session endpoint.
+ */
 export default function SignIn() {
   const { login, error: sessionError } = useAuth();
   const config = useApi<AuthConfig>('/auth/config');
@@ -12,6 +17,7 @@ export default function SignIn() {
   const [password, setPassword] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Coordinates a single sign-in attempt and exposes its failure without logging credentials. */
   const signIn = async (username: string, secret: string) => {
     setPending(true);
     setError(null);
@@ -23,6 +29,7 @@ export default function SignIn() {
       setPending(false);
     }
   };
+  /** Prevents browser form navigation and passes local credentials to the shared login flow. */
   const submit = (event: FormEvent) => {
     event.preventDefault();
     void signIn(email, password);

@@ -15,10 +15,16 @@ _CAPABILITIES = {
 
 
 def capabilities_for(provider: str) -> list[str]:
+    """Return a fresh list of implemented read capabilities for a provider."""
     return list(_CAPABILITIES.get(provider, []))
 
 
 def validate_config(provider: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Validate supported keys and normalize configuration before credentials are used.
+
+    Reject unsupported providers, unapproved UniFi destinations, and unbounded
+    NextDNS lookbacks with errors safe to return to an administrator.
+    """
     if not isinstance(config, dict):
         raise IntegrationError("Integration configuration must be an object.")
     if provider == "unifi_network":
@@ -45,6 +51,11 @@ def validate_config(provider: str, config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def collect(provider: str, integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
+    """Collect a complete read-only snapshot within one bounded operation.
+
+    Validate configuration before dispatch and convert the overall timeout into
+    a sanitized provider error; callers must discard failed partial collections.
+    """
     clean = validate_config(provider, config)
     try:
         async with asyncio.timeout(60):

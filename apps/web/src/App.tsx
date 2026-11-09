@@ -94,9 +94,11 @@ const memberNavigation: NavGroup[] = [
   },
 ];
 
+/** Tracks hash navigation and query parameters without sending client route state to the server. */
 function useRoute() {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
+    /** Mirrors browser back/forward navigation into React's current route. */
     const change = () => setHash(window.location.hash);
     window.addEventListener('hashchange', change);
     return () => window.removeEventListener('hashchange', change);
@@ -107,6 +109,10 @@ function useRoute() {
   }, [hash]);
 }
 
+/**
+ * Selects the view for a session's role and route. This is a navigation convenience;
+ * each API endpoint independently authorizes the requested resources and actions.
+ */
 function Content({
   page,
   params,
@@ -168,6 +174,10 @@ function Content({
   }
 }
 
+/**
+ * Provides the authenticated workspace shell and a narrower member navigation.
+ * Keeps demo/read-only capabilities visible and preserves server errors on sign-out.
+ */
 export default function App() {
   const { user, loading, logout } = useAuth();
   const route = useRoute();
@@ -186,14 +196,17 @@ export default function App() {
     (member ? 'Recent blocks' : 'Workspace');
   const group =
     navigation.find((n) => n.items.some((item) => item.id === page))?.title || 'Workspace';
+  /** Resets view-local navigation affordances when the route or its query changes. */
   useEffect(() => {
     setNavOpen(false);
     document.title = `${title} · Nyctr`;
     document.getElementById('main-content')?.scrollTo(0, 0);
   }, [page, title, route.params.toString()]);
+  /** Confines keyboard focus to the open mobile drawer while the main content is inert. */
   useEffect(() => {
     if (!navOpen) return;
     sidebar.current?.querySelector<HTMLElement>('a')?.focus();
+    /** Cycles drawer focus with Tab and returns focus to its trigger on Escape. */
     const handle = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setNavOpen(false);
@@ -224,6 +237,7 @@ export default function App() {
       </div>
     );
   if (!user) return <SignIn />;
+  /** Displays genuine revocation failures while AuthProvider handles success or session expiry. */
   const signOut = async () => {
     setLoggingOut(true);
     setLogoutError(null);

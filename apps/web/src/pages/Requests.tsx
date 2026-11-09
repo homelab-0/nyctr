@@ -18,6 +18,7 @@ import {
   Success,
 } from '../components/ui';
 
+/** Captures an administrator's internal review decision without presenting it as network access. */
 function Review({
   request,
   onClose,
@@ -31,6 +32,7 @@ function Review({
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  /** Saves a reviewed/denied decision and note through the API's administrator and audit boundary. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setPending(true);
@@ -103,6 +105,11 @@ function Review({
   );
 }
 
+/**
+ * Shows durable request history independently of the expiring observation inbox.
+ * The API scopes member results; administrator review controls are presentation
+ * conveniences and cannot bypass server authorization.
+ */
 export default function Requests() {
   const result = useApi<AccessRequest[]>('/requests');
   const { user } = useAuth();

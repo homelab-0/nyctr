@@ -117,7 +117,8 @@ live mode when run directly; the quick-start Compose file explicitly selects
 demo mode. Live mode never creates the demonstration accounts or sample topology.
 
 1. Copy `.env.production.example` to `.env.production` and set the database
-   password, initial administrator credentials, and public HTTPS URL.
+   password, initial administrator credentials, public HTTPS URL, and the actual
+   reverse-proxy peer addresses in `FORWARDED_ALLOW_IPS`.
 2. Place Nyctr behind your HTTPS ingress or reverse proxy.
 3. Start the production Compose override:
 
@@ -200,6 +201,7 @@ http://localhost:8000/api/docs during development.
 
 ```sh
 python -m pytest services/api/tests
+npm --prefix apps/web test
 npm --prefix apps/web run build
 docker build -t nyctr:dev .
 ```

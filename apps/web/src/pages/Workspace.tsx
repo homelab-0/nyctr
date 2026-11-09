@@ -26,6 +26,7 @@ import {
   SearchInput,
 } from '../components/ui';
 
+/** Presents server-recorded audit events and sanitized details without claiming immutable retention. */
 export function Activity() {
   const result = useApi<AuditEvent[]>('/audit');
   const [search, setSearch] = useState('');
@@ -102,6 +103,7 @@ export function Activity() {
   );
 }
 
+/** Documents the planned model boundary without accepting keys or implying an active AI connection. */
 export function AIProvider() {
   return (
     <>
@@ -161,6 +163,7 @@ export function AIProvider() {
   );
 }
 
+/** Explains the future approval/execution lifecycle while keeping infrastructure writes unavailable. */
 export function Changes() {
   return (
     <>
@@ -203,6 +206,10 @@ export function Changes() {
   );
 }
 
+/**
+ * Displays current session/authentication settings and the implemented capability boundary.
+ * The members variant explains roles; it is not an account or device-assignment editor.
+ */
 export function Settings({ members = false }: { members?: boolean }) {
   const { user } = useAuth();
   const config = useApi<{ mode: string; local_enabled: boolean; oidc_enabled: boolean }>(

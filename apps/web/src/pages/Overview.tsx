@@ -30,6 +30,10 @@ import {
 import { NetworkGraph } from '../components/NetworkGraph';
 import { useAuth } from '../auth';
 
+/**
+ * Summarizes independently loaded server evidence, collection health, and pending reviews.
+ * Failed sections remain explicit instead of converting unavailable data into a clean posture.
+ */
 export default function Overview() {
   const { user } = useAuth();
   const summary = useApi<OverviewData>('/overview');

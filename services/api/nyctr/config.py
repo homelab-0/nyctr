@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Operational configuration loaded from NYCTR_ environment variables.
+
+    Secrets stay server-side; invalid configuration suppresses input values in errors.
+    """
     model_config = SettingsConfigDict(env_prefix="NYCTR_", extra="ignore", hide_input_in_errors=True)
 
     mode: Literal["demo", "live"] = "live"
@@ -29,6 +33,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_settings(self):
+        """Normalize the public origin and reject unsafe or incomplete configuration.
+
+        Raises ValueError for invalid lifetimes, non-HTTPS OIDC issuers, partial OIDC
+        credentials, or combining demo data with live identity-provider access.
+        """
         self.public_url = self.public_url.rstrip("/")
         parsed = urlsplit(self.public_url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.path:
@@ -56,12 +65,15 @@ class Settings(BaseSettings):
 
     @property
     def oidc_enabled(self) -> bool:
+        """Report whether a complete OIDC configuration passed settings validation."""
         return bool(self.oidc_issuer)
 
     @property
     def admin_groups(self) -> set[str]:
+        """Return exact configured identity-provider group names that grant administration."""
         return {x.strip() for x in self.oidc_admin_groups.split(",") if x.strip()}
 
     @property
     def allowed_groups(self) -> set[str]:
+        """Return the optional sign-in group allowlist; an empty set adds no group restriction."""
         return {x.strip() for x in self.oidc_allowed_groups.split(",") if x.strip()}

@@ -26,6 +26,11 @@ import {
 } from '../components/ui';
 import { NetworkGraph } from '../components/NetworkGraph';
 
+/**
+ * Explores the full snapshot, a server-bounded neighborhood, or a finding's evidence.
+ * Resource/relationship inspectors retain provenance and collection age; connectivity
+ * in this view does not assert a successful end-to-end traffic path.
+ */
 export default function Explorer({ params }: { params: URLSearchParams }) {
   const focus = params.get('focus') || undefined;
   const findingId = params.get('finding');
@@ -45,6 +50,7 @@ export default function Explorer({ params }: { params: URLSearchParams }) {
     setSearch('');
   }, [focus, findingId]);
   const finding = findings.data?.find((f) => f.id === findingId);
+  /** Includes finding-linked edges and their endpoints without inventing missing resources. */
   const graph = useMemo(() => {
     if (!result.data) return null;
     if (!finding || focus) return result.data;
@@ -70,6 +76,7 @@ export default function Explorer({ params }: { params: URLSearchParams }) {
         )
         .slice(0, 7)
     : [];
+  /** Opens a one-hop neighborhood while retaining any active finding context in the route. */
   const goFocus = (resource: Resource) => {
     window.location.hash = `/explorer?focus=${encodeURIComponent(resource.id)}&depth=1${findingId ? `&finding=${encodeURIComponent(findingId)}` : ''}`;
   };

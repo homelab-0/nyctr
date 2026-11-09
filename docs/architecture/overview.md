@@ -3,11 +3,15 @@
 ## Product scope
 
 Nyctr connects network inventory, policy configuration, observed behavior and
-identity to explain posture and access. The workspace includes topology,
-relationship exploration, findings, port posture, DNS/firewall investigations,
-member requests, integration health, AI analysis and controlled remediation.
-The initial implementation deliberately establishes the data and authorization
-boundaries before adding write-capable automation.
+identity to explain posture and access. The current alpha workspace includes
+read-only inventory and configured-policy collection, relationship exploration,
+resource and finding views, recent DNS observations, member access requests,
+integration health, and audited administrator review. Demo findings illustrate
+the investigation flow; the live collectors do not yet generate posture findings.
+
+Port posture, firewall-event investigations, automated risk evaluation, AI
+analysis, and controlled remediation are planned capabilities. The initial
+implementation establishes the data and authorization boundaries for that work.
 
 ## Initial runtime
 

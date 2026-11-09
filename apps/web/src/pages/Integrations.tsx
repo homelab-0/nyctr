@@ -82,6 +82,11 @@ const catalog: {
   },
 ];
 
+/**
+ * Collects configuration for implemented read-only providers and a server secret reference.
+ * The form never requests the provider key itself; the API validates endpoint and
+ * credential-reference restrictions and rejects live connections in demo mode.
+ */
 function AddIntegration({
   provider,
   onClose,
@@ -101,6 +106,7 @@ function AddIntegration({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const demo = user?.mode === 'demo';
+  /** Persists connection metadata, leaving source collection to a separate explicit action. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError(null);
@@ -216,6 +222,7 @@ function AddIntegration({
   );
 }
 
+/** Lists source health and capabilities while keeping planned providers distinct from live adapters. */
 export default function Integrations() {
   const result = useApi<Integration[]>('/integrations');
   const [add, setAdd] = useState<string | null>(null);
@@ -223,6 +230,10 @@ export default function Integrations() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const { user } = useAuth();
+  /**
+   * Requests a read-only snapshot and reloads source health after success or failure.
+   * Counts come from the server response; a failed collection is never displayed as success.
+   */
   const sync = async (integration: Integration) => {
     setPending(integration.id);
     setError(null);

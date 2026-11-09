@@ -25,6 +25,7 @@ import { label } from '../api';
 export type IconComponent = ComponentType<
   SVGProps<SVGSVGElement> & { size?: number; strokeWidth?: number }
 >;
+/** Maps normalized resource kinds to icons, including a fallback for newly supported providers. */
 export const kindIcon = (kind: string): IconComponent =>
   ({
     site: Globe2,
@@ -40,6 +41,7 @@ export const kindIcon = (kind: string): IconComponent =>
     policy: Shield,
   })[kind] || HardDrive;
 
+/** Renders the shared wordmark; the adjacent text supplies the decorative image's accessible name. */
 export function Brand({ small = false }: { small?: boolean }) {
   return (
     <span className={`brand ${small ? 'small' : ''}`}>
@@ -48,9 +50,11 @@ export function Brand({ small = false }: { small?: boolean }) {
     </span>
   );
 }
+/** Adds a consistent visual label; tone is presentation and never an authorization decision. */
 export function Badge({ children, tone = '' }: { children: ReactNode; tone?: string }) {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
+/** Colors a reported status without inferring that a reviewed request grants network access. */
 export function Status({ value }: { value: string }) {
   const tone = /high|denied|failed|error|blocked/.test(value)
     ? 'red'
@@ -61,6 +65,7 @@ export function Status({ value }: { value: string }) {
         : 'blue';
   return <Badge tone={tone}>{label(value)}</Badge>;
 }
+/** Keeps observed, configured, and inferred source provenance visually distinct. */
 export function EvidenceBadge({ kind }: { kind: string }) {
   return (
     <Badge tone={kind === 'observed' ? 'green' : kind === 'configured' ? 'blue' : 'amber'}>
@@ -68,6 +73,7 @@ export function EvidenceBadge({ kind }: { kind: string }) {
     </Badge>
   );
 }
+/** Supplies a view's heading, explanatory scope, and optional contextual actions. */
 export function PageHeader({
   eyebrow,
   title,
@@ -90,6 +96,7 @@ export function PageHeader({
     </header>
   );
 }
+/** Groups related view content with an optional semantic heading and its associated action. */
 export function Card({
   title,
   action,
@@ -113,6 +120,7 @@ export function Card({
     </section>
   );
 }
+/** Explains why a result set is empty and optionally provides a relevant recovery action. */
 export function Empty({
   title,
   text,
@@ -135,6 +143,7 @@ export function Empty({
     </div>
   );
 }
+/** Announces an in-progress read through a live status region. */
 export function Loading({ text = 'Loading your workspace…' }: { text?: string }) {
   return (
     <div className="loading" role="status">
@@ -143,6 +152,7 @@ export function Loading({ text = 'Loading your workspace…' }: { text?: string 
     </div>
   );
 }
+/** Announces a failed view load and offers retry only when the caller can repeat the read. */
 export function ErrorState({ message, retry }: { message: string; retry?: () => void }) {
   return (
     <div className="error-state" role="alert">
@@ -159,6 +169,7 @@ export function ErrorState({ message, retry }: { message: string; retry?: () => 
     </div>
   );
 }
+/** Keeps evidence limitations and capability boundaries alongside the affected UI. */
 export function Notice({ children, tone = 'blue' }: { children: ReactNode; tone?: string }) {
   return (
     <div className={`notice ${tone}`}>
@@ -167,6 +178,7 @@ export function Notice({ children, tone = 'blue' }: { children: ReactNode; tone?
     </div>
   );
 }
+/** Announces form failures without reserving an empty alert when there is no error. */
 export function InlineError({ message }: { message: string | null }) {
   return message ? (
     <div className="inline-error" role="alert">
@@ -175,6 +187,7 @@ export function InlineError({ message }: { message: string | null }) {
     </div>
   ) : null;
 }
+/** Announces the specific completed operation supplied by the caller through a status region. */
 export function Success({ children }: { children: ReactNode }) {
   return (
     <div className="success" role="status">
@@ -183,6 +196,7 @@ export function Success({ children }: { children: ReactNode }) {
     </div>
   );
 }
+/** Pairs a server-derived count with a caption that preserves its measurement scope. */
 export function Metric({
   label: text,
   value,
@@ -205,6 +219,7 @@ export function Metric({
     </div>
   );
 }
+/** Styles navigation as an action while preserving anchor keyboard and browser behavior. */
 export function LinkButton({
   href,
   children,
@@ -221,6 +236,7 @@ export function LinkButton({
     </a>
   );
 }
+/** Associates a wrapped form control with its visible label and optional explanatory hint. */
 export function Field({
   label: text,
   hint,
@@ -238,6 +254,7 @@ export function Field({
     </label>
   );
 }
+/** Exposes a controlled local filter with an accessible label independent of placeholder text. */
 export function SearchInput({
   value,
   onChange,
@@ -260,6 +277,11 @@ export function SearchInput({
     </label>
   );
 }
+/**
+ * Uses a native modal dialog for focus containment and background interaction blocking.
+ * Escape and genuine backdrop clicks delegate closure to the owner; a ref keeps
+ * the latest callback available without reopening the dialog on each render.
+ */
 export function Modal({
   title,
   children,
@@ -276,6 +298,7 @@ export function Modal({
     const element = dialog.current;
     if (!element) return;
     element.showModal();
+    /** Lets the owner remove dialog state instead of leaving an implicitly closed mounted modal. */
     const onCancel = (event: Event) => {
       event.preventDefault();
       closeRef.current();
@@ -314,6 +337,7 @@ export function Modal({
     </dialog>
   );
 }
+/** Preserves a route back to the full graph when the explorer is focused on one resource. */
 export function Breadcrumb({ current }: { current: string }) {
   return (
     <div className="breadcrumb">

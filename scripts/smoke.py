@@ -16,13 +16,22 @@ STATE = Path(os.environ.get("NYCTR_SMOKE_STATE", "/tmp/nyctr-smoke-state.json"))
 
 
 class Client:
+    """Keep one smoke-test identity's cookies and CSRF state isolated."""
+
     def __init__(self):
+        """Create a fresh browser-like cookie jar without an authenticated session."""
         self.http = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
         )
         self.csrf = None
 
     def request(self, path, data=None, *, expected=200, csrf=True):
+        """Send a same-origin request and assert its expected HTTP outcome.
+
+        JSON bodies select POST; requests without a body use GET. The caller may
+        omit CSRF deliberately to exercise denial paths. Both HTTP errors and
+        successful responses are decoded only after checking the status.
+        """
         headers = {"Accept": "application/json", "Origin": ORIGIN}
         if self.csrf and csrf:
             headers["X-CSRF-Token"] = self.csrf
@@ -44,6 +53,7 @@ class Client:
         return body.decode()
 
     def login(self, email):
+        """Authenticate a demo identity and retain its server-issued CSRF token."""
         self.request("/api/auth/login", {"email": email, "password": "nyctr-demo"})
         me = self.request("/api/auth/me")
         self.csrf = me["csrf_token"]
@@ -51,6 +61,11 @@ class Client:
 
 
 def wait_for_app():
+    """Wait up to 90 seconds for a healthy response across startup or restart.
+
+    Retry transient connection failures and unhealthy HTTP responses. Raise if
+    the deadline expires so a broken deployment cannot pass the smoke check.
+    """
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         try:
@@ -62,6 +77,12 @@ def wait_for_app():
 
 
 def run(verify_persistence):
+    """Exercise the packaged demo's HTTP, authorization, and durable-data boundaries.
+
+    The first run records a request ID for the restart check. Persistence mode
+    opens a new authenticated session and requires that same request to remain
+    visible. Refuse live mode before submitting any demonstration credentials.
+    """
     wait_for_app()
     anonymous = Client()
     config = anonymous.request("/api/auth/config")

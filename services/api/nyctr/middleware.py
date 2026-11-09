@@ -4,11 +4,18 @@ from starlette.responses import JSONResponse
 
 
 class RequestBodyLimit:
+    """Bound API mutation bodies before parsing, including requests without Content-Length."""
     def __init__(self, app, max_body_size: int = 32768):
+        """Configure the wrapped ASGI application and maximum buffered body size in bytes."""
         self.app = app
         self.max_body_size = max_body_size
 
     async def __call__(self, scope, receive, send):
+        """Buffer permitted API request bodies and reject excess bytes with HTTP 413.
+
+        Non-mutation traffic passes through unchanged. A client disconnect ends
+        processing; accepted bodies are replayed once to the downstream application.
+        """
         if (scope["type"] != "http" or not scope.get("path", "").startswith("/api/")
                 or scope.get("method") not in {"POST", "PUT", "PATCH", "DELETE"}):
             await self.app(scope, receive, send)
@@ -32,6 +39,7 @@ class RequestBodyLimit:
         consumed = False
 
         async def replay():
+            """Deliver the bounded buffered body once, then resume the original ASGI receive stream."""
             nonlocal consumed
             if not consumed:
                 consumed = True

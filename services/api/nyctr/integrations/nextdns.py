@@ -19,6 +19,7 @@ API_BASE = "https://api.nextdns.io"
 
 
 def _timestamp(value: Any) -> datetime:
+    """Require a timezone-aware source timestamp and normalize it without refreshing it."""
     if not isinstance(value, str):
         raise IntegrationError("NextDNS returned an observation without a timestamp.")
     try:
@@ -31,6 +32,7 @@ def _timestamp(value: Any) -> datetime:
 
 
 def _domain(value: Any) -> str:
+    """Normalize a bounded source DNS name to lowercase ASCII without accepting a URL."""
     if not isinstance(value, str) or len(value) > 253 or not value:
         raise IntegrationError("NextDNS returned a missing or invalid domain.")
     try:
@@ -45,6 +47,12 @@ def _domain(value: Any) -> str:
 
 
 async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
+    """Collect profile controls and recent blocks without assigning users or risk.
+
+    Preserve source timestamps and reasons, report disabled logging explicitly,
+    and keep reported device labels unverified. Every imported block remains
+    without a trusted device ID until a separate attribution layer establishes it.
+    """
     from . import capabilities_for
 
     snapshot = Snapshot(capabilities=capabilities_for(PROVIDER))

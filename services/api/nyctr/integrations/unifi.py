@@ -24,6 +24,12 @@ PROVIDER = "unifi_network"
 
 
 async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
+    """Collect source-backed inventory and configured firewall-policy relationships.
+
+    Use explicit uplink and zone references rather than inferring connectivity
+    from addresses. Policy associations never create observed firewall blocks
+    or claim a successful end-to-end path.
+    """
     from . import capabilities_for
 
     snapshot = Snapshot(capabilities=capabilities_for(PROVIDER))

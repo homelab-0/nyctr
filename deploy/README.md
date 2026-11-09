@@ -45,10 +45,46 @@ The first deployment either bootstraps a local administrator from environment
 or uses configured OIDC. Remove local bootstrap credential environment values
 after provisioning. They are not an account password-rotation interface.
 
-For a private console CA, mount the CA bundle read only and set
+For a private console CA, mount the CA bundle as read-only and set
 `NYCTR_CONNECTOR_CA_BUNDLE` in a local Compose override. The server must also
 explicitly allow the console's hostname through `NYCTR_CONNECTOR_HOSTS`.
 NextDNS uses its fixed official HTTPS origin.
+
+### Trusted reverse proxies and login limits
+
+Set `FORWARDED_ALLOW_IPS` to the comma-separated **actual proxy peer IP addresses
+seen by the application**. The production Compose override requires this value.
+It is a Uvicorn setting, so it has no `NYCTR_` prefix. For example, use
+`FORWARDED_ALLOW_IPS=10.42.0.10,10.42.0.11` only if those are your trusted proxies.
+Do not use `*`, a client network, or a shared container/cluster subnet. Docker
+port forwarding or ingress networking can change the peer address the container
+sees; confirm it from connection/access logs before configuring trust. Trust a
+NAT/bridge address only when network controls ensure that every connection from
+it must pass through your trusted proxy.
+
+Uvicorn uses `X-Forwarded-For` and `X-Forwarded-Proto` only from trusted peers to
+set the request's client address and scheme. Nyctr's login limiter uses that
+resolved client address, with a separate per-account quota. If the proxy is not
+trusted or does not forward the client address, all its users share the same
+60-attempt peer quota. See the official [Uvicorn proxy settings](https://uvicorn.dev/settings/#http)
+and [proxy deployment guidance](https://uvicorn.dev/deployment/#proxies-and-forwarded-headers).
+
+The public-facing proxy must **replace client-supplied forwarding headers** with
+values derived from its incoming connection. For a single Nginx proxy terminating
+HTTPS, the relevant directives are:
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+For multiple proxies, the public edge must first normalize untrusted headers;
+subsequent trusted hops may append their verified peer address. List each trusted
+hop explicitly. Keep direct application access restricted to those proxies using
+the loopback binding, firewall rules, or Kubernetes NetworkPolicy. Forwarding
+headers from other peers are ignored; permitting untrusted traffic to arrive
+under a trusted proxy/NAT address would defeat that protection. Retain the exact
+external `NYCTR_PUBLIC_URL` and secure cookies independently of this setting.
 
 ## Kubernetes / GitOps
 
@@ -59,6 +95,8 @@ Initial requirements:
 - A writable temporary mount and PostgreSQL accessible through a secret-backed
   `NYCTR_DATABASE_URL`.
 - `NYCTR_MODE=live`, HTTPS public URL, secure cookies and local bootstrap or OIDC.
+- `FORWARDED_ALLOW_IPS` set to the trusted ingress peer addresses, with forwarded
+  headers normalized and direct application access restricted as described above.
 - Provider credentials injected from Kubernetes Secrets/External Secrets; never
   bake tokens or API keys into the image.
 - Readiness/liveness probes on `/api/health` and network policy permitting only

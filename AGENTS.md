@@ -13,7 +13,7 @@ charcoal/blue Nyctr UI.
   generated databases or session tokens. Use fabricated fixtures.
 - Changes to authentication, member visibility, expiry or provider requests need
   meaningful tests covering denial paths.
-- Run `python -m pytest services/api/tests` and
+- Run `python -m pytest services/api/tests`, `npm --prefix apps/web test`, and
   `npm --prefix apps/web run build` for relevant changes. Container changes also
   require the Docker smoke workflow. Report any checks you cannot execute.
 

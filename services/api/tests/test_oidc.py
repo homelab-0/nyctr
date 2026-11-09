@@ -20,10 +20,12 @@ from nyctr.oidc import FLOW_COOKIE, roles_for_claims, validate_id_token
 
 @pytest.fixture(scope="module")
 def signing_key():
+    """Generate a test-only RSA signing key used to verify the real ID-token validation path."""
     return RSAKey.generate_key(2048, parameters={"kid": "test-key"})
 
 
 def oidc_settings(**kwargs):
+    """Build a live OIDC-only configuration with a fixed trusted issuer and explicit admin group."""
     return Settings(mode="live", database_url="sqlite:///:memory:", cookie_secure=False,
                     public_url="https://nyctr.example", local_login_enabled=False,
                     oidc_issuer="https://id.example/issuer/", oidc_client_id="nyctr",
@@ -31,11 +33,13 @@ def oidc_settings(**kwargs):
 
 
 def token_claims(**changes):
+    """Build currently valid OIDC claims while allowing one validation condition to be changed."""
     return {"iss": "https://id.example/issuer/", "aud": "nyctr", "sub": "subject-123",
             "exp": int(time.time()) + 300, "iat": int(time.time()), "nonce": "expected-nonce", **changes}
 
 
 def signed(claims, signing_key):
+    """Sign fabricated claims with the supplied test RSA key and expected key identifier."""
     return jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, signing_key)
 
 
@@ -44,12 +48,14 @@ def signed(claims, signing_key):
     {"nonce": None, "nonce_supported": False}, {"exp": 1}, {"sub": ""},
 ])
 def test_oidc_rejects_invalid_verified_claims(signing_key, changes):
+    """A valid signature cannot excuse wrong issuer, audience, nonce, expiry, or subject claims."""
     token = {"id_token": signed(token_claims(**changes), signing_key)}
     with pytest.raises((JoseError, ValueError)):
         validate_id_token(token, {"keys": [signing_key.as_dict()]}, oidc_settings(), "expected-nonce")
 
 
 def test_oidc_rejects_wrong_signature(signing_key):
+    """An attacker key with the same key identifier must fail signature verification."""
     attacker = RSAKey.generate_key(2048, parameters={"kid": "test-key"})
     token = {"id_token": signed(token_claims(), attacker)}
     with pytest.raises(JoseError):
@@ -57,6 +63,7 @@ def test_oidc_rejects_wrong_signature(signing_key):
 
 
 def test_oidc_groups_are_explicit_and_do_not_trust_role_claim():
+    """Only configured signed group values grant roles; role strings and malformed groups do not."""
     settings = oidc_settings()
     assert roles_for_claims({"role": "admin", "groups": "nyctr-admins"}, settings) == "member"
     assert roles_for_claims({"groups": ["nyctr-admins"]}, settings) == "admin"
@@ -66,11 +73,13 @@ def test_oidc_groups_are_explicit_and_do_not_trust_role_claim():
 
 
 def test_oidc_full_flow_binds_browser_state_pkce_identity_and_rejects_replay(signing_key):
+    """Exercise code exchange, PKCE, hashed browser state, subject identity, and one-time callback use."""
     settings = oidc_settings()
     app = create_app(settings)
     sent = {}
 
     def idp(request):
+        """Emulate discovery, JWKS, and token endpoints while asserting the code exchange and PKCE challenge."""
         if request.url.path.endswith("openid-configuration"):
             return httpx.Response(200, json={"issuer": settings.oidc_issuer,
                 "authorization_endpoint": "https://id.example/authorize", "token_endpoint": "https://id.example/token",
@@ -114,9 +123,11 @@ def test_oidc_full_flow_binds_browser_state_pkce_identity_and_rejects_replay(sig
 
 
 def test_oidc_callback_requires_browser_binding(signing_key):
+    """Possessing an authorization state alone must not authenticate a different browser."""
     settings = oidc_settings()
     app = create_app(settings)
     def idp(request):
+        """Supply only trusted provider discovery metadata for the browser-binding denial test."""
         return httpx.Response(200, json={"issuer": settings.oidc_issuer,
             "authorization_endpoint": "https://id.example/authorize", "token_endpoint": "https://id.example/token",
             "jwks_uri": "https://id.example/keys"})
@@ -130,6 +141,7 @@ def test_oidc_callback_requires_browser_binding(signing_key):
 
 
 def test_oidc_rejects_discovery_issuer_mismatch():
+    """Discovery metadata from an unexpected issuer must fail before a login flow is created."""
     app = create_app(oidc_settings())
     app.state.oidc_transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"issuer": "https://attacker.example"}))
     with TestClient(app) as client:

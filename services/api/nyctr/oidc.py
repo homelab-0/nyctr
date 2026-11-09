@@ -28,6 +28,10 @@ ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA")
 
 
 def secure_endpoint(value: str) -> str:
+    """Require a usable HTTPS identity-provider endpoint without credentials or a fragment.
+
+    Returns the original URL or raises ValueError before it can receive a request.
+    """
     parsed = urlsplit(value)
     if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
         raise ValueError("Invalid identity-provider endpoint")
@@ -35,6 +39,11 @@ def secure_endpoint(value: str) -> str:
 
 
 async def discovery(client, settings):
+    """Load the configured issuer metadata and validate its endpoint and PKCE contracts.
+
+    The returned issuer must exactly match configuration. Network, malformed
+    metadata, issuer mismatch, and unsupported S256 errors propagate to the caller.
+    """
     url = settings.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration"
     response = await client.get(url)
     response.raise_for_status()
@@ -49,6 +58,12 @@ async def discovery(client, settings):
 
 
 def validate_id_token(token: dict, jwks: dict, settings, nonce: str):
+    """Verify the ID-token signature and expected issuer, audience, subject, expiry, and nonce.
+
+    Only the configured asymmetric algorithm set is accepted. Claims validation
+    allows 30 seconds of clock skew; provider claims cannot disable nonce checks.
+    Cryptographic or claim failures raise before an application identity is created.
+    """
     decoded = jwt.decode(token["id_token"], KeySet.import_key_set(jwks), algorithms=ALGORITHMS)
     claims = CodeIDToken(decoded.claims, decoded.header,
                          options={"iss": {"essential": True, "value": settings.oidc_issuer},
@@ -65,6 +80,11 @@ def validate_id_token(token: dict, jwks: dict, settings, nonce: str):
 
 
 def roles_for_claims(claims, settings):
+    """Derive access and role solely from configured groups in already verified claims.
+
+    Malformed group values grant no privileges. Users outside an explicit
+    allowlist receive HTTP 403; only matching administrator groups grant admin.
+    """
     raw = claims.get(settings.oidc_groups_claim, [])
     groups = set(raw) if isinstance(raw, list) and all(isinstance(x, str) for x in raw) else set()
     if settings.allowed_groups and not groups.intersection(settings.allowed_groups | settings.admin_groups):
@@ -74,6 +94,12 @@ def roles_for_claims(claims, settings):
 
 @router.get("/login")
 async def login(request: Request):
+    """Begin a ten-minute OIDC code flow with S256 PKCE and a browser-bound cookie.
+
+    Persists hashed state and binding plus nonce and verifier, prunes expired
+    flows, and redirects to the validated provider. Disabled OIDC returns 404;
+    discovery failures return a sanitized 502 response.
+    """
     settings = request.app.state.settings
     if not settings.oidc_enabled:
         raise HTTPException(404, "OIDC is not configured")
@@ -106,6 +132,13 @@ async def login(request: Request):
 
 @router.get("/callback")
 async def callback(request: Request, state: str = "", code: str = ""):
+    """Consume a valid browser-bound flow and exchange its code for a verified identity.
+
+    State is atomically consumed before token exchange to prevent replay.
+    Accounts bind to issuer and subject, never email; current trusted groups
+    determine the role. Success rotates the application session and redirects
+    to the appropriate workspace without retaining provider tokens.
+    """
     settings = request.app.state.settings
     if not settings.oidc_enabled:
         raise HTTPException(404, "OIDC is not configured")

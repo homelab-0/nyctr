@@ -15,6 +15,11 @@ import {
   kindIcon,
 } from '../components/ui';
 
+/**
+ * Presents authorized inventory, configured policies, or a member's assigned devices.
+ * Member data comes from the scoped devices endpoint, not a client-filtered full
+ * inventory. Historical resources keep their missing-snapshot status visible.
+ */
 export default function Resources({
   member = false,
   policies = false,
@@ -26,6 +31,7 @@ export default function Resources({
   const [search, setSearch] = useState('');
   const [kind, setKind] = useState('all');
   const [selected, setSelected] = useState<Resource | null>(null);
+  /** Applies display filters only within the resource set already authorized by the API. */
   const data = useMemo(
     () =>
       (result.data || []).filter(

@@ -13,6 +13,11 @@ import {
   Status,
 } from '../components/ui';
 
+/**
+ * Displays supplied findings and their evidence, with links into the focused explorer.
+ * Empty results are not a safety assessment; this view neither generates findings
+ * nor authorizes changes to the resources they describe.
+ */
 export default function Findings({
   params,
   investigations = false,

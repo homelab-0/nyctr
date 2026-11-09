@@ -20,6 +20,12 @@ from .security import hash_password
 
 
 def bootstrap(db, settings: Settings):
+    """Enforce database mode and initialize demo data or a configured local administrator.
+
+    PostgreSQL advisory locking serializes bootstrap. Existing credentials are
+    preserved. Mode mismatch, weak bootstrap passwords, or an unusable live
+    authentication configuration raise RuntimeError before serving requests.
+    """
     if db.bind.dialect.name == "postgresql":
         db.execute(text("SELECT pg_advisory_xact_lock(73912802)"))
     workspace = db.get(Workspace, "default")
@@ -47,6 +53,12 @@ def bootstrap(db, settings: Settings):
 
 
 def seed_demo(db):
+    """Stage synthetic identities, topology, findings, grants, and varied block observations.
+
+    Call only from explicit demo bootstrap. Fresh and stale events plus personal,
+    shared, infrastructure, and unattributed devices exercise privacy boundaries;
+    unknown risk remains null. The caller owns the final transaction commit.
+    """
     now = utcnow()
     password = hash_password("nyctr-demo")
     for id_, name, email, role in [
