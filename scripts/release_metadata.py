@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -32,6 +33,30 @@ def release_metadata(tag: str, repository: str, revision: str) -> dict[str, str]
         "commit_tag": image + ":sha-" + revision,
         "revision": revision,
     }
+
+
+def verify_git_tag(tag: str, revision: str, root: Path) -> None:
+    """Require a validated local tag to peel to the exact expected commit.
+
+    Resolve only refs/tags/<tag>^{commit}, including annotated tags, without shell
+    interpolation or network access. Missing, non-commit, or moved tags raise
+    ValueError before the caller emits any publication metadata.
+    """
+    if len(tag) > 100 or not re.fullmatch(VERSION_PATTERN, tag):
+        raise ValueError("Cannot verify an unsupported release tag")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Tag verification requires a full lowercase Git commit SHA")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--end-of-options", f"refs/tags/{tag}^{{commit}}"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("Cannot resolve the release tag from the source checkout") from None
+    if result.returncode != 0:
+        raise ValueError("Release tag is missing or does not reference a commit")
+    if result.stdout.strip() != revision:
+        raise ValueError("Release tag does not resolve to the expected commit")
 
 
 def _read_json(root: Path, relative_path: str) -> dict:
@@ -111,10 +136,14 @@ def main() -> None:
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1],
                         help="Source checkout to validate; defaults to this script's repository")
+    parser.add_argument("--verify-git-tag", action="store_true",
+                        help="Require the local release tag to resolve to the exact revision before emitting metadata")
     args = parser.parse_args()
     try:
         metadata = release_metadata(args.tag, args.repository, args.revision)
         validate_source_versions(metadata["version"], args.source_root)
+        if args.verify_git_tag:
+            verify_git_tag(args.tag, args.revision, args.source_root)
     except ValueError as error:
         parser.error(str(error))
     if args.github_output:

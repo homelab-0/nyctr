@@ -171,3 +171,89 @@ def test_cli_default_source_root_is_the_script_checkout_not_the_current_director
                             cwd=tmp_path, capture_output=True, text=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["version"] == version
+
+
+def git(root, *args):
+    """Run local Git fixture commands without hooks, signing, or changes to operator configuration."""
+    result = subprocess.run(["git", "-C", str(root), "-c", "user.name=Nyctr release tests",
+                             "-c", "user.email=release-tests@example.test", "-c", "commit.gpgsign=false",
+                             "-c", "tag.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                            capture_output=True, text=True, check=True, timeout=10)
+    return result.stdout.strip()
+
+
+@pytest.fixture
+def git_source(tmp_path):
+    """Create a real disposable Git repository with consistent synthetic application versions."""
+    root = source_tree(tmp_path)
+    git(root, "init", "--quiet", "--initial-branch=main", "--object-format=sha1")
+    git(root, "add", "--all")
+    git(root, "commit", "--quiet", "-m", "Synthetic release source")
+    return root, git(root, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_git_guard_accepts_matching_lightweight_and_annotated_tags(git_source, annotated):
+    """Peel both tag types to their commit rather than comparing an annotated tag's object ID."""
+    root, revision = git_source
+    args = ["-a", "-m", "Synthetic release tag"] if annotated else []
+    git(root, "tag", *args, "v0.1.0-alpha.1")
+    MODULE.verify_git_tag("v0.1.0-alpha.1", revision, root)
+
+
+def test_git_guard_rejects_a_tag_moved_to_another_commit(git_source):
+    """A tag retargeted after the expected source revision was chosen must not authorize publication."""
+    root, revision = git_source
+    git(root, "tag", "v0.1.0-alpha.1")
+    git(root, "commit", "--quiet", "--allow-empty", "-m", "Subsequent synthetic source")
+    git(root, "tag", "--force", "v0.1.0-alpha.1")
+    with pytest.raises(ValueError, match="does not resolve to the expected commit"):
+        MODULE.verify_git_tag("v0.1.0-alpha.1", revision, root)
+
+
+@pytest.mark.parametrize("target", ["missing", "tree"])
+def test_git_guard_requires_a_tag_reference_to_a_commit(git_source, target):
+    """Reject a same-named branch or a tree tag instead of accepting ambiguous or non-commit refs."""
+    root, revision = git_source
+    if target == "missing":
+        git(root, "branch", "v0.1.0-alpha.1")
+    else:
+        git(root, "tag", "v0.1.0-alpha.1", git(root, "rev-parse", "HEAD^{tree}"))
+    with pytest.raises(ValueError, match="missing or does not reference a commit"):
+        MODULE.verify_git_tag("v0.1.0-alpha.1", revision, root)
+
+
+@pytest.mark.parametrize("tag,revision", [("--help", REVISION), ("v0.1.0-alpha.1\nHEAD", REVISION),
+                                        ("v0.1.0-alpha.1", "main")])
+def test_git_guard_validates_identifiers_before_invoking_git(tmp_path, monkeypatch, tag, revision):
+    """Malformed identifiers must fail validation without reaching the subprocess boundary."""
+    def unexpected_git(*args, **kwargs):
+        """Fail if an invalid tag or revision is allowed to reach Git."""
+        pytest.fail("Git was invoked before identifier validation")
+
+    monkeypatch.setattr(MODULE.subprocess, "run", unexpected_git)
+    with pytest.raises(ValueError):
+        MODULE.verify_git_tag(tag, revision, tmp_path)
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_cli_git_guard_runs_before_metadata_or_workflow_output(git_source, matching):
+    """Only a matching local release tag permits stdout metadata and GitHub output append."""
+    root, tagged_revision = git_source
+    git(root, "tag", "v0.1.0-alpha.1")
+    git(root, "commit", "--quiet", "--allow-empty", "-m", "Second synthetic commit")
+    revision = tagged_revision if matching else git(root, "rev-parse", "HEAD")
+    output = root / "github-output"
+    output.write_text("existing=value\n", encoding="utf-8")
+    result = subprocess.run([sys.executable, str(MODULE.__file__), "--tag", "v0.1.0-alpha.1",
+                             "--repository", "homelab-0/nyctr", "--revision", revision,
+                             "--source-root", str(root), "--github-output", str(output), "--verify-git-tag"],
+                            capture_output=True, text=True, check=False, timeout=10)
+    if matching:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["revision"] == tagged_revision
+        assert f"revision={tagged_revision}\n" in output.read_text(encoding="utf-8")
+    else:
+        assert result.returncode != 0 and "does not resolve to the expected commit" in result.stderr
+        assert result.stdout == ""
+        assert output.read_text(encoding="utf-8") == "existing=value\n"
