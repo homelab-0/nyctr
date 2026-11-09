@@ -1,0 +1,21 @@
+name: Feature proposal
+description: Propose a capability or integration.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired workflow and outcome
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: APIs, evidence, limitations and alternatives
+      description: Link official provider documentation where relevant; do not include credentials.
