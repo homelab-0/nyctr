@@ -77,6 +77,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             attributes={"scope": "entire_profile", "logs_enabled": log_settings.get("enabled"), "logs_retention_seconds": log_settings.get("retention")},
         )
         snapshot.resources.append(profile_node)
+        core.record_capability("profile:read")
         controls = {
             "security": ("threatIntelligenceFeeds", "aiThreatDetection", "googleSafeBrowsing", "cryptojacking", "dnsRebinding", "dga", "nrd", "ddns", "parking", "csam", "tlds"),
             "privacy": ("blocklists", "natives", "disguisedTrackers", "allowAffiliate"),
@@ -101,7 +102,14 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             )
             snapshot.resources.append(node)
             snapshot.relationships.append(relationship(integration_id, PROVIDER, profile_node["id"], node["id"], "governed_by", collected_at))
+        if all(section in profile for section in ("security", "privacy", "parentalControl", "allowlist", "denylist")):
+            core.record_capability("dns_policies:read")
+        else:
+            core.record_gap("nextdns_policy_fields_missing")
+        if type(log_settings.get("enabled")) is not bool:
+            core.record_gap("nextdns_log_settings_unknown")
         if log_settings.get("enabled") is False:
+            core.record_capability("blocked_dns_logs:read", unavailable=True)
             snapshot.capabilities = [x for x in snapshot.capabilities if x != "blocked_dns_logs:read"]
             snapshot.capabilities.append("blocked_dns_logs:disabled_at_source")
             return snapshot
@@ -174,4 +182,5 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
     snapshot.resources = list({node["id"]: node for node in reversed(snapshot.resources)}.values())
     snapshot.relationships = list({edge["id"]: edge for edge in reversed(snapshot.relationships)}.values())
     snapshot.blocks = list({event["id"]: event for event in snapshot.blocks}.values())
+    core.record_capability("blocked_dns_logs:read")
     return snapshot

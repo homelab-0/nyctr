@@ -12,6 +12,8 @@ import json
 import os
 import re
 import ssl
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -27,7 +29,64 @@ PAGE_SIZE = 200
 
 
 class IntegrationError(Exception):
-    """A safe public error; never include a request, response body, or API key."""
+    """A safe error with a fixed diagnostic category and no provider response content."""
+
+    def __init__(self, message: str, *, category: str = "provider_contract"):
+        """Retain a sanitized collector message and classify failure without parsing its text."""
+        super().__init__(message)
+        self.category = category
+
+
+@dataclass
+class ProbeEvidence:
+    """Track only bounded transport facts and normalized capabilities for one diagnostic task.
+
+    No request URLs, headers, payloads, names, or source identifiers are retained.
+    A received response establishes an HTTPS exchange, not accepted credentials.
+    """
+    responses_received: int = 0
+    verified_capabilities: set[str] = field(default_factory=set)
+    unavailable_capabilities: set[str] = field(default_factory=set)
+    gaps: set[str] = field(default_factory=set)
+
+
+_probe_evidence: ContextVar[ProbeEvidence | None] = ContextVar("nyctr_probe_evidence", default=None)
+
+
+@contextmanager
+def capture_probe():
+    """Isolate diagnostic evidence to the current async context and reset it even after failure."""
+    evidence = ProbeEvidence()
+    token = _probe_evidence.set(evidence)
+    try:
+        yield evidence
+    finally:
+        _probe_evidence.reset(token)
+
+
+def record_capability(capability: str, *, unavailable: bool = False):
+    """Record a capability only after its source data was normalized or explicitly disabled."""
+    if (evidence := _probe_evidence.get()) is not None:
+        target = evidence.unavailable_capabilities if unavailable else evidence.verified_capabilities
+        target.add(capability)
+
+
+def record_gap(gap: str):
+    """Record a fixed code for source coverage that the diagnostic cannot verify."""
+    if (evidence := _probe_evidence.get()) is not None:
+        evidence.gaps.add(gap)
+
+
+def _transport_category(error: Exception) -> str:
+    """Classify typed timeout and TLS causes without inspecting potentially secret-bearing messages."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 12:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLError):
+            return "tls"
+        current = current.__cause__ or current.__context__
+    return "timeout" if isinstance(error, httpx.TimeoutException) else "transport"
 
 
 @dataclass
@@ -193,12 +252,12 @@ def validate_unifi_url(value: Any) -> str:
 def make_http_client(api_key: str) -> httpx.AsyncClient:
     """Create a verified-TLS client that never redirects or inherits proxy settings."""
     if not isinstance(api_key, str) or not api_key or any(c in api_key for c in "\r\n"):
-        raise IntegrationError("The configured API key is missing or invalid.")
+        raise IntegrationError("The configured API key is missing or invalid.", category="secret")
     ca_bundle = os.getenv("NYCTR_CONNECTOR_CA_BUNDLE")
     try:
         verify = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else True
     except (OSError, ssl.SSLError):
-        raise IntegrationError("The server's connector CA bundle could not be loaded.") from None
+        raise IntegrationError("The server's connector CA bundle could not be loaded.", category="tls") from None
     return httpx.AsyncClient(
         headers={"X-Api-Key": api_key, "Accept": "application/json"},
         follow_redirects=False,
@@ -238,12 +297,15 @@ class ReadClient:
             raise IntegrationError("Collection exceeded its request budget; narrow the site scope.")
         try:
             async with self.client.stream("GET", self.base_url + path, params=params) as response:
+                if (evidence := _probe_evidence.get()) is not None:
+                    evidence.responses_received += 1
                 if response.is_redirect:
                     raise IntegrationError("Provider redirected the request; redirects are never followed.")
                 if response.status_code in {401, 403}:
-                    raise IntegrationError("Provider denied access. Check the configured key and its read permissions.")
+                    raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
+                                           category="authentication")
                 if response.status_code == 429:
-                    raise IntegrationError("Provider rate limit reached. Try syncing later.")
+                    raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit")
                 if response.status_code >= 400:
                     raise IntegrationError(f"Provider returned HTTP {response.status_code}.")
                 chunks: list[bytes] = []
@@ -254,8 +316,9 @@ class ReadClient:
                         raise IntegrationError("Provider response exceeded the collection size limit.")
                     chunks.append(chunk)
                 payload = json.loads(b"".join(chunks))
-        except (httpx.HTTPError, OSError):
-            raise IntegrationError("Could not securely connect to the provider. Check its address, certificate, and availability.") from None
+        except (httpx.HTTPError, OSError) as exc:
+            raise IntegrationError("Could not securely connect to the provider. Check its address, certificate, and availability.",
+                                   category=_transport_category(exc)) from None
         except (ValueError, UnicodeError):
             raise IntegrationError("Provider returned invalid JSON.") from None
         if not isinstance(payload, dict):

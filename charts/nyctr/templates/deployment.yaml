@@ -1,0 +1,181 @@
+{{- include "nyctr.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nyctr.fullname" . }}
+  labels:
+    {{- include "nyctr.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  # One alpha application process, including during upgrades.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "nyctr.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nyctr.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nyctr.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 100
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nyctr
+          image: {{ include "nyctr.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: NYCTR_MODE
+              value: {{ .Values.mode | quote }}
+            - name: NYCTR_PUBLIC_URL
+              value: {{ .Values.publicUrl | quote }}
+            - name: NYCTR_COOKIE_SECURE
+              value: {{ eq .Values.mode "live" | quote }}
+            - name: FORWARDED_ALLOW_IPS
+              value: {{ join "," .Values.forwardedAllowIps | quote }}
+            - name: NYCTR_SESSION_HOURS
+              value: {{ .Values.sessionHours | quote }}
+            - name: NYCTR_BLOCK_RETENTION_HOURS
+              value: {{ .Values.blockRetentionHours | quote }}
+            - name: NYCTR_LOCAL_LOGIN_ENABLED
+              value: {{ .Values.auth.local.enabled | quote }}
+            - name: NYCTR_DATABASE_URL
+              {{- if .Values.demo.ephemeralDatabase }}
+              value: sqlite:////var/lib/nyctr/demo.db
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: {{ .Values.database.urlKey | quote }}
+              {{- end }}
+            {{- with .Values.auth.local.bootstrap.existingSecret }}
+            - name: NYCTR_BOOTSTRAP_ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . | quote }}
+                  key: {{ $.Values.auth.local.bootstrap.emailKey | quote }}
+            - name: NYCTR_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . | quote }}
+                  key: {{ $.Values.auth.local.bootstrap.passwordKey | quote }}
+            {{- end }}
+            {{- if .Values.auth.oidc.enabled }}
+            - name: NYCTR_OIDC_ISSUER
+              value: {{ .Values.auth.oidc.issuer | quote }}
+            - name: NYCTR_OIDC_CLIENT_ID
+              value: {{ .Values.auth.oidc.clientId | quote }}
+            - name: NYCTR_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oidc.existingSecret | quote }}
+                  key: {{ .Values.auth.oidc.clientSecretKey | quote }}
+            - name: NYCTR_OIDC_ADMIN_GROUPS
+              value: {{ join "," .Values.auth.oidc.adminGroups | quote }}
+            - name: NYCTR_OIDC_ALLOWED_GROUPS
+              value: {{ join "," .Values.auth.oidc.allowedGroups | quote }}
+            - name: NYCTR_OIDC_GROUPS_CLAIM
+              value: {{ .Values.auth.oidc.groupsClaim | quote }}
+            {{- end }}
+            - name: NYCTR_CONNECTOR_HOSTS
+              value: {{ join "," .Values.connectors.hosts | quote }}
+            {{- range .Values.connectors.secrets }}
+            - name: {{ .envName | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- if .Values.connectors.caBundle.existingSecret }}
+            - name: NYCTR_CONNECTOR_CA_BUNDLE
+              value: /etc/nyctr/connector-ca/ca-bundle.crt
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          # Check process responsiveness without restarting solely for a DB outage.
+          livenessProbe:
+            httpGet:
+              path: /api/auth/config
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.demo.ephemeralDatabase }}
+            - name: demo-data
+              mountPath: /var/lib/nyctr
+            {{- end }}
+            {{- if .Values.connectors.caBundle.existingSecret }}
+            - name: connector-ca
+              mountPath: /etc/nyctr/connector-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        {{- if .Values.demo.ephemeralDatabase }}
+        - name: demo-data
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- end }}
+        {{- if .Values.connectors.caBundle.existingSecret }}
+        - name: connector-ca
+          secret:
+            secretName: {{ .Values.connectors.caBundle.existingSecret | quote }}
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.connectors.caBundle.key | quote }}
+                path: ca-bundle.crt
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

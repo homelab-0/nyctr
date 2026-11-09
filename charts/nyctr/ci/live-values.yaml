@@ -1,0 +1,26 @@
+# Render-only synthetic values. No Secret or published image is implied to exist.
+image:
+  tag: sha-0123456789abcdef
+publicUrl: https://nyctr.example.test
+forwardedAllowIps:
+  - 10.42.0.10
+database:
+  existingSecret: nyctr-db
+auth:
+  local:
+    enabled: false
+  oidc:
+    enabled: true
+    issuer: https://auth.example.test/application/o/nyctr/
+    clientId: nyctr
+    existingSecret: nyctr-oidc
+    adminGroups: [nyctr-admins]
+    allowedGroups: [nyctr-members]
+networkPolicy:
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy

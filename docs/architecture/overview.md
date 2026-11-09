@@ -25,6 +25,11 @@ its role or widen a query's member scope. Read-only collection is currently
 initiated by an administrator and bounded per request. Durable scheduled
 collection and background analysis will be separate worker responsibilities.
 
+Saved-integration diagnostics reuse the bounded, verified read transport under
+the collection lease. They return an ephemeral report of checked capabilities
+and evidence gaps without importing the examined snapshot or changing the last
+successful collection. A successful probe proves only the reported read scope.
+
 ## Core data
 
 | Entity | Responsibility |
@@ -59,6 +64,12 @@ Provider capability reporting is explicit. A configured API credential does not
 prove that event logs are available. UniFi Network's future event receiver will
 be a channel within that integration. An optional generic receiver can later
 support other sources without creating a duplicate UniFi provider.
+
+The diagnostics report distinguishes adapter implementation from reads verified
+during that check. Connectivity, certificate validation, credential acceptance,
+response contracts, logging availability, and attribution gaps are separate
+results; absent evidence remains unknown. Provider-controlled error text and
+resolved credentials never appear in this report.
 
 UniFi Fabric will group Site Manager connection/setup in the UI. Its API endpoint,
 credentials and collection coverage remain separately modeled. The supplied

@@ -1,13 +1,14 @@
 import { useState, type FormEvent } from 'react';
 import {
   ArrowRight,
-  Check,
   Database,
   Globe2,
+  Layers2,
   LockKeyhole,
   Network,
   Plus,
   RefreshCw,
+  ScanLine,
   Server,
   Settings2,
   Workflow,
@@ -30,6 +31,10 @@ import {
   Success,
   type IconComponent,
 } from '../components/ui';
+import {
+  IntegrationDiagnostics,
+  useIntegrationDiagnostics,
+} from '../components/IntegrationDiagnostics';
 
 const catalog: {
   id: string;
@@ -230,6 +235,9 @@ export default function Integrations() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const { user } = useAuth();
+  const admin = user?.role === 'admin';
+  const demo = user?.mode === 'demo';
+  const diagnostics = useIntegrationDiagnostics(admin && !demo);
   /**
    * Requests a read-only snapshot and reloads source health after success or failure.
    * Counts come from the server response; a failed collection is never displayed as success.
@@ -283,6 +291,12 @@ export default function Integrations() {
       </div>
       <InlineError message={error} />
       {success && <Success>{success}</Success>}
+      {demo && (
+        <Notice>
+          Demo sources use seeded snapshots. Live connection diagnostics and collection are
+          disabled; deploy in live mode to check a saved source.
+        </Notice>
+      )}
       <div className="section-heading">
         <h2>Configured connections</h2>
         <span className="tiny muted">{result.data?.length || 0} sources</span>
@@ -306,10 +320,13 @@ export default function Integrations() {
                 </div>
                 <h3>{integration.name}</h3>
                 <p>{item?.name || label(integration.provider)}</p>
+                <span className="integration-capability-label">
+                  Adapter capabilities · not connection verification
+                </span>
                 <div className="capabilities">
                   {integration.capabilities?.map((c) => (
                     <span key={c}>
-                      <Check size={12} />
+                      <Layers2 size={12} />
                       {label(c)}
                     </span>
                   ))}
@@ -326,14 +343,41 @@ export default function Integrations() {
                     <LockKeyhole size={12} />
                     Read only
                   </span>
+                </div>
+                <div className="integration-actions">
+                  {admin && (
+                    <button
+                      className="button secondary small"
+                      disabled={
+                        pending !== null ||
+                        diagnostics.state?.pending === true ||
+                        demo ||
+                        !item?.available
+                      }
+                      onClick={() => void diagnostics.run(integration)}
+                      title={
+                        demo
+                          ? 'Demo sources use seeded snapshots; live diagnostics are disabled.'
+                          : !item?.available
+                            ? 'Connection diagnostics are not implemented for this provider.'
+                            : 'Verify supported reads without importing a snapshot'
+                      }
+                    >
+                      <ScanLine size={14} />
+                      Run diagnostics
+                    </button>
+                  )}
                   <button
                     className="button secondary small"
                     disabled={
-                      pending !== null || user?.mode === 'demo' || integration.provider === 'demo'
+                      pending !== null ||
+                      diagnostics.state?.pending === true ||
+                      demo ||
+                      integration.provider === 'demo'
                     }
                     onClick={() => void sync(integration)}
                     title={
-                      user?.mode === 'demo'
+                      demo
                         ? 'Demo sources use seeded snapshots; live collection is disabled.'
                         : 'Read the current source configuration'
                     }
@@ -403,8 +447,17 @@ export default function Integrations() {
           onClose={() => setAdd(null)}
           onSaved={() => {
             result.reload();
-            setSuccess('Connection saved. Collect a snapshot to import its supported data.');
+            setSuccess(
+              'Connection saved. Run diagnostics to verify supported reads, then collect a snapshot to import evidence.',
+            );
           }}
+        />
+      )}
+      {diagnostics.state && (
+        <IntegrationDiagnostics
+          state={diagnostics.state}
+          onClose={diagnostics.close}
+          onRun={() => void diagnostics.run(diagnostics.state!.integration)}
         />
       )}
     </>

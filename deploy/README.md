@@ -12,8 +12,10 @@ docker build -t nyctr:dev .
 ```
 
 The Dockerfile supports local builds; CI builds and smoke-tests the packaged
-application against PostgreSQL. A public, signed image release is not claimed;
-registry publishing and release version policy are separate roadmap items.
+application against PostgreSQL on AMD64 and ARM64. The [release workflow](../docs/releases.md)
+publishes versioned multi-platform images with SBOM/provenance metadata after
+its release checks pass. Use a digest from a completed publication; the presence
+of the workflow does not imply that a public release image already exists.
 
 ## Local demo
 
@@ -107,8 +109,17 @@ Initial requirements:
 - Readiness/liveness probes on `/api/health` and network policy permitting only
   the intended database, identity provider and configured provider endpoints.
 
-A Helm chart and a cluster deployment are not included in this first change.
-Deployment to the lab remains separate from authoring the application.
+Use the [Helm chart](../charts/nyctr/README.md) for the supported templates, values,
+and Secret-reference contracts. The chart uses an existing PostgreSQL database;
+database provisioning, backups, and identity-provider administration remain with
+the operator. It supports optional Ingress or Gateway API HTTPRoute resources,
+one application replica, and explicit proxy/network settings.
+
+Chart rendering and isolated kind installation are automated checks. They do not
+establish compatibility with a particular private cluster, ingress controller,
+or identity provider. Independent acceptance testing uses local Docker fixtures
+only; see [the test handoff](../docs/testing/cloudex.md). No homelab deployment is
+performed by the release or test workflows.
 
 ## Operations and limits
 

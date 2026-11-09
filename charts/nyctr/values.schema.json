@@ -1,0 +1,808 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Nyctr alpha Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": [
+        "live",
+        "demo"
+      ]
+    },
+    "replicaCount": {
+      "type": "integer",
+      "const": 1
+    },
+    "nameOverride": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z]([-a-z0-9]*[a-z0-9])?$"
+        }
+      ]
+    },
+    "fullnameOverride": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z]([-a-z0-9]*[a-z0-9])?$"
+        }
+      ]
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^$|^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+          "not": {
+            "const": "latest"
+          }
+        },
+        "digest": {
+          "type": "string",
+          "maxLength": 71,
+          "pattern": "^$|^sha256:[a-f0-9]{64}$"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      },
+      "required": [
+        "repository",
+        "tag",
+        "digest",
+        "pullPolicy"
+      ]
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "publicUrl": {
+      "type": "string",
+      "maxLength": 320,
+      "pattern": "^$|^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"
+    },
+    "forwardedAllowIps": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "format": "ipv4"
+          },
+          {
+            "type": "string",
+            "format": "ipv6"
+          }
+        ]
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "sessionHours": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 24
+    },
+    "blockRetentionHours": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 168
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "anyOf": [
+            {
+              "const": ""
+            },
+            {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "minLength": 1
+            }
+          ]
+        },
+        "urlKey": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "existingSecret",
+        "urlKey"
+      ]
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "existingAccount": {
+              "type": "boolean"
+            },
+            "bootstrap": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "existingSecret": {
+                  "anyOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 253,
+                      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "emailKey": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[A-Za-z0-9._-]+$",
+                  "minLength": 1
+                },
+                "passwordKey": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[A-Za-z0-9._-]+$",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "existingSecret",
+                "emailKey",
+                "passwordKey"
+              ]
+            }
+          },
+          "required": [
+            "enabled",
+            "existingAccount",
+            "bootstrap"
+          ]
+        },
+        "oidc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "issuer": {
+              "type": "string",
+              "maxLength": 2048,
+              "pattern": "^$|^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[^?#\\s@]*)?$"
+            },
+            "clientId": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[^\\r\\n]*$"
+            },
+            "existingSecret": {
+              "anyOf": [
+                {
+                  "const": ""
+                },
+                {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                  "minLength": 1
+                }
+              ]
+            },
+            "clientSecretKey": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "minLength": 1
+            },
+            "adminGroups": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^[^,\\r\\n]+$",
+                "minLength": 1
+              },
+              "maxItems": 128,
+              "uniqueItems": true
+            },
+            "allowedGroups": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^[^,\\r\\n]+$",
+                "minLength": 1
+              },
+              "maxItems": 128,
+              "uniqueItems": true
+            },
+            "groupsClaim": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[^\\r\\n]+$",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "enabled",
+            "issuer",
+            "clientId",
+            "existingSecret",
+            "clientSecretKey",
+            "adminGroups",
+            "allowedGroups",
+            "groupsClaim"
+          ]
+        }
+      },
+      "required": [
+        "local",
+        "oidc"
+      ]
+    },
+    "connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9.:-]*$",
+            "minLength": 1
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "envName": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^NYCTR_CONNECTOR_SECRET_[A-Z0-9_]+$",
+                "minLength": 1
+              },
+              "existingSecret": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                "minLength": 1
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "envName",
+              "existingSecret",
+              "key"
+            ]
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "caBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": {
+              "anyOf": [
+                {
+                  "const": ""
+                },
+                {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                  "minLength": 1
+                }
+              ]
+            },
+            "key": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "existingSecret",
+            "key"
+          ]
+        }
+      },
+      "required": [
+        "hosts",
+        "secrets",
+        "caBundle"
+      ]
+    },
+    "demo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowKnownCredentials": {
+          "type": "boolean"
+        },
+        "ephemeralDatabase": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "allowKnownCredentials",
+        "ephemeralDatabase"
+      ]
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "port"
+      ]
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        }
+      },
+      "required": [
+        "annotations"
+      ]
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "anyOf": [
+            {
+              "const": ""
+            },
+            {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "minLength": 1
+            }
+          ]
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        },
+        "tlsSecretName": {
+          "anyOf": [
+            {
+              "const": ""
+            },
+            {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "minLength": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "className",
+        "annotations",
+        "tlsSecretName"
+      ]
+    },
+    "httpRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        },
+        "parentRefs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                "minLength": 1
+              },
+              "namespace": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                "minLength": 1
+              },
+              "sectionName": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 63,
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+              }
+            },
+            "required": [
+              "name",
+              "sectionName"
+            ]
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "requestTimeout": {
+          "type": "string",
+          "maxLength": 5,
+          "pattern": "^[1-9][0-9]{0,3}s$"
+        }
+      },
+      "required": [
+        "enabled",
+        "annotations",
+        "parentRefs",
+        "requestTimeout"
+      ]
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingressFrom": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "namespaceSelector": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "matchLabels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "minProperties": 1
+                  }
+                },
+                "required": [
+                  "matchLabels"
+                ]
+              },
+              "podSelector": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "matchLabels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "minProperties": 1
+                  }
+                },
+                "required": [
+                  "matchLabels"
+                ]
+              },
+              "ipBlock": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cidr": {
+                    "type": "string",
+                    "maxLength": 253,
+                    "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$",
+                    "not": {
+                      "enum": [
+                        "0.0.0.0/0",
+                        "::/0"
+                      ]
+                    }
+                  },
+                  "except": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 253,
+                      "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$",
+                      "not": {
+                        "enum": [
+                          "0.0.0.0/0",
+                          "::/0"
+                        ]
+                      }
+                    },
+                    "maxItems": 128,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "cidr"
+                ]
+              }
+            },
+            "required": [],
+            "oneOf": [
+              {
+                "required": [
+                  "ipBlock"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "namespaceSelector"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "podSelector"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "ipBlock"
+                  ]
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "namespaceSelector"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "podSelector"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "enabled",
+        "ingressFrom"
+      ]
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^([1-9][0-9]*m?|0\\.[0-9]*[1-9][0-9]*)$"
+            },
+            "memory": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[1-9][0-9]*(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$"
+            }
+          },
+          "required": [
+            "cpu",
+            "memory"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^([1-9][0-9]*m?|0\\.[0-9]*[1-9][0-9]*)$"
+            },
+            "memory": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[1-9][0-9]*(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|k)?$"
+            }
+          },
+          "required": [
+            "cpu",
+            "memory"
+          ]
+        }
+      },
+      "required": [
+        "requests",
+        "limits"
+      ]
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "operator": {
+            "type": "string",
+            "enum": [
+              "Exists",
+              "Equal"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 63
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "NoSchedule",
+              "PreferNoSchedule",
+              "NoExecute"
+            ]
+          },
+          "tolerationSeconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "operator"
+        ]
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "mode",
+    "replicaCount",
+    "nameOverride",
+    "fullnameOverride",
+    "image",
+    "imagePullSecrets",
+    "publicUrl",
+    "forwardedAllowIps",
+    "sessionHours",
+    "blockRetentionHours",
+    "database",
+    "auth",
+    "connectors",
+    "demo",
+    "service",
+    "serviceAccount",
+    "podAnnotations",
+    "ingress",
+    "httpRoute",
+    "networkPolicy",
+    "resources",
+    "nodeSelector",
+    "tolerations"
+  ]
+}

@@ -19,6 +19,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from .config import Settings
 from .database import make_engine, migrate, session_factory
+from .diagnostics import DiagnosticReport, diagnose_integration
 from .middleware import RequestBodyLimit
 from .models import (
     AccessRequest,
@@ -411,6 +412,56 @@ def create_app(settings: Settings | None = None):
         db.commit()
         return integration_json(row)
 
+    @app.post("/api/integrations/{integration_id}/diagnostics", response_model=DiagnosticReport)
+    async def integration_diagnostics(integration_id: str, user=Depends(admin), db: Session = Depends(get_db)):
+        """Inspect a saved live integration under the same lease as collection, without importing evidence.
+
+        Require administrator CSRF authorization. Return categorized diagnostic
+        results even when a provider check fails, and audit only sanitized result
+        metadata. Restore prior integration health after completion or cancellation;
+        a timestamp guard prevents releasing a newer operation's lease.
+        """
+        if settings.mode == "demo":
+            raise HTTPException(409, "Live diagnostics are disabled in demo mode")
+        integration = db.get(Integration, integration_id)
+        if not integration:
+            raise HTTPException(404, "Integration not found")
+        previous_status = integration.status
+        previous_started_at = integration.sync_started_at
+        if previous_status == "syncing":
+            # A claim can replace only an expired syncing lease. Restoring that
+            # abandoned lease would leave a finished probe displayed as running.
+            previous_status = "error" if integration.last_error else "connected" if integration.last_sync else "configured"
+            previous_started_at = None
+        claimed_at = utcnow()
+        locked = db.execute(update(Integration).where(
+            Integration.id == integration_id,
+            or_(Integration.status != "syncing", Integration.sync_started_at < claimed_at - timedelta(minutes=5))
+        ).values(status="syncing", sync_started_at=claimed_at).execution_options(synchronize_session="fetch"))
+        if locked.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, "A collection or diagnostic is already running")
+        db.commit()
+        try:
+            report = await diagnose_integration(integration.provider, integration_id,
+                                                integration.config, integration.secret_ref)
+            audit(db, user.id, "integration.diagnosed", integration_id, outcome=report.outcome,
+                  failures=[check.category for check in report.checks if check.status == "failed"],
+                  snapshot_counts=report.snapshot_counts.model_dump() if report.snapshot_counts else None,
+                  imported=False)
+            db.commit()
+            return report
+        finally:
+            # Use a fresh session so a failed or cancelled request cannot prevent
+            # best-effort release, and never overwrite another operation's lease.
+            db.rollback()
+            with factory() as release_db:
+                release_db.execute(update(Integration).where(
+                    Integration.id == integration_id, Integration.status == "syncing",
+                    Integration.sync_started_at == claimed_at,
+                ).values(status=previous_status, sync_started_at=previous_started_at))
+                release_db.commit()
+
     @app.post("/api/integrations/{integration_id}/sync")
     async def sync_integration(integration_id: str, user=Depends(admin), db: Session = Depends(get_db)):
         """Collect a live connector under a database lease and a 90-second deadline.
@@ -432,7 +483,7 @@ def create_app(settings: Settings | None = None):
         locked = db.execute(update(Integration).where(
             Integration.id == integration.id,
             or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
-        ).values(status="syncing", sync_started_at=utcnow()))
+        ).values(status="syncing", sync_started_at=utcnow()).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             raise HTTPException(409, "A collection is already running")
