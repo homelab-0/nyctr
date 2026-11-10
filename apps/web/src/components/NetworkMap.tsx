@@ -109,9 +109,8 @@ export default function NetworkMap({
         {layout.nodes.map((node) => {
           const Icon = kindIcon(node.kind);
           const source = sourceOf(node.provider);
-          const off =
-            node.resource?.attributes.access_type === 'GUEST' &&
-            node.resource.attributes.guest_authorized === false;
+          const guest = node.resource?.attributes.guest as { authorized?: boolean } | undefined;
+          const off = guest?.authorized === false;
           const dim = near !== null && !near.has(node.id);
           if (node.more)
             return (

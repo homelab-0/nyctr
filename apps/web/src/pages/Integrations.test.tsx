@@ -3,7 +3,14 @@ import userEvent from '@testing-library/user-event';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '../auth';
 import { setCsrfToken } from '../api';
-import type { Integration, IntegrationDiagnosticsReport, Mode, Role, User } from '../types';
+import type {
+  Catalog,
+  Integration,
+  IntegrationDiagnosticsReport,
+  Mode,
+  Role,
+  User,
+} from '../types';
 import Integrations from './Integrations';
 
 const originalShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal');
@@ -50,6 +57,80 @@ const connection: Integration = {
   config: { profile_id: 'abc123' },
   secret_ref: 'NYCTR_CONNECTOR_SECRET_TEST_DNS',
   capabilities: ['profile_configuration', 'blocked_queries'],
+  provider_name: 'NextDNS',
+  provides: ['dns.blocks', 'dns.exceptions'],
+};
+
+/** A fabricated catalog: one DNS integration that can open addresses and one that only reads. */
+const catalog: Catalog = {
+  capabilities: [
+    { id: 'dns.blocks', name: 'Blocked lookups', changes_provider: false },
+    { id: 'dns.exceptions', name: 'Open a blocked address for a while', changes_provider: true },
+    { id: 'guest.passes', name: 'Guest passes', changes_provider: true },
+  ],
+  providers: [
+    {
+      id: 'nextdns',
+      name: 'NextDNS',
+      summary: 'One DNS profile.',
+      letter: 'N',
+      tone: 'teal',
+      status: 'stable',
+      secret_hint: 'An API key.',
+      fields: [
+        {
+          key: 'profile_id',
+          label: 'Profile',
+          hint: 'Six characters.',
+          placeholder: 'abc123',
+          kind: 'text',
+          required: true,
+        },
+      ],
+      provides: [
+        { id: 'dns.blocks', name: 'Blocked lookups', changes_provider: false },
+        {
+          id: 'dns.exceptions',
+          name: 'Open a blocked address for a while',
+          changes_provider: true,
+        },
+      ],
+      reads: [{ id: 'profile:read', label: 'DNS profile configuration' }],
+      changes: ['Open a blocked address for a while'],
+      write_mode: 'disabled',
+    },
+    {
+      id: 'acme_resolver',
+      name: 'Acme Resolver',
+      summary: 'A made-up resolver that only reports blocks.',
+      letter: 'A',
+      tone: 'rose',
+      status: 'experimental',
+      secret_hint: 'A password.',
+      fields: [
+        {
+          key: 'base_url',
+          label: 'Address',
+          hint: 'Over HTTPS.',
+          placeholder: 'https://resolver.example',
+          kind: 'url',
+          required: true,
+        },
+        {
+          key: 'lookback_hours',
+          label: 'Hours to read',
+          hint: 'Between 1 and 72.',
+          placeholder: '24',
+          kind: 'number',
+          required: false,
+        },
+      ],
+      provides: [{ id: 'dns.blocks', name: 'Blocked lookups', changes_provider: false }],
+      reads: [{ id: 'blocked_dns_logs:read', label: 'Recent blocked DNS queries' }],
+      changes: [],
+      write_mode: 'none',
+    },
+  ],
 };
 
 const partialReport: IntegrationDiagnosticsReport = {
@@ -205,6 +286,7 @@ async function openIntegrations({
     const path = String(input);
     if (path === '/api/auth/me') return jsonResponse(user);
     if (path === '/api/integrations') return jsonResponse([connection]);
+    if (path === '/api/integrations/catalog') return jsonResponse(catalog);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
     if (path === `/api/integrations/${connection.id}/sync`) {
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0 });
@@ -500,5 +582,59 @@ describe('integration connection diagnostics', () => {
     const posts = fetchMock.mock.calls.filter(([, options]) => options?.method === 'POST');
     expect(posts.map(([path]) => path)).toEqual([`/api/integrations/${connection.id}/sync`]);
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+/** The page is built from the server's catalog, so an integration this app has never heard of still works. */
+describe('integrations add capabilities', () => {
+  /** Features are rows, integrations are columns, and a feature without a connected source says so. */
+  it('shows what each integration adds and which features have a connected source', async () => {
+    await openIntegrations();
+    const table = screen.getByRole('table');
+    expect(within(table).getByRole('columnheader', { name: /Acme Resolver/ })).toBeDefined();
+    const open = within(table).getByRole('row', { name: /Open a blocked address for a while/ });
+    expect(within(open).getByText(/Working: a connected source offers it/)).toBeDefined();
+    expect(within(open).getByText(/Changes the source/)).toBeDefined();
+    expect(within(open).getAllByText('Yes')).toHaveLength(1);
+    expect(within(open).getAllByText('No')).toHaveLength(1);
+    const passes = within(table).getByRole('row', { name: /Guest passes/ });
+    expect(within(passes).getByText(/No connected source offers it/)).toBeDefined();
+    expect(within(passes).queryByText('Yes')).toBeNull();
+    expect(screen.getByText('Reads only')).toBeDefined();
+  });
+
+  /** The connect form asks for exactly the fields the chosen integration declares. */
+  it('builds the connection form from the chosen integration and sends only its fields', async () => {
+    const { fetchMock, interaction } = await openIntegrations();
+    fetchMock.mockImplementationOnce(async () => jsonResponse({ id: 'new' }, 201));
+    await interaction.click(screen.getByRole('button', { name: /Add connection/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Connect a source' });
+    expect(within(dialog).getByLabelText(/^Profile/)).toBeDefined();
+    await interaction.selectOptions(within(dialog).getByLabelText(/^Integration/), 'acme_resolver');
+    expect(within(dialog).queryByLabelText(/^Profile/)).toBeNull();
+    await interaction.type(within(dialog).getByLabelText(/^Connection name/), 'Branch resolver');
+    await interaction.type(within(dialog).getByLabelText(/^Address/), 'https://resolver.example');
+    await interaction.type(within(dialog).getByLabelText(/^Hours to read/), '12');
+    await interaction.type(
+      within(dialog).getByLabelText(/^Credential environment reference/),
+      'NYCTR_CONNECTOR_SECRET_BRANCH',
+    );
+    await interaction.click(within(dialog).getByRole('button', { name: /Save connection/ }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([path, options]) => path === '/api/integrations' && options?.method === 'POST',
+        ),
+      ).toBe(true),
+    );
+    const sent = fetchMock.mock.calls.find(
+      ([path, options]) => path === '/api/integrations' && options?.method === 'POST',
+    )!;
+    expect(JSON.parse(String(sent[1]?.body))).toEqual({
+      provider: 'acme_resolver',
+      name: 'Branch resolver',
+      config: { base_url: 'https://resolver.example', lookback_hours: 12 },
+      secret_ref: 'NYCTR_CONNECTOR_SECRET_BRANCH',
+    });
   });
 });

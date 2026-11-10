@@ -263,7 +263,7 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
       </div>
     );
   const risky = block.risk_band === 'high';
-  /** Sends the request. The server scores it and applies the household's rule. */
+  /** Sends the request. The server scores it and applies the administrator's access rule. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setPending(true);
@@ -315,7 +315,7 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
           <ShieldAlert size={17} />
           <div>
             <b>This one looks risky.</b>
-            <p>You can still ask. It will not open by itself; a person at home will decide.</p>
+            <p>You can still ask. It will not open by itself; an administrator will decide.</p>
           </div>
         </div>
       )}
@@ -470,7 +470,7 @@ function Result({ data, id }: { data: Data; id: string }) {
           </span>
           <h1 className="display d1">Approved, but not switched on yet.</h1>
           <p className="lede">
-            Someone at home said yes and still has to turn it on. Check back in a little while.
+            An administrator said yes and still has to turn it on. Check back in a little while.
           </p>
         </header>
       )}
@@ -482,7 +482,7 @@ function Result({ data, id }: { data: Data; id: string }) {
             <p>
               {row.status === 'auto_approved'
                 ? row.decision_note
-                : 'This is the score a person at home will see too.'}
+                : 'This is the score the administrator will see too.'}
             </p>
           </div>
         </div>
@@ -550,7 +550,7 @@ function MyDevices({ data }: { data: Data }) {
             <span>
               <span className="dom">{device.name}</span>
               <span className="d">
-                {device.classification === 'shared' ? 'Shared with the household' : 'Yours'}
+                {device.classification === 'shared' ? 'Shared device' : 'Yours'}
               </span>
             </span>
             {data.device.data?.device_id === device.id && (

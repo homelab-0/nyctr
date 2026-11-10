@@ -40,9 +40,9 @@ const graph: Graph = {
   nodes: [
     node('site', 'site', 'unifi_network'),
     node('gw', 'gateway', 'unifi_network'),
-    node('guest', 'network', 'unifi_network', { vlanId: 80 }),
-    node('lan', 'network', 'unifi_network', { vlanId: 65 }),
-    node('servers', 'network', 'unifi_network', { vlanId: 66 }),
+    node('guest', 'network', 'unifi_network', { vlan: 80 }),
+    node('lan', 'network', 'unifi_network', { vlan: 65 }),
+    node('servers', 'network', 'unifi_network', { vlan: 66 }),
     node('laptop', 'client', 'unifi_network'),
     node('nic', 'client', 'unifi_network'),
     node('pve', 'host', 'proxmox'),
@@ -119,7 +119,7 @@ describe('map layout', () => {
   it('collapses a crowded cell into a counted stand-in instead of growing without limit', () => {
     const many: Graph = {
       nodes: [
-        node('lan', 'network', 'unifi_network', { vlanId: 1 }),
+        node('lan', 'network', 'unifi_network', { vlan: 1 }),
         ...Array.from({ length: 40 }, (_, i) => node(`c${i}`, 'client', 'unifi_network')),
       ],
       edges: Array.from({ length: 40 }, (_, i) => edge(`c${i}`, 'lan', 'member_of')),

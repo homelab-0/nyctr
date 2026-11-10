@@ -61,6 +61,44 @@ export interface Integration {
   config: Record<string, unknown>;
   secret_ref: string;
   capabilities: string[];
+  /** Display name of the kind of integration, from the server's catalog. */
+  provider_name?: string;
+  maturity?: string;
+  /** Feature capabilities this source adds to Nyctr, by id. */
+  provides?: string[];
+}
+/** One thing Nyctr can do once a source that offers it is connected. */
+export interface Capability {
+  id: string;
+  name: string;
+  /** True when using it changes the source, so an operator must allow it first. */
+  changes_provider: boolean;
+}
+/** One kind of integration this server ships, as declared by the integration itself. */
+export interface CatalogProvider {
+  id: string;
+  name: string;
+  summary: string;
+  letter: string;
+  tone: string;
+  status: string;
+  secret_hint: string;
+  fields: {
+    key: string;
+    label: string;
+    hint: string;
+    placeholder: string;
+    kind: string;
+    required: boolean;
+  }[];
+  provides: Capability[];
+  reads: { id: string; label: string }[];
+  changes: string[];
+  write_mode: WriteMode | 'none';
+}
+export interface Catalog {
+  capabilities: Capability[];
+  providers: CatalogProvider[];
 }
 /** One bounded connection check; a passed check is not a network posture assessment. */
 export interface IntegrationDiagnosticCheck {
@@ -133,6 +171,8 @@ export interface AccessRequest {
   risk_factors: RiskFactor[] | null;
   decided_by: string | null;
   decision_note: string | null;
+  /** The connected source whose block this request is about. */
+  integration_id?: string | null;
 }
 /** What happened at the provider for a decision. Only `applied` means the provider was changed. */
 export type Execution = 'simulated' | 'applied' | 'not_applied' | 'failed';
@@ -168,6 +208,7 @@ export interface Suggestion {
   scope: string;
 }
 export type WriteMode = 'simulated' | 'enabled' | 'disabled';
+export type FeatureMode = WriteMode | 'none';
 export interface AccessRule {
   enabled: boolean;
   max_score: number;
@@ -182,7 +223,17 @@ export interface GuestRule {
 export interface Rules {
   access: AccessRule;
   guest: GuestRule;
-  writes: { nextdns: WriteMode; unifi_network: WriteMode };
+  /** How each feature that changes a source would act now. `none`: no connected source offers it. */
+  writes: { access: FeatureMode; guests: FeatureMode };
+  /** Every connected source with what Nyctr could change there and whether it may. */
+  sources: {
+    id: string;
+    name: string;
+    provider: string;
+    provider_name: string;
+    changes: string[];
+    write_mode: FeatureMode;
+  }[];
   collect_interval_seconds: number;
 }
 export interface GuestPass {
@@ -219,24 +270,29 @@ export interface GuestDevice {
   connected_at: string | null;
   access_point: { id: string; name: string } | null;
   authorized: boolean;
+  /** The name of the kind of source that reported this device. */
+  source: string;
   authorization: {
-    authorizationMethod?: string;
-    authorizedAt?: string;
-    expiresAt?: string;
-    usage?: { bytes?: number; durationSec?: number };
+    method: 'pass' | 'console' | 'other' | null;
+    authorized_at: string | null;
+    expires_at: string | null;
+    bytes: number | null;
+    seconds: number | null;
+    data_limit_mb: number | null;
   } | null;
   state: 'online' | 'waiting' | 'cut' | 'locked' | 'offline';
   observed_at: string;
   pass: { id: string; name: string; evidence: string } | null;
-  /** How the device got on: a pass typed into UniFi's sign-in page, or let on from the console. */
+  /** How the device got on: a pass typed into the network's sign-in page, or let on from the console. */
   joined_by: 'pass' | 'administrator' | null;
   risk: { score: number | null; band: RiskBand; factors: RiskFactor[] };
   lookups: { blocked: number; threat: number };
   timeline: TimelineItem[];
 }
-/** How guests sign in. UniFi always serves the page; Nyctr is never in the guest's path. */
+/** How guests sign in. The network source always serves the page; Nyctr is never in the guest's path. */
 export interface GuestPortal {
-  served_by: 'unifi';
+  /** Names of the kinds of source that run guest Wi-Fi here. Empty when none is connected. */
+  served_by: string[];
   nyctr_in_guest_path: false;
   wifi: { name: string; enabled: boolean; captive_portal: boolean; network: string | null }[];
   notice: string;
@@ -246,7 +302,13 @@ export interface GuestOverview {
   writes: WriteMode;
   rule: GuestRule;
   portal: GuestPortal;
-  sources: { id: string; name: string }[];
+  sources: {
+    id: string;
+    name: string;
+    provider_name: string;
+    passes: WriteMode;
+    control: WriteMode;
+  }[];
   passes: GuestPass[];
   devices: GuestDevice[];
   not_collected: string[];

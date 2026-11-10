@@ -36,7 +36,7 @@ const SAVED = [
   },
   {
     name: 'Every network and what is on it',
-    text: '{\n  networks {\n    name\n    vlan: attr(key: "vlanId")\n    neighbors(first: 100) { name kind provider }\n  }\n}',
+    text: '{\n  networks {\n    name\n    vlan: attr(key: "vlan")\n    neighbors(first: 100) { name kind provider }\n  }\n}',
   },
   {
     name: 'High-risk blocks in the last day',
@@ -48,7 +48,7 @@ const SAVED = [
   },
   {
     name: 'Guest devices and their lookups',
-    text: '{\n  resources(kind: ["client"], where: [{key: "access_type", eq: "GUEST"}]) {\n    name\n    attr(key: "guest_authorized")\n    blocks { domain riskBand }\n  }\n}',
+    text: '{\n  resources(kind: ["client"], where: [{key: "guest", exists: true}]) {\n    name\n    hasAccess: attr(key: "guest.authorized")\n    blocks { domain riskBand }\n  }\n}',
   },
 ];
 

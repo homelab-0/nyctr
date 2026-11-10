@@ -21,9 +21,9 @@ import {
 import { useApi } from './api';
 import { useAuth } from './auth';
 import Assistant from './components/Assistant';
-import { Brand, Empty, InlineError, Loading } from './components/ui';
+import { Brand, Empty, InlineError, Loading, registerSources } from './components/ui';
 import type { IconComponent } from './components/ui';
-import type { AttentionItem, Rules } from './types';
+import type { AttentionItem, Catalog, Rules } from './types';
 import Activity from './pages/Activity';
 import Blocks from './pages/Blocks';
 import Briefing from './pages/Briefing';
@@ -69,10 +69,7 @@ export function useRoute() {
 function writeLine(rules: Rules | null, demo: boolean) {
   if (demo) return 'Demo: every change is simulated';
   if (!rules) return 'Checking what Nyctr may change';
-  const allowed = [
-    rules.writes.nextdns === 'enabled' && 'NextDNS',
-    rules.writes.unifi_network === 'enabled' && 'UniFi',
-  ].filter(Boolean);
+  const allowed = rules.sources.filter((s) => s.write_mode === 'enabled').map((s) => s.name);
   return allowed.length ? `May change ${allowed.join(' and ')}` : 'Read-only for every source';
 }
 
@@ -84,6 +81,9 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
   const { user, logout } = useAuth();
   const attention = useApi<AttentionItem[]>('/attention');
   const rules = useApi<Rules>('/rules');
+  const catalog = useApi<Catalog>('/integrations/catalog');
+  // Chips and names for every kind of source come from the server, not from this app.
+  if (catalog.data) registerSources(catalog.data.providers);
   const [navOpen, setNavOpen] = useState(false);
   const [assistant, setAssistant] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
@@ -271,7 +271,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             attention={items}
             loading={attention.loading}
             refresh={refresh}
-            writes={rules.data?.writes}
+            sources={rules.data?.sources}
           />
         </main>
       </div>
@@ -287,14 +287,14 @@ function Screen({
   attention,
   loading,
   refresh,
-  writes,
+  sources,
 }: {
   page: string;
   params: URLSearchParams;
   attention: AttentionItem[];
   loading: boolean;
   refresh: () => void;
-  writes?: Rules['writes'];
+  sources?: Rules['sources'];
 }) {
   switch (page) {
     case 'briefing':
@@ -316,7 +316,7 @@ function Screen({
     case 'guests':
       return <Guests params={params} onChange={refresh} />;
     case 'sources':
-      return <Integrations writes={writes} />;
+      return <Integrations sources={sources} />;
     case 'activity':
       return <Activity />;
     case 'setup':

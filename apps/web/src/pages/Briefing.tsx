@@ -20,7 +20,7 @@ const NOT_COLLECTED = [
   'Firewall connection logs and port scans',
   'DNS lookups that were allowed',
   'Devices that have left the network',
-  'Proxmox firewall rules (only the on/off switches are read)',
+  'Workload firewall rules (only the on/off switches are read)',
 ];
 
 /**
