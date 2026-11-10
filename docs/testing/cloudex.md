@@ -155,9 +155,11 @@ outside this assignment. OIDC protocol cases have automated backend coverage;
 do not report a real identity-provider integration as tested because those unit
 tests pass.
 
-No AI risk engine or provider write executor exists in this version. Unknown
-risk, internal review decisions, and unassigned observations should stay honest
-in the UI. Treat any display suggesting an actual unblock as a failure.
+The risk score is rule-based on the block reason, not a reputation engine.
+Provider changes are off in this fixture unless `NYCTR_PROVIDER_WRITES` is set.
+Unknown risk, decisions that were not applied, and unassigned observations
+should stay honest in the UI. Treat any display that says an address is open
+when the lease is `not_applied` or `failed` as a failure.
 
 ## Report template
 

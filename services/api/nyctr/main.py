@@ -1,10 +1,11 @@
-"""Nyctr API: observations and proposals; no infrastructure mutation endpoints."""
+"""Nyctr API. Collection is read-only; provider changes exist only in the gated access and guest modules."""
 
 import asyncio
-import os
-import re
+import contextlib
+import hmac
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -16,10 +17,27 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, access, assistant, guests, query, worker
+from .collection import after_collection, apply_snapshot, collect_integration, parsed_date  # noqa: F401
 from .config import Settings
 from .database import make_engine, migrate, session_factory
+from .deps import (  # noqa: F401  (re-exported for callers that import them from here)
+    admin,
+    columns,
+    device_permitted,
+    finding_json,
+    get_db,
+    grant_at,
+    identity,
+    integration_json,
+    observation_json,
+    observation_permitted,
+    relationship_json,
+    request_json,
+    resource_json,
+)
 from .diagnostics import DiagnosticReport, diagnose_integration
+from .links import derived_links
 from .middleware import RequestBodyLimit
 from .models import (
     AccessRequest,
@@ -38,7 +56,6 @@ from .oidc import router as oidc_router
 from .security import (
     COOKIE_NAME,
     audit,
-    authenticate,
     check_login_attempt,
     issue_session,
     local_user,
@@ -46,92 +63,6 @@ from .security import (
     verify_password,
 )
 from .seed import bootstrap
-
-
-def columns(instance, fields):
-    """Select explicitly exposed ORM fields and normalize datetime values to UTC."""
-    return {key: utc(value) if isinstance(value := getattr(instance, key), datetime) else value
-            for key in fields.split()}
-
-
-def resource_json(row):
-    """Serialize inventory evidence and ownership fields for the authorized resource view."""
-    return columns(row, "id name kind provider source_id site_id observed_at evidence_kind classification owner_id attributes")
-
-
-def relationship_json(row):
-    """Serialize a typed graph relationship together with its provenance metadata."""
-    return columns(row, "id source target kind provider evidence_kind observed_at attributes")
-
-
-def finding_json(row):
-    """Serialize a finding with its supporting evidence and linked graph identifiers."""
-    return columns(row, "id title severity summary resource_ids relationship_ids evidence status")
-
-
-def integration_json(row):
-    """Expose connector configuration and secret-variable name, never the resolved credential."""
-    return columns(row, "id provider name status last_sync last_error config secret_ref capabilities")
-
-
-def observation_json(row):
-    """Serialize an authorized block event with its attribution, expiry, and risk uncertainty."""
-    return columns(row, "id device_id device_name domain source reason observed_at expires_at evidence_kind attribution risk_score risk_explanation")
-
-
-def request_json(row):
-    """Serialize the retained event snapshot and review state of an authorized access request."""
-    return columns(row, "id block_id domain device_name requester_id reason duration_minutes status created_at review_note")
-
-
-def get_db(request: Request):
-    """Yield one request-scoped database session and close it after dependency cleanup."""
-    with request.app.state.session_factory() as db:
-        yield db
-
-
-def identity(request: Request, db: Session = Depends(get_db)):
-    """Resolve the current session and enforce mutation CSRF through the shared auth boundary."""
-    return authenticate(request, db)
-
-
-def admin(auth=Depends(identity)):
-    """Require the current authenticated user to have the administrator role, otherwise return 403."""
-    if auth[0].role != "admin":
-        raise HTTPException(403, "Administrator access required")
-    return auth[0]
-
-
-def grant_at(db, device: str, user_id: str, when):
-    """Check a user-device grant at a timestamp using inclusive start and exclusive end bounds."""
-    return db.scalar(select(DeviceGrant.id).where(
-        DeviceGrant.device_id == device, DeviceGrant.user_id == user_id,
-        DeviceGrant.valid_from <= when,
-        or_(DeviceGrant.valid_until.is_(None), DeviceGrant.valid_until > when)).limit(1)) is not None
-
-
-def device_permitted(db, resource, user, when=None):
-    """Require personal/shared classification, current personal ownership, and a time-valid grant.
-
-    The optional timestamp selects grant history; the current resource owner
-    remains authoritative so reassignment cannot expose a former owner event.
-    """
-    return (resource is not None and resource.classification in {"personal", "shared"}
-            and (resource.classification != "personal" or resource.owner_id == user.id)
-            and grant_at(db, resource.id, user.id, when or utcnow()))
-
-
-def observation_permitted(db, row, user):
-    """Authorize an event for admins or for members with verified historical and current device access.
-
-    Unattributed events and infrastructure devices never become member-visible.
-    Freshness is enforced separately by the inbox and request endpoints.
-    """
-    if user.role == "admin":
-        return True
-    resource = db.get(Resource, row.device_id) if row.device_id else None
-    return (row.attribution == "assigned" and device_permitted(db, resource, user)
-            and device_permitted(db, resource, user, utc(row.observed_at)))
 
 
 class InputModel(BaseModel):
@@ -148,7 +79,7 @@ class LoginInput(InputModel):
 
 class IntegrationInput(InputModel):
     """Accept supported read-only providers and constrained server-side secret references."""
-    provider: Literal["unifi_network", "nextdns"]
+    provider: Literal["unifi_network", "nextdns", "proxmox"]
     name: str = Field(min_length=1, max_length=160)
     config: dict
     secret_ref: str = Field(pattern=r"^NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}$")
@@ -163,8 +94,9 @@ class RequestInput(InputModel):
 
 class ReviewInput(InputModel):
     """Limit administrative review to reviewed or denied states with an explanatory note."""
-    decision: Literal["reviewed", "denied"]
+    decision: Literal["reviewed", "denied", "approved"]
     note: str = Field(min_length=3, max_length=2000)
+    minutes: int | None = Field(default=None, ge=15, le=240)
 
 
 class AssignmentInput(InputModel):
@@ -179,71 +111,6 @@ class AssignmentInput(InputModel):
         if len(value) != len(set(value)) or any(len(x) > 128 for x in value):
             raise ValueError("Provide unique user identifiers")
         return value
-
-
-def parsed_date(value):
-    """Parse an ISO source timestamp or datetime and normalize it to timezone-aware UTC."""
-    if isinstance(value, datetime):
-        return utc(value)
-    return utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
-
-
-def apply_snapshot(db, integration, snapshot, settings):
-    """Stage a complete integration snapshot while preserving local ownership and event expiry.
-
-    Reject cross-integration identities and relationships outside the snapshot.
-    Missing inventory is marked stale, relationships are replaced, and replayed
-    observations keep their original expiry. The caller commits or rolls back
-    the full collection transaction; provider infrastructure is never modified.
-    """
-    now = utcnow()
-    seen = set()
-    for data in snapshot.resources:
-        row = db.get(Resource, data["id"])
-        if row and row.integration_id != integration.id:
-            raise ValueError("Resource identity crosses integration boundary")
-        values = {key: data.get(key) for key in ["name", "kind", "provider", "source_id", "site_id", "evidence_kind"]}
-        values.update(observed_at=parsed_date(data.get("observed_at", now)), attributes=data.get("attributes", {}))
-        if row:
-            for key, value in values.items():
-                setattr(row, key, value)
-        else:
-            # Importing an endpoint never assigns it to a person.
-            row = Resource(id=data["id"], integration_id=integration.id, classification="unassigned",
-                           owner_id=None, **values)
-            db.add(row)
-        seen.add(data["id"])
-    db.flush()
-    # Keep previously seen inventory and ownership but explicitly flag missing sources.
-    for row in db.scalars(select(Resource).where(Resource.integration_id == integration.id)):
-        if row.id not in seen:
-            row.attributes = {**row.attributes, "missing_from_latest_snapshot": True}
-    db.execute(delete(Relationship).where(Relationship.integration_id == integration.id))
-    for data in snapshot.relationships:
-        if data["source"] not in seen or data["target"] not in seen:
-            raise ValueError("Relationship endpoints are outside this snapshot")
-        values = {key: data[key] for key in ["id", "source", "target", "kind", "provider", "evidence_kind"]}
-        db.add(Relationship(integration_id=integration.id, observed_at=parsed_date(data.get("observed_at", now)),
-                            attributes=data.get("attributes", {}), **values))
-    for data in snapshot.blocks:
-        when = parsed_date(data["observed_at"])
-        expires = min(parsed_date(data.get("expires_at", when + timedelta(hours=settings.block_retention_hours))),
-                      when + timedelta(hours=settings.block_retention_hours))
-        if expires <= now or when > now + timedelta(minutes=5):
-            continue
-        previous = db.get(Observation, data["id"])
-        if previous:
-            if previous.integration_id != integration.id:
-                raise ValueError("Observation identity crosses integration boundary")
-            continue  # Do not extend the lifetime of a replayed event.
-        values = {key: data.get(key) for key in ["id", "device_id", "device_name", "domain", "source", "reason",
-                                                "evidence_kind", "attribution", "risk_score", "risk_explanation"]}
-        db.add(Observation(integration_id=integration.id, observed_at=when, expires_at=expires, **values))
-    integration.status = "connected"
-    integration.last_sync = now
-    integration.last_error = None
-    integration.sync_started_at = None
-    integration.capabilities = snapshot.capabilities
 
 
 def create_app(settings: Settings | None = None):
@@ -262,7 +129,12 @@ def create_app(settings: Settings | None = None):
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)
+        upkeep = asyncio.create_task(worker.run(app)) if settings.worker_enabled else None
         yield
+        if upkeep:
+            upkeep.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await upkeep
         engine.dispose()
 
     app = FastAPI(title="Nyctr API", version=__version__, lifespan=lifespan,
@@ -343,6 +215,8 @@ def create_app(settings: Settings | None = None):
         return {"ok": True}
 
     app.include_router(oidc_router)
+    for feature in (access, guests, query, assistant):
+        app.include_router(feature.router)
 
     @app.get("/api/overview")
     def overview(_user=Depends(admin), db: Session = Depends(get_db)):
@@ -369,16 +243,19 @@ def create_app(settings: Settings | None = None):
         direction and does not treat them as proof of successful network access.
         """
         nodes = list(db.scalars(select(Resource)))
-        edges = list(db.scalars(select(Relationship)))
+        edges = [relationship_json(e) for e in db.scalars(select(Relationship))]
+        # Cross-source links are worked out at read time and always labelled inferred.
+        edges += derived_links(nodes)
         if focus:
             if not any(n.id == focus for n in nodes):
                 raise HTTPException(404, "Resource not found")
             included = {focus}
             for _ in range(depth):
-                included |= {v for e in edges if e.source in included or e.target in included for v in [e.source, e.target]}
+                included |= {v for e in edges if e["source"] in included or e["target"] in included
+                             for v in [e["source"], e["target"]]}
             nodes = [n for n in nodes if n.id in included]
-            edges = [e for e in edges if e.source in included and e.target in included]
-        return {"nodes": [resource_json(n) for n in nodes], "edges": [relationship_json(e) for e in edges]}
+            edges = [e for e in edges if e["source"] in included and e["target"] in included]
+        return {"nodes": [resource_json(n) for n in nodes], "edges": edges}
 
     @app.get("/api/findings")
     def findings(_user=Depends(admin), db: Session = Depends(get_db)):
@@ -472,38 +349,21 @@ def create_app(settings: Settings | None = None):
         """
         if settings.mode == "demo":
             raise HTTPException(409, "Live collection is disabled in demo mode")
-        integration = db.get(Integration, integration_id)
-        if not integration:
+        snapshot, error = await collect_integration(factory, settings, integration_id, user.id)
+        if error == "missing":
             raise HTTPException(404, "Integration not found")
-        if not re.fullmatch(r"NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}", integration.secret_ref):
+        if error == "secret_ref":
             raise HTTPException(409, "Integration secret reference is invalid")
-        api_key = os.environ.get(integration.secret_ref)
-        if not api_key:
+        if error == "secret":
             raise HTTPException(409, "The integration secret is not configured on the server")
-        locked = db.execute(update(Integration).where(
-            Integration.id == integration.id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
-        ).values(status="syncing", sync_started_at=utcnow()).execution_options(synchronize_session="fetch"))
-        if locked.rowcount != 1:
-            db.rollback()
+        if error == "busy":
             raise HTTPException(409, "A collection is already running")
+        if error:
+            raise HTTPException(502, error)
+        # Deterministic analysis and the written guest rule run on the stored evidence.
+        due = after_collection(db, settings)
         db.commit()
-        from .integrations import IntegrationError, collect
-        try:
-            snapshot = await asyncio.wait_for(collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
-            apply_snapshot(db, integration, snapshot, settings)
-            audit(db, user.id, "integration.collected", integration.id,
-                  resources=len(snapshot.resources), observations=len(snapshot.blocks))
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            integration = db.get(Integration, integration_id)
-            integration.status = "error"
-            integration.last_error = str(exc) if isinstance(exc, IntegrationError) else "Collection failed. Check provider reachability and configuration."
-            integration.sync_started_at = None
-            audit(db, user.id, "integration.collection_failed", integration.id)
-            db.commit()
-            raise HTTPException(502, integration.last_error) from None
+        await guests.enforce(db, settings, due)
         return {"ok": True, "resource_count": len(snapshot.resources), "observation_count": len(snapshot.blocks)}
 
     @app.get("/api/devices")
@@ -568,12 +428,13 @@ def create_app(settings: Settings | None = None):
         return [request_json(r) for r in db.scalars(query)]
 
     @app.post("/api/requests", status_code=201)
-    def create_request(body: RequestInput, auth=Depends(identity), db: Session = Depends(get_db)):
-        """Persist an authorized, fresh event request once per user and observation.
+    async def create_request(body: RequestInput, auth=Depends(identity), db: Session = Depends(get_db)):
+        """Persist an authorized, fresh event request once per user and observation, then assess it.
 
         Hidden or missing events return 404; expired events return 409. The stored
         domain/device snapshot survives inbox expiry. Concurrent duplicate submits
-        return the existing request, and no infrastructure change is performed.
+        return the existing request. The assessment is always stored and returned;
+        access is opened only when the administrator-written rule allows it.
         """
         user = auth[0]
         observation = db.get(Observation, body.block_id)
@@ -593,6 +454,8 @@ def create_app(settings: Settings | None = None):
             audit(db, user.id, "access.requested", row.id, block_id=observation.id,
                   duration_minutes=body.duration_minutes)
             db.commit()
+            await access.decide(db, settings, row, observation)
+            db.commit()
         except IntegrityError:
             db.rollback()
             existing = db.scalar(select(AccessRequest).where(AccessRequest.requester_id == user.id,
@@ -603,28 +466,82 @@ def create_app(settings: Settings | None = None):
         return request_json(row)
 
     @app.post("/api/requests/{request_id}/review")
-    def review(request_id: str, body: ReviewInput, user=Depends(admin), db: Session = Depends(get_db)):
-        """Record an administrator review of a pending request with a compare-and-swap update.
+    async def review(request_id: str, body: ReviewInput, user=Depends(admin), db: Session = Depends(get_db)):
+        """Record an administrator decision on a pending request with a compare-and-swap update.
 
-        Concurrent or repeated reviews return 409. The audit event explicitly records
-        that no network execution occurred; reviewed does not mean access was granted.
+        Concurrent or repeated reviews return 409. `reviewed` and `denied` change
+        nothing on the network. `approved` opens a temporary lease whose recorded
+        execution says whether the provider was actually changed.
         """
         row = db.get(AccessRequest, request_id)
         if not row:
             raise HTTPException(404, "Request not found")
         if row.status != "pending":
             raise HTTPException(409, "This request has already been reviewed")
+        if body.decision == "approved":
+            # An approval changes a provider, so the evidence behind it must still be current.
+            # Saying no, or only noting a request, needs no fresh evidence.
+            source = db.get(Observation, row.block_id)
+            if not source or utc(source.expires_at) <= utcnow():
+                raise HTTPException(409, "The blocked lookup behind this request is no longer current. "
+                                         "Ask the person to open the page again and send a new request.")
         # Compare and swap prevents simultaneous administrators overwriting each other.
         result = db.execute(update(AccessRequest).where(AccessRequest.id == request_id,
                                                        AccessRequest.status == "pending").values(
-            status=body.decision, review_note=body.note))
+            status=body.decision, review_note=body.note, decided_by=user.id))
         if result.rowcount != 1:
             db.rollback()
             raise HTTPException(409, "This request has already been reviewed")
-        audit(db, user.id, "access." + body.decision, row.id, execution="not_performed")
+        execution = "not_performed"
+        if body.decision == "approved":
+            from .integrations import IntegrationError
+
+            minutes = body.minutes or row.duration_minutes
+            integration = db.get(Integration, row.integration_id) if row.integration_id else None
+            try:
+                lease = await access.open_lease(
+                    db, settings, integration=integration, domain=row.domain, device_name=row.device_name,
+                    requester_id=row.requester_id, request_id=row.id, minutes=minutes, decided_by=user.id,
+                    risk_score=row.risk_score)
+            except IntegrationError as error:
+                db.rollback()
+                raise HTTPException(502, str(error)) from None
+            execution = lease.execution
+        audit(db, user.id, "access." + body.decision, row.id, execution=execution)
         db.commit()
         db.refresh(row)
         return request_json(row)
+
+    @app.api_route("/api/hooks/collect", methods=["GET", "POST"], status_code=202)
+    @app.api_route("/api/hooks/collect/{token}", methods=["GET", "POST"], status_code=202)
+    async def nudge(request: Request, token: str = ""):
+        """Let the UniFi console ask for a collection now, for example from an Alarm Manager webhook.
+
+        The caller proves a shared secret (Authorization: Bearer, or the path form
+        for senders that cannot set headers). Nothing in the request is read or
+        stored: it only starts the same read-only collection an administrator can
+        start, at most once every 30 seconds. Disabled unless a token is configured.
+        """
+        supplied = token or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        expected = settings.nudge_token
+        if settings.mode != "live" or not expected or not supplied \
+                or not hmac.compare_digest(supplied.encode(), expected.encode()):
+            raise HTTPException(404, "API endpoint not found")
+        now = time.monotonic()
+        if now - getattr(app.state, "last_nudge", float("-inf")) < 30:
+            return {"queued": False}
+        app.state.last_nudge = now
+        # Keep a reference so the task is not collected before it finishes.
+        app.state.nudge_task = asyncio.create_task(worker.collect_all(factory, settings))
+        with factory() as db:
+            audit(db, None, "integration.nudged", None)
+            db.commit()
+        return {"queued": True}
+
+    @app.get("/api/users")
+    def users(_user=Depends(admin), db: Session = Depends(get_db)):
+        """List people for administrator views. Never includes credentials or identity-provider subjects."""
+        return [columns(u, "id name email role active") for u in db.scalars(select(User).order_by(User.name))]
 
     @app.get("/api/audit")
     def audit_events(_user=Depends(admin), db: Session = Depends(get_db)):

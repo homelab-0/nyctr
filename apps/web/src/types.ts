@@ -106,6 +106,16 @@ export interface Block {
   attribution: string;
   risk_score: number | null;
   risk_explanation: string;
+  risk_band: RiskBand;
+  risk_category: string;
+  risk_factors: RiskFactor[];
+  reason_codes: string[] | null;
+}
+export type RiskBand = 'low' | 'medium' | 'high' | 'unknown';
+/** One explained contribution to a score. Null points mean the score is unknown. */
+export interface RiskFactor {
+  label: string;
+  points: number | null;
 }
 export interface AccessRequest {
   id: string;
@@ -118,6 +128,182 @@ export interface AccessRequest {
   status: string;
   created_at: string;
   review_note: string | null;
+  risk_score: number | null;
+  risk_category: string | null;
+  risk_factors: RiskFactor[] | null;
+  decided_by: string | null;
+  decision_note: string | null;
+}
+/** What happened at the provider for a decision. Only `applied` means the provider was changed. */
+export type Execution = 'simulated' | 'applied' | 'not_applied' | 'failed';
+export interface Lease {
+  id: string;
+  request_id: string | null;
+  integration_id: string | null;
+  domain: string;
+  device_name: string;
+  requester_id: string | null;
+  requester_name?: string;
+  decided_by_name?: string;
+  kind: 'temporary' | 'permanent';
+  status: 'active' | 'ended';
+  ended_reason: string | null;
+  execution: Execution;
+  owned: boolean;
+  scope: string;
+  decided_by: string;
+  risk_score: number | null;
+  created_at: string;
+  expires_at: string | null;
+  ended_at: string | null;
+  last_error: string | null;
+}
+export interface Suggestion {
+  domain: string;
+  times: number;
+  people: string[];
+  last_at: string;
+  risk_score: number | null;
+  integration_id: string | null;
+  scope: string;
+}
+export type WriteMode = 'simulated' | 'enabled' | 'disabled';
+export interface AccessRule {
+  enabled: boolean;
+  max_score: number;
+  max_minutes: number;
+  per_day: number;
+}
+export interface GuestRule {
+  enabled: boolean;
+  hits: number;
+  minutes: number;
+}
+export interface Rules {
+  access: AccessRule;
+  guest: GuestRule;
+  writes: { nextdns: WriteMode; unifi_network: WriteMode };
+  collect_interval_seconds: number;
+}
+export interface GuestPass {
+  id: string;
+  integration_id: string;
+  code: string;
+  name: string;
+  minutes: number;
+  guest_limit: number | null;
+  data_limit_mb: number | null;
+  guest_count: number;
+  issued_by: string | null;
+  issued_by_name: string;
+  execution: Execution;
+  created_at: string;
+  activated_at: string | null;
+  expires_at: string | null;
+  ended_at: string | null;
+  state: 'unused' | 'in_use' | 'ended';
+}
+export interface TimelineItem {
+  at: string;
+  kind: string;
+  text: string;
+  detail?: string;
+  evidence: string;
+}
+export interface GuestDevice {
+  id: string;
+  name: string;
+  integration_id: string;
+  mac: string | null;
+  ip: string | null;
+  connected_at: string | null;
+  access_point: { id: string; name: string } | null;
+  authorized: boolean;
+  authorization: {
+    authorizationMethod?: string;
+    authorizedAt?: string;
+    expiresAt?: string;
+    usage?: { bytes?: number; durationSec?: number };
+  } | null;
+  state: 'online' | 'waiting' | 'cut' | 'locked' | 'offline';
+  observed_at: string;
+  pass: { id: string; name: string; evidence: string } | null;
+  /** How the device got on: a pass typed into UniFi's sign-in page, or let on from the console. */
+  joined_by: 'pass' | 'administrator' | null;
+  risk: { score: number | null; band: RiskBand; factors: RiskFactor[] };
+  lookups: { blocked: number; threat: number };
+  timeline: TimelineItem[];
+}
+/** How guests sign in. UniFi always serves the page; Nyctr is never in the guest's path. */
+export interface GuestPortal {
+  served_by: 'unifi';
+  nyctr_in_guest_path: false;
+  wifi: { name: string; enabled: boolean; captive_portal: boolean; network: string | null }[];
+  notice: string;
+  nudge: boolean;
+}
+export interface GuestOverview {
+  writes: WriteMode;
+  rule: GuestRule;
+  portal: GuestPortal;
+  sources: { id: string; name: string }[];
+  passes: GuestPass[];
+  devices: GuestDevice[];
+  not_collected: string[];
+}
+export interface AttentionItem {
+  kind: 'guest' | 'lease' | 'request' | 'finding' | 'source' | 'suggestion';
+  id: string;
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  detail: string;
+  at: string | null;
+}
+export interface AssistantReference {
+  ref: string;
+  kind: string;
+  id: string;
+  label: string;
+}
+export interface AssistantAnswer {
+  answer: string;
+  references: AssistantReference[];
+  provider: 'model' | 'sample';
+  model: string;
+}
+export interface AssistantConfig {
+  provider: 'model' | 'sample' | 'off';
+  model: string;
+}
+export interface Insight {
+  take: string;
+  reasoning: string[];
+  next_steps: string[];
+  confidence: 'low' | 'medium' | 'high';
+  provider: 'model' | 'sample';
+  model: string;
+  created_at: string;
+}
+export interface Person {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  active: boolean;
+}
+export interface DeviceLabel {
+  source_id: string;
+  name: string;
+  model: string | null;
+  integration_id: string;
+  device_id: string | null;
+  linked_at: string | null;
+  suggested_device_id: string | null;
+}
+export interface ThisDevice {
+  device_id: string | null;
+  name: string | null;
+  simulated: boolean;
 }
 export interface AuditEvent {
   id: string;

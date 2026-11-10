@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     oidc_admin_groups: str = ""
     oidc_allowed_groups: str = ""
     oidc_groups_claim: str = "groups"
+    # Providers Nyctr may change, e.g. "nextdns,unifi_network". Empty keeps every connector read-only.
+    provider_writes: str = ""
+    # Seconds between automatic collections in live mode; 0 collects only when an admin asks.
+    collect_interval_seconds: int = 0
+    worker_enabled: bool = True
+    # Optional OpenAI-compatible chat endpoint for the assistant. The key never leaves the server.
+    ai_base_url: str = ""
+    ai_api_key: str = ""
+    ai_model: str = ""
+    # Optional shared secret that lets the UniFi console ask Nyctr to collect now (Alarm Manager webhook).
+    nudge_token: str = ""
 
     @model_validator(mode="after")
     def validate_settings(self):
@@ -59,6 +70,21 @@ class Settings(BaseSettings):
                 raise ValueError("OIDC issuer must use HTTPS")
             if issuer.query or issuer.fragment:
                 raise ValueError("OIDC issuer cannot contain query or fragment")
+        unknown = self.writable_providers - {"nextdns", "unifi_network"}
+        if unknown:
+            raise ValueError("NYCTR_PROVIDER_WRITES accepts only nextdns and unifi_network")
+        if self.collect_interval_seconds and not 60 <= self.collect_interval_seconds <= 86400:
+            raise ValueError("Automatic collection interval must be 0 or between 60 and 86400 seconds")
+        if self.nudge_token and len(self.nudge_token) < 32:
+            raise ValueError("The collection nudge token must be at least 32 characters")
+        if bool(self.ai_base_url) != bool(self.ai_model):
+            raise ValueError("Assistant base URL and model must be configured together")
+        if self.ai_base_url:
+            self.ai_base_url = self.ai_base_url.rstrip("/")
+            endpoint = urlsplit(self.ai_base_url)
+            if endpoint.scheme not in ("http", "https") or not endpoint.netloc or endpoint.username \
+                    or endpoint.password or endpoint.query or endpoint.fragment:
+                raise ValueError("Assistant base URL must be a plain HTTP(S) URL")
         if self.mode == "demo" and self.oidc_issuer:
             raise ValueError("OIDC is disabled in demo mode; use a separate live database")
         return self
@@ -67,6 +93,22 @@ class Settings(BaseSettings):
     def oidc_enabled(self) -> bool:
         """Report whether a complete OIDC configuration passed settings validation."""
         return bool(self.oidc_issuer)
+
+    @property
+    def writable_providers(self) -> set[str]:
+        """Return the providers an operator explicitly allowed Nyctr to change."""
+        return {x.strip() for x in self.provider_writes.split(",") if x.strip()}
+
+    def write_mode(self, provider: str) -> str:
+        """Say how a change to this provider is carried out: simulated, enabled or disabled."""
+        if self.mode == "demo":
+            return "simulated"
+        return "enabled" if provider in self.writable_providers else "disabled"
+
+    @property
+    def ai_enabled(self) -> bool:
+        """Report whether a model endpoint was configured for the assistant."""
+        return bool(self.ai_base_url and self.ai_model)
 
     @property
     def admin_groups(self) -> set[str]:

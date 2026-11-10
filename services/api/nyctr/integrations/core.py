@@ -1,7 +1,8 @@
-"""Bounded, credential-safe read transport shared by provider adapters.
+"""Bounded, credential-safe transport shared by provider adapters.
 
-This module deliberately has no write method. Imported metadata is evidence,
-not authority to make an infrastructure change.
+`ReadClient` deliberately has no write method; collection can never change a
+provider. Changes go through `nyctr.integrations.actions`, which is the only
+caller of the non-GET exchange below and is gated by explicit configuration.
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ class Snapshot:
     relationships: list[dict[str, Any]] = field(default_factory=list)
     blocks: list[dict[str, Any]] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)
+    vouchers: list[dict[str, Any]] = field(default_factory=list)
 
 
 def utc_now() -> datetime:
@@ -194,20 +196,20 @@ def selected(row: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: row[key] for key in keys if key in row}
 
 
-def validate_unifi_url(value: Any) -> str:
-    """Require a documented HTTPS base path and an explicitly allowed console host.
+def _validated_host(value: Any, label: str):
+    """Parse an HTTPS connector URL and require an explicitly allowed, non-reserved host.
 
-    Reject credential-bearing URLs, unexpected paths, and forbidden literal
-    addresses before any API key can be sent to the destination.
+    Reject credential-bearing URLs and forbidden literal addresses before any
+    API key can be sent to the destination. Returns the parsed URL and host.
     """
     if not isinstance(value, str) or len(value) > 2048:
-        raise IntegrationError("UniFi requires an HTTPS integration base URL.")
+        raise IntegrationError(f"{label} requires an HTTPS integration base URL.")
     try:
         parsed = urlsplit(value)
         host = (parsed.hostname or "").lower()
         port = parsed.port
     except ValueError:
-        raise IntegrationError("Invalid UniFi integration base URL.") from None
+        raise IntegrationError(f"Invalid {label} integration base URL.") from None
     if (
         parsed.scheme != "https"
         or not host
@@ -221,7 +223,7 @@ def validate_unifi_url(value: Any) -> str:
         or any(char.isspace() for char in value)
         or (port is not None and not 1 <= port <= 65535)
     ):
-        raise IntegrationError("UniFi requires HTTPS without URL credentials, query, or fragment.")
+        raise IntegrationError(f"{label} requires HTTPS without URL credentials, query, or fragment.")
     if host in {"localhost", "metadata.google.internal", "metadata.azure.internal"} or host.endswith(".localhost"):
         raise IntegrationError("Loopback and metadata endpoints cannot be connector destinations.")
     try:
@@ -240,7 +242,13 @@ def validate_unifi_url(value: Any) -> str:
         if entry.strip()
     }
     if host not in allowed:
-        raise IntegrationError("UniFi hostname is not in the server's NYCTR_CONNECTOR_HOSTS allowlist.")
+        raise IntegrationError(f"{label} hostname is not in the server's NYCTR_CONNECTOR_HOSTS allowlist.")
+    return parsed, host
+
+
+def validate_unifi_url(value: Any) -> str:
+    """Require a documented HTTPS base path and an explicitly allowed console host."""
+    parsed, host = _validated_host(value, "UniFi")
     path = parsed.path.rstrip("/")
     local = path == "/proxy/network/integration"
     cloud = bool(re.fullmatch(r"/v1/connector/consoles/[A-Za-z0-9:_-]+/proxy/network/integration", path))
@@ -249,23 +257,55 @@ def validate_unifi_url(value: Any) -> str:
     return value.rstrip("/")
 
 
-def make_http_client(api_key: str) -> httpx.AsyncClient:
-    """Create a verified-TLS client that never redirects or inherits proxy settings."""
+def validate_proxmox_url(value: Any) -> str:
+    """Require an allowed Proxmox VE host and normalise the URL to its documented API root."""
+    parsed, _host = _validated_host(value, "Proxmox")
+    if parsed.path.rstrip("/") not in ("", "/api2/json"):
+        raise IntegrationError("Use the Proxmox host address, optionally ending in /api2/json.")
+    return f"https://{parsed.netloc}/api2/json"
+
+
+def make_http_client(api_key: str, *, authorization_scheme: str = "") -> httpx.AsyncClient:
+    """Create a verified-TLS client that never redirects or inherits proxy settings.
+
+    Providers that expect an Authorization header pass its scheme; the default
+    sends the key as X-Api-Key.
+    """
     if not isinstance(api_key, str) or not api_key or any(c in api_key for c in "\r\n"):
         raise IntegrationError("The configured API key is missing or invalid.", category="secret")
+    credential = ({"Authorization": f"{authorization_scheme}={api_key}"} if authorization_scheme
+                  else {"X-Api-Key": api_key})
     ca_bundle = os.getenv("NYCTR_CONNECTOR_CA_BUNDLE")
     try:
         verify = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else True
     except (OSError, ssl.SSLError):
         raise IntegrationError("The server's connector CA bundle could not be loaded.", category="tls") from None
     return httpx.AsyncClient(
-        headers={"X-Api-Key": api_key, "Accept": "application/json"},
+        headers={**credential, "Accept": "application/json"},
         follow_redirects=False,
         timeout=httpx.Timeout(20.0, connect=10.0),
         limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
         verify=verify,
         trust_env=False,
     )
+
+
+class BudgetExceeded(IntegrationError):
+    """A collection used up its request or record budget.
+
+    Raised as its own type so an optional read never mistakes "Nyctr stopped
+    asking" for "the provider does not offer this".
+    """
+
+
+def must_stop(error: IntegrationError) -> bool:
+    """Say whether an error on an optional read must fail the collection instead of becoming a gap.
+
+    A missing optional feature is a gap. A broken connection, a rate limit or a
+    spent budget is not: continuing would return an incomplete snapshot labelled
+    with the wrong cause.
+    """
+    return isinstance(error, BudgetExceeded) or error.category in {"tls", "transport", "timeout", "rate_limit"}
 
 
 class ReadClient:
@@ -282,7 +322,7 @@ class ReadClient:
         """Charge returned rows against the shared collection budget or fail closed."""
         self.records += count
         if self.records > MAX_RECORDS:
-            raise IntegrationError("Collection exceeded its record budget; narrow the integration scope.")
+            raise BudgetExceeded("Collection exceeded its record budget; narrow the integration scope.")
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Read a local provider path with bounded size and sanitized failures.
@@ -290,44 +330,56 @@ class ReadClient:
         Reject redirects and provider-level errors even when HTTP reports success;
         never include response contents or credentials in public exceptions.
         """
-        if not path.startswith("/") or path.startswith("//") or any(x in path for x in ("?", "#", "\\", "..")):
-            raise IntegrationError("Invalid connector request path.")
-        self.requests += 1
-        if self.requests > MAX_REQUESTS:
-            raise IntegrationError("Collection exceeded its request budget; narrow the site scope.")
-        try:
-            async with self.client.stream("GET", self.base_url + path, params=params) as response:
-                if (evidence := _probe_evidence.get()) is not None:
-                    evidence.responses_received += 1
-                if response.is_redirect:
-                    raise IntegrationError("Provider redirected the request; redirects are never followed.")
-                if response.status_code in {401, 403}:
-                    raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
-                                           category="authentication")
-                if response.status_code == 429:
-                    raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit")
-                if response.status_code >= 400:
-                    raise IntegrationError(f"Provider returned HTTP {response.status_code}.")
-                chunks: list[bytes] = []
-                size = 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > MAX_BODY_BYTES:
-                        raise IntegrationError("Provider response exceeded the collection size limit.")
-                    chunks.append(chunk)
-                payload = json.loads(b"".join(chunks))
-        except (httpx.HTTPError, OSError) as exc:
-            raise IntegrationError("Could not securely connect to the provider. Check its address, certificate, and availability.",
-                                   category=_transport_category(exc)) from None
-        except (ValueError, UnicodeError):
-            raise IntegrationError("Provider returned invalid JSON.") from None
-        if not isinstance(payload, dict):
-            raise IntegrationError("Provider response must be a JSON object.")
-        if payload.get("errors"):
-            # NextDNS can report failures with HTTP 200. Never expose error bodies,
-            # which may contain reflected credentials, addresses, or request inputs.
-            raise IntegrationError("Provider reported an API error. Check the configuration and read permissions.")
-        return payload
+        return await exchange(self, "GET", path, params)
+
+
+async def exchange(reader: ReadClient, method: str, path: str, params: dict[str, Any] | None = None,
+                   body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Perform one bounded same-origin request and return its JSON object.
+
+    Shared by collection (GET) and by the separately gated action client. An
+    empty successful body is returned as an empty object.
+    """
+    self = reader
+    if not path.startswith("/") or path.startswith("//") or any(x in path for x in ("?", "#", "\\", "..")):
+        raise IntegrationError("Invalid connector request path.")
+    self.requests += 1
+    if self.requests > MAX_REQUESTS:
+        raise BudgetExceeded("Collection exceeded its request budget; narrow the site scope.")
+    try:
+        async with self.client.stream(method, self.base_url + path, params=params, json=body) as response:
+            if (evidence := _probe_evidence.get()) is not None:
+                evidence.responses_received += 1
+            if response.is_redirect:
+                raise IntegrationError("Provider redirected the request; redirects are never followed.")
+            if response.status_code in {401, 403}:
+                raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
+                                       category="authentication")
+            if response.status_code == 429:
+                raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit")
+            if response.status_code >= 400:
+                raise IntegrationError(f"Provider returned HTTP {response.status_code}.")
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > MAX_BODY_BYTES:
+                    raise IntegrationError("Provider response exceeded the collection size limit.")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            payload = {} if method != "GET" and not raw.strip() else json.loads(raw)
+    except (httpx.HTTPError, OSError) as exc:
+        raise IntegrationError("Could not securely connect to the provider. Check its address, certificate, and availability.",
+                               category=_transport_category(exc)) from None
+    except (ValueError, UnicodeError):
+        raise IntegrationError("Provider returned invalid JSON.") from None
+    if not isinstance(payload, dict):
+        raise IntegrationError("Provider response must be a JSON object.")
+    if payload.get("errors"):
+        # NextDNS can report failures with HTTP 200. Never expose error bodies,
+        # which may contain reflected credentials, addresses, or request inputs.
+        raise IntegrationError("Provider reported an API error. Check the configuration and read permissions.")
+    return payload
 
 
 def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:

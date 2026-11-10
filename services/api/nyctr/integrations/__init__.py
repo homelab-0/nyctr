@@ -1,4 +1,4 @@
-"""Vendor adapters with an intentionally read-only capability boundary."""
+"""Vendor adapters. Collection is read-only; provider changes live in `actions.py`."""
 
 from __future__ import annotations
 
@@ -6,11 +6,19 @@ import asyncio
 import re
 from typing import Any
 
-from .core import IntegrationError, Snapshot, validate_unifi_url
+from .core import IntegrationError, Snapshot, validate_proxmox_url, validate_unifi_url
 
 _CAPABILITIES = {
-    "unifi_network": ["sites:read", "devices:read", "clients:read", "networks:read", "firewall_policies:read"],
+    "unifi_network": ["sites:read", "devices:read", "clients:read", "networks:read", "firewall_policies:read",
+                      "guest_access:read", "hotspot_vouchers:read", "wifi_broadcasts:read"],
     "nextdns": ["profile:read", "dns_policies:read", "blocked_dns_logs:read"],
+    "proxmox": ["nodes:read", "bridges:read", "guests:read", "guest_network:read", "firewall_options:read"],
+}
+
+# What Nyctr can change at each provider when an operator allows it.
+ACTIONS = {
+    "unifi_network": ["hotspot_vouchers:write", "guest_access:write"],
+    "nextdns": ["allowlist:write"],
 }
 
 
@@ -47,6 +55,10 @@ def validate_config(provider: str, config: dict[str, Any]) -> dict[str, Any]:
         if type(hours) is not int or not 1 <= hours <= 72:
             raise IntegrationError("NextDNS lookback_hours must be an integer between 1 and 72.")
         return {"profile_id": profile.lower(), "lookback_hours": hours}
+    if provider == "proxmox":
+        if set(config) - {"base_url"}:
+            raise IntegrationError("Proxmox supports base_url configuration only.")
+        return {"base_url": validate_proxmox_url(config.get("base_url"))}
     raise IntegrationError("This provider is not implemented in this release.")
 
 
@@ -63,6 +75,10 @@ async def collect(provider: str, integration_id: str, config: dict[str, Any], ap
                 from .unifi import collect_unifi
 
                 return await collect_unifi(integration_id, clean, api_key)
+            if provider == "proxmox":
+                from .proxmox import collect_proxmox
+
+                return await collect_proxmox(integration_id, clean, api_key)
             from .nextdns import collect_nextdns
 
             return await collect_nextdns(integration_id, clean, api_key)
@@ -71,4 +87,4 @@ async def collect(provider: str, integration_id: str, config: dict[str, Any], ap
                                category="timeout") from None
 
 
-__all__ = ["IntegrationError", "Snapshot", "capabilities_for", "collect", "validate_config"]
+__all__ = ["ACTIONS", "IntegrationError", "Snapshot", "capabilities_for", "collect", "validate_config"]

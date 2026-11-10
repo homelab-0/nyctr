@@ -128,6 +128,14 @@ _CAPABILITY_LABELS = {
     "profile:read": "DNS profile configuration",
     "dns_policies:read": "DNS policy sections",
     "blocked_dns_logs:read": "Recent blocked DNS queries",
+    "guest_access:read": "Guest Wi-Fi access state",
+    "hotspot_vouchers:read": "Guest passes (hotspot vouchers)",
+    "wifi_broadcasts:read": "Wi-Fi names and which use the captive portal",
+    "nodes:read": "Cluster nodes",
+    "bridges:read": "Virtual bridges",
+    "guests:read": "Virtual machines and containers",
+    "guest_network:read": "Guest network cards, VLAN tags and firewall flags",
+    "firewall_options:read": "Firewall switches",
 }
 
 
@@ -200,7 +208,44 @@ def _gaps(provider: str, evidence: ProbeEvidence, counts: SnapshotCounts | None)
             ("user_attribution", "Device inventory does not establish user ownership",
              "Members still require explicit device assignment and reliable event-time attribution before observations can appear in their inbox."),
         ])
+    elif provider == "proxmox":
+        entries.extend([
+            ("experimental", "This adapter has not been run against a real cluster",
+             "It follows the documented Proxmox VE API. Treat its first results as unverified and report differences."),
+            ("reachability", "A network card on a bridge is not a traffic result",
+             "Bridge and VLAN settings are configuration. They do not prove a guest can reach anything."),
+            ("firewall_rules", "Firewall rules are not read yet",
+             "Only the on/off switches at cluster, guest and card level are collected."),
+        ])
     additional = {
+        "unifi_vouchers_unavailable": (
+            "Guest passes could not be read",
+            "The hotspot voucher list was not available to this key or site. Guest pass tracking is incomplete.",
+        ),
+        "unifi_wifi_unavailable": (
+            "Wi-Fi names could not be read",
+            "Nyctr cannot show which Wi-Fi names sit behind UniFi's captive portal.",
+        ),
+        "unifi_guest_details_unavailable": (
+            "Guest authorisation details were not returned",
+            "Some guest devices are listed without their authorisation time, expiry or usage.",
+        ),
+        "unifi_guest_detail_limit": (
+            "More guests than one collection reads in detail",
+            "Only the first 40 guest devices carry authorisation details in each collection.",
+        ),
+        "proxmox_no_visible_nodes": (
+            "No nodes were visible to the token",
+            "The cluster resource list was empty. Guest and bridge reads were not exercised.",
+        ),
+        "proxmox_guest_limit": (
+            "More guests than one collection reads",
+            "Only the first 48 virtual machines and containers were read. The rest are missing from the map.",
+        ),
+        "proxmox_firewall_options_unavailable": (
+            "Some firewall switches could not be read",
+            "A firewall option read failed. Affected guests show their firewall state as unknown, not as off.",
+        ),
         "nextdns_policy_fields_missing": (
             "Some DNS policy sections were absent",
             "The profile did not expose every policy section supported by this adapter. DNS policy coverage remains unverified.",

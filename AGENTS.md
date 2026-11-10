@@ -1,8 +1,12 @@
 # Working on Nyctr
 
 Read README.md, docs/architecture/overview.md, docs/security-model.md and
-docs/roadmap.md before changing architectural behavior. Preserve the approved
-charcoal/blue Nyctr UI.
+docs/roadmap.md before changing architectural behavior. Preserve the Nyctr console
+design: near-black ground, layered panels, one blue accent, Geist type. Colour
+names the source (UniFi blue, Proxmox orange, NextDNS teal). Line style names the
+evidence (solid observed, dashed configured, dotted inferred). Hatching means
+unknown or not collected. Tokens live in `apps/web/src/styles/base.css`. Write
+interface text in plain words a non-technical member can read.
 
 ## Repository workflow
 
@@ -19,9 +23,21 @@ charcoal/blue Nyctr UI.
 
 ## Product boundaries
 
-- Connector collection is GET-only in this version. Do not introduce provider
-  writes while implementing unrelated features.
-- AI has no infrastructure credentials and cannot authorize its own changes.
+- Connector collection is GET-only. Provider changes exist only in
+  `nyctr/integrations/actions.py`, refuse to run unless the provider is named in
+  `NYCTR_PROVIDER_WRITES`, and read back what they changed (voucher create and
+  delete do not yet; say so wherever verification is claimed). Do not add a provider
+  write anywhere else, and do not add a new kind of write while implementing an
+  unrelated feature.
+- Nyctr acts on its own only under an administrator-written rule in
+  `nyctr/policy.py`. A risk score alone never opens access, and nothing a model
+  returns can trigger a change, edit a rule or cut a device off.
+- Record what happened at the provider (`simulated`, `applied`, `not_applied`,
+  `failed`) separately from the decision. Never display a decision as restored or
+  removed connectivity unless it was applied.
+- AI has no infrastructure credentials and cannot authorize its own changes. It
+  sees only the redacted evidence pack built in `nyctr/assistant.py`; citations
+  to anything outside the pack are removed before the answer is returned.
 - Unknown risk is unknown, never an invented low score. Missing logs do not
   prove a successful connection.
 - Physical topology, configured policy, inferred reachability and observed
@@ -30,8 +46,15 @@ charcoal/blue Nyctr UI.
   device access. A network address or DNS profile alone is not user identity.
 - Expiring an inbox observation must not delete an existing request or its audit
   history. Revalidate freshness before starting a new request or execution.
-- Future temporary access must use owned durable leases, explicit scope,
-  verification and reconciliation after failure or restart.
+- Temporary access uses owned durable leases, explicit scope, verification and
+  reconciliation after failure or restart. Ending a lease must never remove a
+  provider entry Nyctr did not create.
+- Guests sign in on UniFi's own captive portal. Nyctr never serves a page to a
+  device that has not signed in and must not be made an external portal server;
+  see docs/guest-wifi.md. Do not add an unauthenticated API route without
+  changing the guard test on purpose.
+- Links between sources (same hardware address, VLAN tag or address) are computed
+  at read time and always labelled inferred. Never store them as provider fact.
 - Never describe Site Manager or the Carrier/ISP Fabric API as full coverage of
   organizational Fabric Blueprint/Canvas policies without confirming support.
 

@@ -29,8 +29,11 @@ revision; no supported stable release or response-time SLA is promised yet.
   references. They must not be returned to the web client or logged.
 - Current collectors send only GET requests and verify TLS. Provider-specific
   read permissions should also be selected where available.
-- The first release has no provider write endpoint, automatic access grant or
-  autonomous AI action.
+- Provider changes are limited to a NextDNS allowlist entry, a UniFi guest pass
+  and UniFi guest authorisation. They are off unless the operator sets
+  `NYCTR_PROVIDER_WRITES`, and demo mode only simulates them.
+- Nyctr acts without a person only under an administrator-written rule. There is
+  no autonomous AI action: the model has no credentials, tools or write path.
 
 Read [the security model](docs/security-model.md) for data provenance, identity,
 retention and the planned approval/execution design. These are implementation

@@ -2,7 +2,11 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { AuthProvider } from './auth';
-import './styles.css';
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
+import './styles/base.css';
+import './styles/shell.css';
+import './styles/screens.css';
 
 /** Replaces a failed client render with recovery guidance without deleting server-owned records. */
 class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {

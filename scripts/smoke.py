@@ -109,15 +109,28 @@ def run(verify_persistence):
     assert asset, "Compiled JavaScript reference missing"
     assert anonymous.request(asset.group(1)), "Compiled JavaScript not served"
 
+    # Every block carries a rule-based assessment; an unknown score is null, never low.
+    assert all("risk_band" in block and "risk_factors" in block for block in blocks)
+    risky = next(block for block in blocks if block["risk_band"] == "high")
+    safe = next(block for block in blocks if block["risk_band"] == "low")
     payload = {
-        "block_id": blocks[0]["id"],
+        "block_id": risky["id"],
         "reason": "Container integration test: request family photo access.",
         "duration_minutes": 30,
     }
     member.request("/api/requests", payload, expected=403, csrf=False)
     created = member.request("/api/requests", payload, expected=201)
-    assert created["status"] == "pending"
+    # A risky block is scored and left for a person, whatever the access rule allows.
+    assert created["status"] == "pending" and created["risk_score"] > 60
     STATE.write_text(json.dumps({"request_id": created["id"]}))
+    # A low-risk privacy-list block opens under the demo's written rule, and demo
+    # mode records the provider change as simulated rather than applied.
+    opened = member.request("/api/requests", {**payload, "block_id": safe["id"]}, expected=201)
+    assert opened["status"] == "auto_approved" and opened["decided_by"] == "rule"
+    lease = next(row for row in member.request("/api/leases") if row["request_id"] == opened["id"])
+    assert lease["status"] == "active" and lease["execution"] == "simulated"
+    member.request("/api/guests", expected=403)
+    member.request("/api/rules", expected=403)
 
     admin = Client()
     assert admin.login("admin@nyctr.demo")["role"] == "admin"
@@ -127,7 +140,13 @@ def run(verify_persistence):
     assert graph["edges"] and all(
         edge["source"] in ids and edge["target"] in ids for edge in graph["edges"]
     )
+    assert any(edge["evidence_kind"] == "inferred" and edge["provider"] == "nyctr" for edge in graph["edges"])
     assert any(row["id"] == created["id"] for row in admin.request("/api/requests"))
+    assert admin.request("/api/attention"), "The attention list is empty in the seeded demo"
+    assert admin.request("/api/guests")["writes"] == "simulated"
+    answer = admin.request("/api/graph/query", {"query": "{ workloads(firewall: false) { name } }"})
+    assert answer["data"]["workloads"], "The read-only graph query returned no rows"
+    assert admin.request("/api/assistant")["provider"] == "sample"
     assert admin.request("/api/audit"), "Persisted workflow audit is missing"
     member.request("/api/auth/logout", {})
     member.request("/api/auth/me", expected=401)

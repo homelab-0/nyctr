@@ -8,7 +8,9 @@ TLS termination, PostgreSQL, identity-provider setup, credentials, and Gateway
 infrastructure remain separately managed.
 
 The chart does not install a database operator, worker, event receiver, AI
-service, or infrastructure change executor. Provider integrations remain GET-only.
+service, or infrastructure change executor. The chart does not yet expose
+`NYCTR_PROVIDER_WRITES`, `NYCTR_COLLECT_INTERVAL_SECONDS` or the `NYCTR_AI_*`
+settings, so a chart installation is read-only with the assistant off.
 Validation covers offline rendering and isolated test fixtures; it does not
 establish compatibility with a private homelab, real gateway, or real IdP.
 

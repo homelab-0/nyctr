@@ -164,6 +164,9 @@ class Observation(Base):
     attribution: Mapped[str] = mapped_column(String(40))
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     risk_explanation: Mapped[str] = mapped_column(Text)
+    # Schema 2: provider reason identifiers and the provider-reported device label's resource.
+    reason_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    source_device_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class Finding(Base):
@@ -196,6 +199,13 @@ class AccessRequest(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Schema 2: the assessment that was shown to the requester and who decided.
+    risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    risk_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    risk_factors: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    integration_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # One request per member/event preserves idempotence even under concurrent POSTs.
     __table_args__ = (UniqueConstraint("requester_id", "block_id"),)
 
@@ -209,6 +219,110 @@ class Audit(Base):
     action: Mapped[str] = mapped_column(String(80))
     target_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class Setting(Base):
+    """Hold one administrator-written rule as validated JSON with its last editor."""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class Lease(Base):
+    """Record one DNS exception Nyctr is responsible for, from decision to verified end.
+
+    `execution` states what happened at the provider: simulated (demo), applied,
+    not_applied (provider writes are off) or failed. `owned` is false when the
+    entry already existed, so ending the lease never removes someone else's rule.
+    """
+    __tablename__ = "leases"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    integration_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    device_name: Mapped[str] = mapped_column(String(255), default="")
+    requester_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="temporary")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    ended_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    execution: Mapped[str] = mapped_column(String(20), default="not_applied")
+    owned: Mapped[bool] = mapped_column(Boolean, default=False)
+    scope: Mapped[str] = mapped_column(Text, default="")
+    decided_by: Mapped[str] = mapped_column(String(128), default="rule")
+    risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DeviceLink(Base):
+    """An administrator's statement that a DNS-provider device label is one inventory device.
+
+    The link applies only to events observed after it was made; it never
+    backdates visibility of earlier lookups.
+    """
+    __tablename__ = "device_links"
+    source_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("resources.id"), index=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GuestPass(Base):
+    """A guest Wi-Fi pass (UniFi hotspot voucher) known to Nyctr. Codes are administrator-only."""
+    __tablename__ = "guest_passes"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    integration_id: Mapped[str] = mapped_column(String(128), index=True)
+    voucher_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    code: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(160))
+    minutes: Mapped[int] = mapped_column(Integer)
+    guest_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data_limit_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    guest_count: Mapped[int] = mapped_column(Integer, default=0)
+    issued_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execution: Mapped[str] = mapped_column(String(20), default="applied")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GuestAction(Base):
+    """One cut-off, restore, lock or unlock of a guest device, by a person or the written rule."""
+    __tablename__ = "guest_actions"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    device_id: Mapped[str] = mapped_column(String(255), index=True)
+    action: Mapped[str] = mapped_column(String(20))
+    actor: Mapped[str] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    execution: Mapped[str] = mapped_column(String(20), default="not_applied")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Sighting(Base):
+    """Where a client was attached during consecutive collections; Nyctr's own movement history."""
+    __tablename__ = "sightings"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    device_id: Mapped[str] = mapped_column(String(255), index=True)
+    uplink_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Insight(Base):
+    """Cache one generated explanation of a finding, bound to the evidence it was written from."""
+    __tablename__ = "insights"
+    finding_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    provider: Mapped[str] = mapped_column(String(20))
+    model: Mapped[str] = mapped_column(String(160), default="")
+    body: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 Index("ix_device_grant_validity", DeviceGrant.device_id, DeviceGrant.user_id, DeviceGrant.valid_from)

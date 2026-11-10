@@ -9,9 +9,10 @@ resource and finding views, recent DNS observations, member access requests,
 integration health, and audited administrator review. Demo findings illustrate
 the investigation flow; the live collectors do not yet generate posture findings.
 
-Port posture, firewall-event investigations, automated risk evaluation, AI
-analysis, and controlled remediation are planned capabilities. The initial
-implementation establishes the data and authorization boundaries for that work.
+A first version of risk scoring, an evidence-bound assistant and controlled,
+gated provider changes is implemented; see the sections below for its limits.
+Port posture, firewall-event investigations and reputation-based risk evaluation
+are planned.
 
 ## Initial runtime
 
@@ -22,8 +23,9 @@ adapters are independent Python modules, not separate microservices.
 
 The API owns identity, authorization and persistence. The frontend cannot choose
 its role or widen a query's member scope. Read-only collection is currently
-initiated by an administrator and bounded per request. Durable scheduled
-collection and background analysis will be separate worker responsibilities.
+initiated by an administrator and bounded per request, or run on an optional
+interval inside the API process. Moving scheduled collection and background
+analysis to a separate worker process is future work.
 
 Saved-integration diagnostics reuse the bounded, verified read transport under
 the collection lease. They return an ephemeral report of checked capabilities
@@ -80,8 +82,20 @@ organizational Blueprint/Canvas controls.
 
 The intended flow is collection → normalized evidence → analysis → proposal →
 authorization → execution → verification. Each step has an explicit owner.
-The alpha implements the read path and internal request review. It has no
-infrastructure change executor.
+
+- Collection: `nyctr/integrations/*` adapters and `nyctr/collection.py`. GET only.
+- Analysis: `nyctr/risk.py` (block scoring), `nyctr/analysis.py` (rule-based
+  findings) and `nyctr/links.py` (inferred links between sources). No model.
+- Authorization: an administrator's decision, or a rule in `nyctr/policy.py`.
+- Execution: `nyctr/integrations/actions.py`, gated by `NYCTR_PROVIDER_WRITES`,
+  called from `nyctr/access.py` (leases) and `nyctr/guests.py`.
+- Verification: DNS exceptions and guest authorisation read back the provider
+  state (voucher create and delete are confirmed at the next collection); `nyctr/worker.py`
+  and every lease read reconcile expired leases.
+- Explanation: `nyctr/assistant.py` and the read-only `nyctr/query.py`.
+
+Execution still runs inside the API process. Separating it, and binding
+approvals to an immutable plan digest, remain to be done.
 
 Deterministic analysis should establish facts and policy semantics before AI
 summarizes them. AI responses must refer to authorized evidence, identify gaps
@@ -90,16 +104,20 @@ A configurable model-provider boundary will support LiteLLM and future Spektr
 routing. An external MCP surface is a separate, authenticated read interface;
 it does not give external agents ambient mutation privileges.
 
-When execution is implemented, an administrator's UI action must authorize the
-exact normalized plan: target, provider operation, object/scope, duration,
-preconditions and plan digest. The executor independently verifies identity,
-policy and drift. Changed plans require renewed approval. A successful provider
-response and verified restoration of user access are separate outcomes.
+Execution exists in a first form: an approval or the administrator's written
+rule opens a lease, the gated action changes the provider and reads the change
+back, and the outcome is recorded separately from the decision. An approval is
+refused when the evidence behind it has expired. Not yet implemented: binding an
+approval to an exact normalized plan (target, provider operation, object/scope,
+duration, preconditions and plan digest), an executor that independently
+verifies identity, policy and drift, and renewed approval for a changed plan. A
+successful provider response and verified restoration of user access remain
+separate outcomes.
 
-Preauthorized temporary grants will require a deterministic administrator policy
-with limits. AI cannot author or broaden that policy. Durable leases, ownership
-tracking, overlapping requests, restart recovery and failed revocation are
-required before automatic grants are enabled.
+Preauthorized temporary grants require the deterministic administrator rule with
+its limits. AI cannot author or broaden that rule. Leases are durable, track
+whether Nyctr owns the provider entry, tolerate overlapping requests, are
+reconciled after restart, and stay open and visible when a removal fails.
 
 ## Identity and member privacy
 

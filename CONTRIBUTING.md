@@ -41,8 +41,10 @@ for missing fields, provider errors, page limits, attribution, and TLS/redirect
 handling. A live environment check is useful evidence but is never a substitute
 for reproducible tests.
 
-Keep collection read only. A new write-capable integration requires the approved
-execution architecture and its own design review; adding a button is insufficient.
+Keep collection read only. Provider changes live only in
+`services/api/nyctr/integrations/actions.py` behind `NYCTR_PROVIDER_WRITES`. A new
+kind of change requires its own design review, verification of the result and
+tests for the disabled path; adding a button is insufficient.
 
 ## User interface contributions
 
