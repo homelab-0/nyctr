@@ -198,13 +198,13 @@ All of this is off by default. Demo mode rejects every setting in this section.
 providerWrites: [nextdns]
 
 collection:
-  # 60 to 86400. Without an interval the guest cut-off rule and lock-out act
-  # only when an administrator presses Collect.
+  # 60 to 86400. 0 means no schedule.
   intervalSeconds: 300
   nudge:
     # Optional. A Secret holding a token of 32 or more characters lets a network
     # console call /api/hooks/collect to ask for a collection now.
     existingSecret: nyctr-nudge
+    tokenKey: nudge-token   # the key inside that Secret; this is the default
 
 assistant:
   # Any OpenAI-compatible endpoint. Set both or neither.
@@ -212,7 +212,17 @@ assistant:
   model: local/reasoner
   # Optional, when the endpoint needs a key.
   existingSecret: nyctr-model
+  apiKeyKey: api-key      # the key inside that Secret; this is the default
 ```
+
+The pod cannot start if a referenced Secret lacks the named key, so set
+`tokenKey` or `apiKeyKey` when your Secret uses a different one.
+
+The guest cut-off rule and lock-out act at every collection, whatever started
+it: the interval, an administrator pressing Collect, or a nudge. With no interval
+and no nudge they act only when an administrator collects. A nudge can therefore
+cut a guest off without anyone at the console, exactly as a scheduled collection
+can.
 
 Turn changes on one integration at a time, after a read-only collection from it
 looks right. With `providerWrites` set, Nyctr acts only on an administrator's

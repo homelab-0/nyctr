@@ -8,7 +8,11 @@ Read only: Nyctr may not change any source (providerWrites is empty).
 {{- if ne (int .Values.collection.intervalSeconds) 0 }}
 It collects every {{ .Values.collection.intervalSeconds }} seconds.
 {{- else }}
-It collects only when an administrator asks, so the guest cut-off rule and lock-out act only then.
+{{- if .Values.collection.nudge.existingSecret }}
+No collection schedule: it collects when an administrator asks or a nudge arrives. The guest cut-off rule and lock-out act only then.
+{{- else }}
+No collection schedule: it collects only when an administrator asks. The guest cut-off rule and lock-out act only then.
+{{- end }}
 {{- end }}
 {{- end }}
 

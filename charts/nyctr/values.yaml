@@ -63,12 +63,14 @@ connectors:
 providerWrites: []
 
 collection:
-  # Seconds between automatic collections, 60 to 86400. 0 collects only when an
-  # administrator asks. The guest cut-off rule and lock-out act at each collection.
+  # Seconds between automatic collections, 60 to 86400. 0 means no schedule.
+  # The guest cut-off rule and lock-out act at every collection, whatever
+  # started it: this interval, an administrator, or a nudge.
   intervalSeconds: 0
   nudge:
     # Existing Secret holding a shared token of at least 32 characters. With it a
-    # network console can call /api/hooks/collect to ask for a collection now.
+    # network console can call /api/hooks/collect to ask for a collection now,
+    # which also lets the guest rules act. tokenKey names the key in that Secret.
     existingSecret: ""
     tokenKey: nudge-token
 
@@ -77,7 +79,7 @@ assistant:
   # Set baseUrl and model together. Empty leaves questions and insights off.
   baseUrl: ""
   model: ""
-  # Optional existing Secret holding the endpoint's API key.
+  # Optional existing Secret holding the endpoint's API key under apiKeyKey.
   existingSecret: ""
   apiKeyKey: api-key
 

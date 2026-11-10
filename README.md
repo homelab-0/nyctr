@@ -122,8 +122,10 @@ Open **http://localhost:8080**. Use the demo sign-in buttons, or:
 
 Try selecting a device in the explorer, opening a finding's graph, signing in as
 the member, and submitting a request from a recent block. Requests and audit
-records persist in PostgreSQL across application restarts. In the demo, approving
-a request opens a simulated lease: nothing is sent to a provider.
+records persist in PostgreSQL across application restarts. The demo never
+contacts a provider. Approving a request about a source that can open addresses
+records a simulated lease; for a source that cannot, such as the demo's Pi-hole,
+the lease is recorded as not applied.
 
 ```sh
 docker compose logs -f nyctr
