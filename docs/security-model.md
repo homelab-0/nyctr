@@ -17,9 +17,15 @@ Nyctr can change a provider in three narrow ways, all in
 `nyctr/integrations/actions.py`: add or remove one NextDNS allowlist entry,
 create or delete one UniFi hotspot voucher, and authorise or unauthorise one UniFi
 guest client. Each function refuses to run before any network call unless the
-operator named the provider in `NYCTR_PROVIDER_WRITES`, validates its inputs
-(a plain domain name, never a URL or wildcard), and reads back the result. Demo
-mode simulates every change and never contacts a provider.
+operator named the provider in `NYCTR_PROVIDER_WRITES`, and validates its
+inputs: the NextDNS functions accept a plain domain name, never a URL or
+wildcard, and the UniFi functions accept only well-formed identifiers. The
+NextDNS functions and the guest authorise/unauthorise function read the provider
+state back after the change. Creating a voucher relies on the voucher UniFi
+returns, and deleting one relies on the provider accepting the request; neither
+is read back at the time. The next collection mirrors the voucher list, which is
+when a difference would show. Demo mode simulates every change and never
+contacts a provider.
 
 Every decision records what happened at the provider: `simulated`, `applied`,
 `not_applied` or `failed`. A decision is never displayed as restored or removed

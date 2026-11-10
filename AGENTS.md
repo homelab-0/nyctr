@@ -33,7 +33,8 @@ interface text in plain words a non-technical member can read.
 - Connector collection is read only: GET requests, plus signing in and out of
   its own session where a source offers nothing else (Pi-hole). Provider changes exist only in
   `nyctr/integrations/actions.py`, refuse to run unless the provider is named in
-  `NYCTR_PROVIDER_WRITES`, and read back what they changed. Do not add a provider
+  `NYCTR_PROVIDER_WRITES`, and read back what they changed (voucher create and
+  delete do not yet; say so wherever verification is claimed). Do not add a provider
   write anywhere else, and do not add a new kind of write while implementing an
   unrelated feature.
 - Nyctr acts on its own only under an administrator-written rule in
