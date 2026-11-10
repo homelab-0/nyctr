@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from nyctr.config import Settings
 from nyctr.main import create_app
-from nyctr.models import AccessRequest, DeviceGrant, LoginSession, Observation, Resource, utcnow
+from nyctr.models import AccessRequest, DeviceGrant, Lease, LoginSession, Observation, Resource, utcnow
 from nyctr.security import COOKIE_NAME
 
 
@@ -71,11 +71,12 @@ def test_member_cannot_access_admin_data(client, member_headers):
 
 
 def test_member_sees_only_current_and_event_time_authorized_devices(client, member_headers):
-    """The member inbox includes owned/shared devices and keeps unassessed risk unknown."""
+    """The member inbox includes only owned/shared devices; guest, admin and unattributed events stay hidden."""
     assert {x["id"] for x in client.get("/api/devices").json()} == {"laptop-jamie", "tablet-family"}
     blocks = client.get("/api/blocks").json()
-    assert {x["id"] for x in blocks} == {"block-gallery", "block-tablet"}
-    assert all(x["risk_score"] is None for x in blocks)
+    assert {x["id"] for x in blocks} == {"block-gallery", "block-tablet", "block-fonts", "block-verify",
+                                         "block-stream"}
+    assert {x["device_id"] for x in blocks} == {"laptop-jamie", "tablet-family"}
 
 
 def test_new_assignment_cannot_expose_historical_blocks(client, app, member_headers):
@@ -117,8 +118,8 @@ def test_request_checks_csrf_ownership_freshness_and_duration(client, member_hea
 
 
 def test_request_idempotence_and_review_never_grant_access(client, app, member_headers):
-    """Duplicate submissions share one request and administrator review never becomes a grant."""
-    body = {"block_id": "block-gallery", "reason": "Need to open a family gallery", "duration_minutes": 60}
+    """Duplicate submissions share one request and a `reviewed` decision never becomes a grant."""
+    body = {"block_id": "block-tablet", "reason": "Need to open a family gallery", "duration_minutes": 60}
     first = client.post("/api/requests", headers=member_headers, json=body)
     assert first.status_code == 201
     request_id = first.json()["id"]
@@ -129,14 +130,15 @@ def test_request_idempotence_and_review_never_grant_access(client, app, member_h
                         json={"decision": "reviewed", "note": "Looks reasonable"}).status_code == 403
     admin_headers = signin(client)
     assert client.post(f"/api/requests/{request_id}/review", headers=admin_headers,
-                        json={"decision": "approved", "note": "Allow access"}).status_code == 422
+                        json={"decision": "granted", "note": "Allow access"}).status_code == 422
     reviewed = client.post(f"/api/requests/{request_id}/review", headers=admin_headers,
                             json={"decision": "reviewed", "note": "Evidence reviewed; no infrastructure action"})
     assert reviewed.status_code == 200 and reviewed.json()["status"] == "reviewed"
     events = client.get("/api/audit").json()
     assert any(x["action"] == "access.reviewed" and x["details"]["execution"] == "not_performed" for x in events)
     with app.state.session_factory() as db:
-        assert len(list(db.scalars(select(AccessRequest)))) == 1
+        assert {r.id for r in db.scalars(select(AccessRequest))} == {request_id, "request-stream"}
+        assert not list(db.scalars(select(Lease).where(Lease.request_id == request_id)))
 
 
 def test_requests_survive_inbox_expiry_and_remain_private(client, app, member_headers):
@@ -152,7 +154,7 @@ def test_requests_survive_inbox_expiry_and_remain_private(client, app, member_he
     client.post("/api/requests", headers=headers,
                 json={"block_id": "block-admin", "reason": "Need software", "duration_minutes": 30})
     signin(client, member=True)
-    assert len(client.get("/api/requests").json()) == 1
+    assert {r["id"] for r in client.get("/api/requests").json()} == {request_id, "request-stream"}
 
 
 def test_graph_focus_is_bounded_and_exposes_evidence(client, admin_headers):
@@ -160,7 +162,11 @@ def test_graph_focus_is_bounded_and_exposes_evidence(client, admin_headers):
     full = client.get("/api/graph").json()
     focused = client.get("/api/graph?focus=workload-photos&depth=1").json()
     assert len(focused["nodes"]) < len(full["nodes"])
-    assert {x["id"] for x in focused["nodes"]} == {"workload-photos", "host-compute"}
+    # The bridge and host are configured; the Servers network is inferred from the card's VLAN tag.
+    assert {x["id"] for x in focused["nodes"]} == {"workload-photos", "host-compute", "bridge-vmbr0",
+                                                   "network-servers"}
+    inferred = [e for e in focused["edges"] if e["evidence_kind"] == "inferred"]
+    assert [e["target"] for e in inferred] == ["network-servers"] and inferred[0]["provider"] == "nyctr"
     assert all("evidence_kind" in e for e in full["edges"])
     assert client.get("/api/graph?depth=99").status_code == 422
     assert client.get("/api/graph?focus=missing").status_code == 404

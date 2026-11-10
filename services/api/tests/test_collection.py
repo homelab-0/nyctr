@@ -46,7 +46,8 @@ def test_collection_persists_namespaced_evidence_without_claiming_user_attributi
         assert response.status_code == 200, response.text
         assert client.get("/api/resources").json()[0]["owner_id"] is None
         assert client.get("/api/blocks").json()[0]["attribution"] == "unattributed"
-        assert client.get("/api/blocks").json()[0]["risk_score"] is None
+        # The score is rule-based on the stored reason; it never changes who may see the event.
+        assert client.get("/api/blocks").json()[0]["risk_category"] == "privacy_list"
         assert "test-api-key" not in client.get("/api/audit").text
 
 

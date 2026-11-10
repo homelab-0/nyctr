@@ -6,7 +6,31 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
+
+# Schema 2 adds access decisions, leases, guest control and generated insights.
+_V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
+_V2_COLUMNS = {
+    "observations": ("reason_codes", "source_device_id"),
+    "access_requests": ("risk_score", "risk_category", "risk_factors", "decided_by", "decision_note",
+                        "integration_id"),
+}
+
+
+def _upgrade_to_2(connection):
+    """Add schema-2 tables and nullable columns without rewriting or dropping existing rows."""
+    dialect = connection.dialect
+    existing = set(inspect(connection).get_table_names())
+    Base.metadata.create_all(connection, tables=[Base.metadata.tables[name] for name in _V2_TABLES
+                                                 if name not in existing])
+    for table, names in _V2_COLUMNS.items():
+        present = {column["name"] for column in inspect(connection).get_columns(table)}
+        for name in names:
+            if name not in present:
+                column = Base.metadata.tables[table].columns[name]
+                kind = column.type.compile(dialect=dialect)
+                connection.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {kind}'))
+    connection.execute(SchemaVersion.__table__.insert().values(version=2))
 
 
 def make_engine(database_url: str):
@@ -30,10 +54,10 @@ def make_engine(database_url: str):
 
 
 def migrate(engine):
-    """Initialize schema version 1 in an empty database or validate its existing version.
+    """Create the current schema in an empty database or apply explicit upgrades in order.
 
     PostgreSQL advisory locking serializes initialization across replicas. Unknown
-    schemas and unsupported versions raise RuntimeError instead of being altered.
+    schemas and versions newer than this build raise RuntimeError instead of being altered.
     """
     with engine.begin() as connection:
         if engine.dialect.name == "postgresql":
@@ -44,8 +68,12 @@ def migrate(engine):
             if tables:
                 raise RuntimeError("Refusing to initialize a database with an unknown existing schema")
             Base.metadata.create_all(connection)
-            connection.execute(SchemaVersion.__table__.insert().values(version=1))
+            for number in range(1, CURRENT_SCHEMA_VERSION + 1):
+                connection.execute(SchemaVersion.__table__.insert().values(version=number))
         version = connection.execute(select(SchemaVersion.version).order_by(SchemaVersion.version.desc())).scalar()
+        if version == 1:
+            _upgrade_to_2(connection)
+            version = 2
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

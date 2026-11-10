@@ -161,6 +161,9 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
                 # endpoint identity. Correlation must establish ownership before
                 # any event can enter a member's inbox.
                 "device_id": None,
+                # The provider label's own resource, so an administrator can link it to a device.
+                "source_device_id": device_node["id"] if device_node else None,
+                "reason_codes": [str(x["id"])[:120] for x in reasons[:20] if isinstance(x.get("id"), str)],
                 "device_name": device_node["name"] if device_node else "Unattributed DNS client",
                 "domain": domain,
                 "source": PROVIDER,

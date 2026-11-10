@@ -251,6 +251,7 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
         "/v1/sites/site-one/networks": [{"id": "net-one", "name": "LAN", "vlanId": 66, "zoneId": "internal"}],
         "/v1/sites/site-one/clients": [{"id": "client-one", "name": "Laptop", "uplinkDeviceId": "gw-one", "ipAddress": "10.20.66.10", "type": "WIRED"}],
         "/v1/sites/site-one/firewall/policies": [{"id": "rule-one", "name": "Block management", "action": {"type": "BLOCK"}, "source": {"zoneId": "internal"}, "destination": {"zoneId": "external"}, "index": 10}],
+        "/v1/sites/site-one/hotspot/vouchers": [],
     }
     def handler(request):
         """Route source-contract fixtures only through the approved UniFi integration path."""

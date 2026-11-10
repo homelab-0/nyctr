@@ -13,6 +13,7 @@ dependencies = [
   "sqlalchemy>=2.0.36,<2.1",
   "psycopg[binary]>=3.2,<4",
   "httpx>=0.28,<1",
+  "graphql-core>=3.2.13,<3.3",
   "authlib>=1.9,<2",
   "joserfc>=1.6.8,<2",
   "pydantic-settings>=2.7,<3",
