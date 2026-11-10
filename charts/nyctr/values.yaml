@@ -17,8 +17,10 @@ imagePullSecrets: []
 publicUrl: ""
 # Trusted proxy peers as observed by the pod: exact IPs, never hostnames or '*'.
 # A range such as 10.42.0.0/16 is accepted only while networkPolicy.enabled is
-# true, because then the policy, not the range, decides who can connect. Ranges
-# wider than /16 (IPv4) or /48 (IPv6) are rejected.
+# true. The chart cannot check who the policies admit: make sure ingressFrom,
+# and any other policy selecting the pod, lets only trusted proxies connect,
+# because every peer in the range that can connect is believed. Ranges wider
+# than /16 (IPv4) or /48 (IPv6) are rejected.
 forwardedAllowIps: []
 sessionHours: 12
 blockRetentionHours: 24

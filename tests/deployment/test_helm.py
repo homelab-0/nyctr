@@ -201,7 +201,7 @@ def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_
 
 @pytest.mark.parametrize("trusted", [["10.42.0.0/16"], ["10.42.7.0/24", "10.42.0.10"], ["2001:db8:42::/56"]])
 def test_a_bounded_proxy_range_is_accepted_only_behind_the_network_policy(helm_binary, tmp_path, trusted):
-    """A range of proxy peers is trusted only while the chart's policy decides who can connect."""
+    """A range of proxy peers is accepted only while the chart renders its ingress policy."""
     manifests = render(helm_binary, tmp_path, merge(fixture("live-values.yaml"), {"forwardedAllowIps": trusted}))
     assert environment(manifests)["FORWARDED_ALLOW_IPS"]["value"] == ",".join(trusted)
     policy = manifests["NetworkPolicy"]["spec"]

@@ -134,12 +134,25 @@ Exact addresses are the default and the safest choice. Gateways whose proxy pods
 get a new address on every restart (Envoy Gateway, most ingress controllers)
 make an exact list impractical, so a range is accepted under two conditions:
 
-- `networkPolicy.enabled` is true. The policy's `ingressFrom` then decides who
-  can open a connection at all, and the range only says that those peers'
-  forwarding headers are believed. Without an enforced policy, any pod in the
-  range could claim to be any client.
+- `networkPolicy.enabled` is true. The policy's `ingressFrom` should then decide
+  who can open a connection at all, and the range only says that those peers'
+  forwarding headers are believed.
 - The range is no wider than `/16` for IPv4 or `/48` for IPv6, for example the
   cluster's pod network.
+
+Enabling the policy is necessary but it is not a guarantee, and the chart cannot
+check the rest. Before trusting a range, make sure that only your proxies can
+reach the pod:
+
+- `ingressFrom` selects the proxy pods and nothing else. A peer it admits that
+  sits inside the range can claim to be any client.
+- No other NetworkPolicy, or policy of your network plugin, selects the Nyctr
+  pod and admits more. Kubernetes adds the allowances of every policy that
+  selects a pod together.
+- Your network plugin enforces NetworkPolicy. Where it does not, the policy
+  is ignored.
+
+If you cannot establish all three, use exact proxy addresses.
 
 ```yaml
 forwardedAllowIps:

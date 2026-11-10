@@ -70,7 +70,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- fail "forwardedAllowIps must contain only trusted proxy IP addresses or bounded ranges." -}}
 {{- end -}}
 {{- if and (contains "/" .) (not $.Values.networkPolicy.enabled) -}}
-{{- fail "A forwardedAllowIps range requires networkPolicy.enabled=true: only the policy guarantees that every peer in the range is a trusted proxy. Use exact addresses otherwise." -}}
+{{- fail "A forwardedAllowIps range requires networkPolicy.enabled=true, and you must make sure that only trusted proxies in the range can connect: check ingressFrom and every other policy that selects the pod. Use exact addresses otherwise." -}}
 {{- end -}}
 {{- end -}}
 {{- $names := dict -}}
