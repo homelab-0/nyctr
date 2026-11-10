@@ -196,6 +196,15 @@ def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_
     assert keyless["NYCTR_AI_MODEL"]["value"] == "local/reasoner" and "NYCTR_AI_API_KEY" not in keyless
 
 
+@pytest.mark.parametrize("trusted", [["10.42.0.0/16"], ["10.42.7.0/24", "10.42.0.10"], ["2001:db8:42::/56"]])
+def test_a_bounded_proxy_range_is_accepted_only_behind_the_network_policy(helm_binary, tmp_path, trusted):
+    """A range of proxy peers is trusted only while the chart's policy decides who can connect."""
+    manifests = render(helm_binary, tmp_path, merge(fixture("live-values.yaml"), {"forwardedAllowIps": trusted}))
+    assert environment(manifests)["FORWARDED_ALLOW_IPS"]["value"] == ",".join(trusted)
+    policy = manifests["NetworkPolicy"]["spec"]
+    assert policy["policyTypes"] == ["Ingress"] and policy["ingress"][0]["from"]
+
+
 def test_local_bootstrap_uses_existing_secret_and_can_be_removed_after_provisioning(helm_binary, tmp_path):
     """Support initial local provisioning and an explicit existing-account upgrade without password resets."""
     values = merge(fixture("live-values.yaml"), {"auth": {
@@ -264,6 +273,12 @@ def test_https_route_matches_origin_listener_and_service(helm_binary, tmp_path, 
     {"forwardedAllowIps": []},
     {"forwardedAllowIps": ["*"]},
     {"forwardedAllowIps": ["10.0.0.0/8"]},
+    {"forwardedAllowIps": ["0.0.0.0/0"]},
+    {"forwardedAllowIps": ["10.42.0.0/15"]},
+    {"forwardedAllowIps": ["10.42.0.0/33"]},
+    {"forwardedAllowIps": ["2001:db8::/32"]},
+    {"forwardedAllowIps": ["10.42.0.0/16"], "networkPolicy": {"enabled": False}},
+    {"forwardedAllowIps": ["10.42.0.0/16,10.43.0.0/16"]},
     {"forwardedAllowIps": ["not-an-ip"]},
     {"forwardedAllowIps": ["999.0.0.1"]},
     {"database": {"existingSecret": ""}},

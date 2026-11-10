@@ -94,7 +94,7 @@ These screenshots show the running application with synthetic demonstration data
 | Pi-hole | Read-only blocked lookups from a Pi-hole v6 resolver with its client labels. Reports blocks; does not open them, so its requests always wait for a person | Experimental; sign-in follows the published contract, query-log fields unverified against a live Pi-hole | Opening an address, list names |
 | Graph queries | Read-only GraphQL endpoint with length, depth and result limits; schema browser | Implemented | Saved queries, pagination |
 | Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint you configure | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
-| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The release workflow has not yet completed a first publication | Upgrade tooling |
+| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. Images are published by the release workflow, starting with `v0.1.0-alpha.1` | Upgrade tooling |
 
 Synthetic findings in demo mode demonstrate the workflow. The initial live
 collectors do not constitute a complete reachability engine or vulnerability scan.

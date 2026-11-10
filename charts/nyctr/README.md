@@ -126,16 +126,42 @@ the chart, leave both disabled and target the ClusterIP Service.
 
 ### Proxy identity and network restrictions
 
-Live mode requires `forwardedAllowIps`: exact IPv4/IPv6 addresses of trusted
-proxy peers **as seen by the application**. The chart rejects wildcard trust,
-CIDRs, and hostnames. The public edge must replace untrusted client-supplied
+Live mode requires `forwardedAllowIps`: IPv4/IPv6 addresses of trusted proxy
+peers **as seen by the application**. The chart rejects wildcard trust and
+hostnames.
+
+Exact addresses are the default and the safest choice. Gateways whose proxy pods
+get a new address on every restart (Envoy Gateway, most ingress controllers)
+make an exact list impractical, so a range is accepted under two conditions:
+
+- `networkPolicy.enabled` is true. The policy's `ingressFrom` then decides who
+  can open a connection at all, and the range only says that those peers'
+  forwarding headers are believed. Without an enforced policy, any pod in the
+  range could claim to be any client.
+- The range is no wider than `/16` for IPv4 or `/48` for IPv6, for example the
+  cluster's pod network.
+
+```yaml
+forwardedAllowIps:
+  - 10.42.0.0/16
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+```
+ The public edge must replace untrusted client-supplied
 forwarding headers; subsequent trusted hops must maintain a verified chain.
 Uvicorn uses these addresses to determine whether `X-Forwarded-For` and
 `X-Forwarded-Proto` are trustworthy. A missing/untrusted proxy collapses users
 onto the same peer login quota; overbroad trust enables spoofing. See the
 [deployment proxy guidance](../../deploy/README.md#trusted-reverse-proxies-and-login-limits).
 
-IP lists must be updated when proxy peer addresses change. Do not trust a NAT or
+Exact IP lists must be updated when proxy peer addresses change. Do not trust a NAT or
 bridge address unless network controls guarantee that connections through it
 come only from the intended proxies. Use the chart's NetworkPolicy or equivalent
 existing controls to restrict direct access. The default policy is ingress-only,

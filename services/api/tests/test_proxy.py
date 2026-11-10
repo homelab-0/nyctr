@@ -44,6 +44,12 @@ def valid_member_login(client, forwarded_for):
     ("", PROXY, MEMBER, PROXY, "http"),
     ("2001:db8:42::10", "2001:db8:42::10", "2001:db8:51::20", "2001:db8:51::20", "https"),
     (f"{PROXY},10.42.0.11", PROXY, f"192.0.2.99, {MEMBER}, 10.42.0.11", MEMBER, "https"),
+    # A range, as the chart allows behind its network policy: any proxy pod in it is believed,
+    # a peer outside it is not, and an earlier hop inside the range cannot be passed off as the client.
+    ("10.42.0.0/16", "10.42.9.77", MEMBER, MEMBER, "https"),
+    ("10.42.0.0/16", "10.43.0.5", MEMBER, "10.43.0.5", "http"),
+    ("10.42.0.0/16", "10.42.9.77", f"192.0.2.99, {MEMBER}, 10.42.3.3", MEMBER, "https"),
+    ("2001:db8:42::/56", "2001:db8:42:1::10", "2001:db8:51::20", "2001:db8:51::20", "https"),
 ])
 def test_forwarded_address_and_scheme_require_a_trusted_peer(app, monkeypatch, trusted, peer,
                                                             forwarded, expected, scheme):
