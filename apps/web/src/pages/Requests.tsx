@@ -1,233 +1,238 @@
-import { useState, type FormEvent } from 'react';
-import { ArrowRight, ClipboardCheck, Clock3, Inbox, MessageSquare } from 'lucide-react';
-import { dateTime, label, post, relativeTime, useApi } from '../api';
-import { useAuth } from '../auth';
-import type { AccessRequest } from '../types';
+import { useEffect, useState } from 'react';
+import { Check, X } from 'lucide-react';
+import { post, useApi } from '../api';
 import {
-  Badge,
-  Card,
   Empty,
   ErrorState,
-  Field,
+  Factors,
   InlineError,
+  KV,
   Loading,
-  Modal,
-  Notice,
-  PageHeader,
-  Status,
-  Success,
+  Panel,
+  RiskScale,
+  Score,
+  Seg,
 } from '../components/ui';
+import { ago, span, useNow } from '../lib/format';
+import type { AccessRequest, Person, Rules } from '../types';
 
-/** Captures an administrator's internal review decision without presenting it as network access. */
-function Review({
-  request,
-  onClose,
-  onSaved,
+const STATUS: Record<string, { text: string; tone: string }> = {
+  pending: { text: 'Waiting', tone: 'yellow' },
+  auto_approved: { text: 'Opened by the rule', tone: 'green' },
+  approved: { text: 'Approved', tone: 'green' },
+  denied: { text: 'Said no', tone: 'red' },
+  reviewed: { text: 'Reviewed, no change', tone: '' },
+};
+
+/**
+ * Requests from members. Each shows the score the member saw, why the access rule did not
+ * open it, and who a DNS exception would really affect before an administrator decides.
+ */
+export default function Requests({
+  params,
+  onChange,
 }: {
-  request: AccessRequest;
-  onClose: () => void;
-  onSaved: () => void;
+  params: URLSearchParams;
+  onChange: () => void;
 }) {
-  const [decision, setDecision] = useState('reviewed');
+  const requests = useApi<AccessRequest[]>('/requests');
+  const people = useApi<Person[]>('/users');
+  const rules = useApi<Rules>('/rules');
+  const [tab, setTab] = useState<'waiting' | 'decided'>('waiting');
+  const [selected, setSelected] = useState<string | null>(params.get('id'));
   const [note, setNote] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [minutes, setMinutes] = useState(60);
   const [pending, setPending] = useState(false);
-  /** Saves a reviewed/denied decision and note through the API's administrator and audit boundary. */
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
+  const [error, setError] = useState<string | null>(null);
+  const now = useNow();
+  const all = requests.data || [];
+  const waiting = all
+    .filter((row) => row.status === 'pending')
+    .sort((a, b) => (b.risk_score ?? 101) - (a.risk_score ?? 101));
+  const decided = all.filter((row) => row.status !== 'pending');
+  const list = tab === 'waiting' ? waiting : decided;
+  const row = all.find((item) => item.id === selected) || list[0] || null;
+  const names = new Map((people.data || []).map((person) => [person.id, person.name]));
+  useEffect(() => {
+    setNote('');
+    setError(null);
+    if (row) setMinutes(Math.min(240, Math.max(15, row.duration_minutes)));
+  }, [row?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const wanted = all.find((item) => item.id === params.get('id'));
+    if (wanted) {
+      setSelected(wanted.id);
+      setTab(wanted.status === 'pending' ? 'waiting' : 'decided');
+    }
+  }, [requests.data, params]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Records the decision. Approval opens a lease; the server reports what really happened. */
+  const decide = async (decision: 'approved' | 'denied') => {
+    if (!row) return;
     setPending(true);
     setError(null);
     try {
-      await post(`/requests/${encodeURIComponent(request.id)}/review`, {
+      await post(`/requests/${row.id}/review`, {
         decision,
-        note: note.trim(),
+        note: note.trim() || (decision === 'approved' ? 'Approved' : 'Not approved'),
+        ...(decision === 'approved' ? { minutes } : {}),
       });
-      onSaved();
-      onClose();
+      requests.reload();
+      onChange();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setPending(false);
     }
   };
+  if (requests.loading) return <Loading text="Loading requests…" />;
+  if (requests.error) return <ErrorState message={requests.error} retry={requests.reload} />;
+  const writes = rules.data?.writes.nextdns;
   return (
-    <Modal title="Review access request" onClose={onClose}>
-      <form onSubmit={submit} className="modal-body form-stack">
-        <div className="request-destination">
-          <span className="icon-tile">
-            <ClipboardCheck size={23} />
-          </span>
-          <div>
-            <strong>{request.domain}</strong>
-            <small>
-              {request.device_name} · {request.duration_minutes} minutes requested
-            </small>
-          </div>
+    <div className="page">
+      <header className="page-head">
+        <div>
+          <h1 className="display d2">Requests</h1>
+          <p className="lede">
+            People asking for a blocked address. Anything the access rule could not open on its own
+            waits here for you.
+          </p>
         </div>
-        <blockquote className="request-reason">{request.reason}</blockquote>
-        <Field label="Review outcome">
-          <select value={decision} onChange={(e) => setDecision(e.target.value)}>
-            <option value="reviewed">Record as reviewed</option>
-            <option value="denied">Deny request</option>
-          </select>
-        </Field>
-        <Field label="Review note">
-          <textarea
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            required
-            minLength={3}
-            maxLength={2000}
-            rows={4}
-            placeholder="Record the evidence and your decision…"
-          />
-        </Field>
-        <Notice>
-          This records your review and audit event only. No exception is created, and access remains
-          unchanged.
-        </Notice>
-        <InlineError message={error} />
-        <div className="modal-actions">
-          <button className="button secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            className="button primary"
-            type="submit"
-            disabled={pending || note.trim().length < 3}
-          >
-            {pending ? 'Saving…' : 'Save review'}
-            <ArrowRight size={15} />
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-/**
- * Shows durable request history independently of the expiring observation inbox.
- * The API scopes member results; administrator review controls are presentation
- * conveniences and cannot bypass server authorization.
- */
-export default function Requests() {
-  const result = useApi<AccessRequest[]>('/requests');
-  const { user } = useAuth();
-  const admin = user?.role === 'admin';
-  const [filter, setFilter] = useState('all');
-  const [review, setReview] = useState<AccessRequest | null>(null);
-  const [success, setSuccess] = useState(false);
-  const data = (result.data || []).filter((r) => filter === 'all' || r.status === filter);
-  return (
-    <>
-      <PageHeader
-        eyebrow={admin ? 'Access review' : 'Member portal'}
-        title={admin ? 'Access requests' : 'My requests'}
-        description={
-          admin
-            ? 'Review the reason, requested scope, and evidence before deciding what happens next.'
-            : 'Follow the requests you have submitted and your administrator’s review notes.'
-        }
-      />
-      <Notice>
-        Request history is retained separately from the time-limited block inbox. A reviewed request
-        is not an active exception.
-      </Notice>
-      {success && <Success>Review recorded. No network configuration was changed.</Success>}
-      <div className="tabs">
-        {['all', 'pending', 'reviewed', 'denied'].map((status) => (
-          <button
-            key={status}
-            className={filter === status ? 'active' : ''}
-            onClick={() => setFilter(status)}
-          >
-            {label(status)}
-            <span>
-              {(result.data || []).filter((r) => status === 'all' || r.status === status).length}
-            </span>
-          </button>
-        ))}
-      </div>
-      {result.loading ? (
-        <Loading />
-      ) : result.error ? (
-        <ErrorState message={result.error} retry={result.reload} />
-      ) : !data.length ? (
-        <Card>
-          <Empty
-            title={filter === 'all' ? 'No requests yet' : `No ${filter} requests`}
-            text="Requests submitted from a recent block will appear here with their review history."
-            icon={Inbox}
-            action={
-              <a className="button secondary" href={admin ? '#/blocks' : '#/portal'}>
-                Open recent blocks
-                <ArrowRight size={15} />
-              </a>
-            }
-          />
-        </Card>
+        <Seg
+          label="Which requests"
+          value={tab}
+          onChange={(value) => {
+            setTab(value);
+            setSelected(null);
+          }}
+          options={[
+            { id: 'waiting', name: 'Waiting', count: waiting.length },
+            { id: 'decided', name: 'Decided', count: decided.length },
+          ]}
+        />
+      </header>
+      {list.length === 0 ? (
+        <Empty
+          title={tab === 'waiting' ? 'Nobody is waiting' : 'Nothing has been decided yet'}
+          text={
+            tab === 'waiting'
+              ? 'New requests appear here when the access rule leaves the decision to you.'
+              : 'Requests you or the access rule decide will be listed here.'
+          }
+        />
       ) : (
-        <div className="requests-stack">
-          {data.map((request) => (
-            <Card className="request-card" key={request.id}>
-              <div className="request-card-heading">
-                <span className="icon-tile">
-                  <ClipboardCheck size={21} />
-                </span>
-                <div>
-                  <h2>{request.domain}</h2>
-                  <p>
-                    {request.device_name} · Requested {relativeTime(request.created_at)}
-                  </p>
+        <div className="split">
+          <Panel flush>
+            <div className="rows">
+              {list.map((item) => (
+                <button
+                  className={`row ${row?.id === item.id ? 'on' : ''}`}
+                  key={item.id}
+                  onClick={() => setSelected(item.id)}
+                >
+                  <Score value={item.risk_score} />
+                  <span>
+                    <span className="t dom">{item.domain}</span>
+                    <span className="d">
+                      {names.get(item.requester_id) || 'Someone'} on {item.device_name},{' '}
+                      {ago(item.created_at, now)}
+                    </span>
+                  </span>
+                  <span className={`tag ${STATUS[item.status]?.tone || ''}`}>
+                    {STATUS[item.status]?.text || item.status}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </Panel>
+          {row && (
+            <Panel title={<span className="dom">{row.domain}</span>}>
+              <div className="stack">
+                <div className="bar">
+                  <Score value={row.risk_score} big />
+                  <span className={`tag ${STATUS[row.status]?.tone || ''}`}>
+                    {STATUS[row.status]?.text || row.status}
+                  </span>
                 </div>
-                <Status value={request.status} />
-              </div>
-              <div className="request-card-body">
-                <div>
-                  <span className="section-label">Reason for access</span>
-                  <p>{request.reason}</p>
-                  {request.review_note && (
-                    <div className="review-note">
-                      <MessageSquare size={16} />
+                <RiskScale
+                  value={row.risk_score}
+                  limit={rules.data?.access.enabled ? rules.data.access.max_score : undefined}
+                />
+                {row.risk_factors && <Factors items={row.risk_factors} />}
+                {row.decision_note && <p className="aside">{row.decision_note}</p>}
+                <KV
+                  items={[
+                    ['Who', names.get(row.requester_id) || 'Unknown'],
+                    ['Device', row.device_name],
+                    ['Their reason', row.reason],
+                    ['Asked for', span(row.duration_minutes)],
+                    ...(row.review_note
+                      ? ([['Your note', row.review_note]] as [string, string][])
+                      : []),
+                  ]}
+                />
+                {row.status === 'pending' && (
+                  <>
+                    <div className="note yellow">
                       <div>
-                        <strong>Administrator’s review</strong>
-                        <p>{request.review_note}</p>
+                        <b>This opens it for everyone on the DNS profile.</b>
+                        <p>NextDNS allows an address per profile, not per person or device.</p>
                       </div>
                     </div>
-                  )}
-                </div>
-                <div className="request-meta">
-                  <span>
-                    <Clock3 size={14} />
-                    {request.duration_minutes} minutes requested
-                  </span>
-                  <small title={dateTime(request.created_at)}>{dateTime(request.created_at)}</small>
-                  {admin && <small className="mono">Requester: {request.requester_id}</small>}
-                  {admin && request.status === 'pending' && (
-                    <button className="button primary small" onClick={() => setReview(request)}>
-                      Review request
-                      <ArrowRight size={14} />
-                    </button>
-                  )}
-                  {request.status === 'reviewed' && (
-                    <Badge>Review recorded · no access change</Badge>
-                  )}
-                </div>
+                    {writes === 'disabled' && (
+                      <div className="note">
+                        <div>
+                          <b>Nyctr is read-only for NextDNS.</b>
+                          <p>
+                            Approving records your decision and the time window. You add the address
+                            to the allowlist yourself.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    <label className="field">
+                      <span>Note for the record (optional)</span>
+                      <textarea
+                        rows={2}
+                        value={note}
+                        maxLength={500}
+                        onChange={(e) => setNote(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Open for</span>
+                      <select value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
+                        {[15, 30, 60, 120, 240].map((value) => (
+                          <option key={value} value={value}>
+                            {span(value)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <InlineError message={error} />
+                    <div className="button-row">
+                      <button
+                        className="button primary"
+                        disabled={pending}
+                        onClick={() => void decide('approved')}
+                      >
+                        <Check size={16} /> Approve
+                      </button>
+                      <button
+                        className="button danger"
+                        disabled={pending}
+                        onClick={() => void decide('denied')}
+                      >
+                        <X size={16} /> Say no
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
-            </Card>
-          ))}
+            </Panel>
+          )}
         </div>
       )}
-      {review && (
-        <Review
-          request={review}
-          onClose={() => setReview(null)}
-          onSaved={() => {
-            result.reload();
-            setSuccess(true);
-          }}
-        />
-      )}
-    </>
+    </div>
   );
 }

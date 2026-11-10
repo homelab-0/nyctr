@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { ArrowRight, Fingerprint, LockKeyhole, Network, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Fingerprint, LockKeyhole } from 'lucide-react';
 import { useAuth } from '../auth';
 import { useApi } from '../api';
 import type { AuthConfig } from '../types';
@@ -40,49 +40,33 @@ export default function SignIn() {
       <section className="signin-story">
         <Brand />
         <div className="signin-message">
-          <span className="eyebrow">Your network. In focus.</span>
-          <h1>
-            See the connections.
+          <h1 className="display">
+            See what is connected.
             <br />
-            <span>Understand the risk.</span>
+            Know why something was blocked.
           </h1>
-          <p>
-            A clear view across your infrastructure, network policies, and the connections that
-            matter.
+          <p className="lede">
+            One place for your network, DNS and hypervisor. Evidence first, and nothing changes
+            without a rule you wrote or a decision you made.
           </p>
-          <div className="signin-path" aria-hidden="true">
-            <div>
-              <Network size={25} />
-            </div>
-            <span />
-            <div className="path-focus">
-              <ShieldCheck size={29} />
-            </div>
-            <span />
-            <div>
-              <Fingerprint size={25} />
-            </div>
-          </div>
-          <div className="signin-values">
-            <span>
-              <ShieldCheck size={16} /> Evidence-led analysis
-            </span>
-            <span>
-              <LockKeyhole size={16} /> Human-controlled changes
-            </span>
-          </div>
+          <ul className="signin-values">
+            <li>
+              <i className="ev observed" /> Seen happening
+            </li>
+            <li>
+              <i className="ev configured" /> A setting
+            </li>
+            <li>
+              <i className="ev inferred" /> Worked out by Nyctr
+            </li>
+          </ul>
         </div>
-        <footer>
-          Open-source network security workspace <span>0.1.0 alpha</span>
-        </footer>
+        <footer>Open-source network security workspace</footer>
       </section>
       <section className="signin-form-area">
         <div className="signin-form">
-          <span className="icon-tile large">
-            <LockKeyhole size={25} />
-          </span>
-          <h2>Welcome to Nyctr</h2>
-          <p>Sign in to your network workspace.</p>
+          <h2 className="display d2">Sign in</h2>
+          <p className="lede">Blocked from a site? Sign in to see why and ask to open it.</p>
           {config.loading ? (
             <Loading text="Checking sign-in options…" />
           ) : config.error ? (

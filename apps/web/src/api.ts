@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 let csrfToken = '';
 /** Replaces the session's in-memory mutation token; an empty value clears it on sign-out. */
@@ -50,16 +50,23 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 export const post = <T>(path: string, value: unknown = {}) =>
   api<T>(path, { method: 'POST', body: JSON.stringify(value) });
 
+/** Sends a JSON replacement through the same cookie, CSRF, and error-handling boundary. */
+export const put = <T>(path: string, value: unknown = {}) =>
+  api<T>(path, { method: 'PUT', body: JSON.stringify(value) });
+
 /**
  * Loads one API resource and discards results from aborted or superseded reads.
- * A null path disables collection. Data is cleared before a new read so a view
+ * A null path disables collection. Data is cleared when the path changes so a view
  * cannot mistake evidence from its previous scope for the newly selected scope.
+ * `reload` re-reads the same path and keeps the current data on screen until the
+ * fresh result arrives, so a list does not blank out after every action.
  */
 export function useApi<T>(path: string | null) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
+  const loaded = useRef<string | null>(null);
   /** Invalidates this read without changing its scope or bypassing API authorization. */
   const reload = useCallback(() => setRevision((x) => x + 1), []);
   /** Owns the request lifetime; cleanup prevents late responses from updating the next view. */
@@ -67,15 +74,21 @@ export function useApi<T>(path: string | null) {
     if (!path) {
       setLoading(false);
       setData(null);
+      loaded.current = null;
       return;
     }
     const controller = new AbortController();
-    setLoading(true);
+    const refresh = loaded.current === path;
+    if (!refresh) {
+      setLoading(true);
+      setData(null);
+    }
     setError(null);
-    setData(null);
     api<T>(path, { signal: controller.signal })
       .then((value) => {
-        if (!controller.signal.aborted) setData(value);
+        if (controller.signal.aborted) return;
+        loaded.current = path;
+        setData(value);
       })
       .catch((err: Error) => {
         if (!controller.signal.aborted) setError(err.message || 'Unable to reach Nyctr.');

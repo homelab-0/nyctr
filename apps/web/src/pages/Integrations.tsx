@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { label, post, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
-import type { Integration } from '../types';
+import type { Integration, Rules } from '../types';
 import {
   Badge,
   Card,
@@ -68,8 +68,9 @@ const catalog: {
     id: 'proxmox',
     name: 'Proxmox VE',
     icon: Server,
-    description: 'Hosts, guests, bridges, and hypervisor firewall configuration.',
-    available: false,
+    description:
+      'Experimental. Nodes, bridges, guests, their network cards and the firewall on/off switches.',
+    available: true,
   },
   {
     id: 'aws',
@@ -119,7 +120,9 @@ function AddIntegration({
     const config =
       selected === 'nextdns'
         ? { profile_id: profile.trim(), lookback_hours: 24 }
-        : { base_url: endpoint.trim(), ...(site.trim() ? { site_id: site.trim() } : {}) };
+        : selected === 'proxmox'
+          ? { base_url: endpoint.trim() }
+          : { base_url: endpoint.trim(), ...(site.trim() ? { site_id: site.trim() } : {}) };
     try {
       await post('/integrations', {
         provider: selected,
@@ -136,7 +139,7 @@ function AddIntegration({
     }
   };
   return (
-    <Modal title="Connect a read-only source" onClose={onClose}>
+    <Modal title="Connect a source" onClose={onClose}>
       <form className="modal-body form-stack" onSubmit={submit}>
         {demo && (
           <Notice tone="amber">
@@ -148,6 +151,7 @@ function AddIntegration({
           <select value={selected} onChange={(e) => setSelected(e.target.value)}>
             <option value="unifi_network">UniFi Network</option>
             <option value="nextdns">NextDNS</option>
+            <option value="proxmox">Proxmox VE (experimental)</option>
           </select>
         </Field>
         <Field label="Connection name">
@@ -184,6 +188,19 @@ function AddIntegration({
               />
             </Field>
           </>
+        ) : selected === 'proxmox' ? (
+          <Field
+            label="Proxmox address"
+            hint="Use HTTPS with a certificate the server trusts. The hostname must be in NYCTR_CONNECTOR_HOSTS. The secret is an API token in the form user@realm!name=value; give it a read-only role such as PVEAuditor."
+          >
+            <input
+              required
+              type="url"
+              value={endpoint}
+              onChange={(e) => setEndpoint(e.target.value)}
+              placeholder="https://pve.example:8006"
+            />
+          </Field>
         ) : (
           <Field label="NextDNS profile ID">
             <input
@@ -209,8 +226,8 @@ function AddIntegration({
           />
         </Field>
         <Notice>
-          Nyctr uses read-only API operations. Connection setup records configuration; collect a
-          snapshot after saving.
+          Collection only reads. Saving records the connection; collect a snapshot afterwards.
+          Whether Nyctr may change this source is a separate server setting.
         </Notice>
         <InlineError message={error} />
         <div className="modal-actions">
@@ -228,8 +245,12 @@ function AddIntegration({
 }
 
 /** Lists source health and capabilities while keeping planned providers distinct from live adapters. */
-export default function Integrations() {
+export default function Integrations({ writes }: { writes?: Rules['writes'] } = {}) {
   const result = useApi<Integration[]>('/integrations');
+  const allowed = [
+    writes?.nextdns === 'enabled' && 'NextDNS',
+    writes?.unifi_network === 'enabled' && 'UniFi',
+  ].filter(Boolean);
   const [add, setAdd] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -266,9 +287,8 @@ export default function Integrations() {
   return (
     <>
       <PageHeader
-        eyebrow="Manage workspace"
-        title="Integrations"
-        description="Connect your sources. Keep their capabilities, evidence, and health in view."
+        title="Sources"
+        description="Where Nyctr reads from, what each one can tell it, and whether Nyctr may change it."
         actions={
           <button className="button primary" onClick={() => setAdd('unifi_network')}>
             <Plus size={16} />
@@ -281,13 +301,20 @@ export default function Integrations() {
           <LockKeyhole size={20} />
         </span>
         <div>
-          <strong>Read-only by design</strong>
+          <strong>
+            {demo
+              ? 'Demo: every change is simulated'
+              : allowed.length
+                ? `Nyctr may change ${allowed.join(' and ')}`
+                : 'Read-only for every source'}
+          </strong>
           <p>
-            Credentials stay on the server. Collection imports evidence; it cannot modify source
-            policies.
+            Collection never changes a source, and credentials stay on the server. Nyctr can add a
+            NextDNS allowlist entry, issue UniFi guest passes and cut a guest off only when an
+            operator names that source in NYCTR_PROVIDER_WRITES.
           </p>
         </div>
-        <Badge tone="blue">2 live adapters</Badge>
+        <Badge tone="blue">3 adapters</Badge>
       </div>
       <InlineError message={error} />
       {success && <Success>{success}</Success>}
@@ -341,7 +368,11 @@ export default function Integrations() {
                 <div className="integration-footer">
                   <span>
                     <LockKeyhole size={12} />
-                    Read only
+                    {demo
+                      ? 'Changes simulated'
+                      : writes?.[integration.provider as 'nextdns' | 'unifi_network'] === 'enabled'
+                        ? 'Nyctr may change it'
+                        : 'Read only'}
                   </span>
                 </div>
                 <div className="integration-actions">
@@ -395,7 +426,7 @@ export default function Integrations() {
           <Empty
             icon={Settings2}
             title="Connect your first source"
-            text="Choose UniFi Network or NextDNS below to begin collecting supported evidence."
+            text="Choose UniFi Network, NextDNS or Proxmox VE below to begin collecting."
           />
         </Card>
       )}

@@ -73,7 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const next = await post<User>('/auth/login', { email, password });
     updateUser(next);
     setError(null);
-    window.location.hash = next.role === 'member' ? '/portal' : '/overview';
+    window.location.hash = next.role === 'member' ? '/portal' : '/briefing';
   };
 
   /**

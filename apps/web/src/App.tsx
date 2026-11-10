@@ -1,14 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity as ActivityIcon,
-  ArrowUpRight,
-  Blocks as BlocksIcon,
-  Bot,
-  ChevronRight,
-  ClipboardCheck,
-  FileCheck2,
-  GitBranch,
-  Globe2,
+  Ban,
+  Braces,
+  History,
   Inbox,
   LayoutDashboard,
   LockKeyhole,
@@ -16,86 +10,48 @@ import {
   Menu,
   Network,
   PlugZap,
-  SearchCheck,
   Server,
   Settings as SettingsIcon,
-  Shield,
   ShieldAlert,
-  Users,
+  Sparkles,
+  Unlock,
+  Wifi,
   X,
 } from 'lucide-react';
+import { useApi } from './api';
 import { useAuth } from './auth';
-import { Badge, Brand, Empty, InlineError, Loading } from './components/ui';
+import Assistant from './components/Assistant';
+import { Brand, Empty, InlineError, Loading } from './components/ui';
 import type { IconComponent } from './components/ui';
-import SignIn from './pages/SignIn';
-import Overview from './pages/Overview';
-import Explorer from './pages/Explorer';
-import Resources from './pages/Resources';
-import Findings from './pages/Findings';
-import Integrations from './pages/Integrations';
+import type { AttentionItem, Rules } from './types';
+import Activity from './pages/Activity';
 import Blocks from './pages/Blocks';
+import Briefing from './pages/Briefing';
+import Findings from './pages/Findings';
+import Guests from './pages/Guests';
+import Integrations from './pages/Integrations';
+import Inventory from './pages/Inventory';
+import MapPage from './pages/MapPage';
+import OpenNow from './pages/OpenNow';
+import Queries from './pages/Queries';
 import Requests from './pages/Requests';
-import { Activity, AIProvider, Changes, Settings } from './pages/Workspace';
+import Setup from './pages/Setup';
+import SignIn from './pages/SignIn';
+import Portal from './pages/member/Portal';
 
 interface NavItem {
   id: string;
   name: string;
   icon: IconComponent;
+  count?: number;
 }
 interface NavGroup {
   title: string;
   items: NavItem[];
 }
-const adminNavigation: NavGroup[] = [
-  {
-    title: 'Workspace',
-    items: [
-      { id: 'overview', name: 'Overview', icon: LayoutDashboard },
-      { id: 'explorer', name: 'Network explorer', icon: Network },
-      { id: 'infrastructure', name: 'Infrastructure', icon: Server },
-      { id: 'investigations', name: 'Investigations', icon: SearchCheck },
-    ],
-  },
-  {
-    title: 'Security',
-    items: [
-      { id: 'findings', name: 'Findings', icon: ShieldAlert },
-      { id: 'policies', name: 'Policies', icon: Shield },
-      { id: 'traffic', name: 'Traffic & DNS', icon: ActivityIcon },
-    ],
-  },
-  {
-    title: 'Access',
-    items: [
-      { id: 'blocks', name: 'Block inbox', icon: Inbox },
-      { id: 'requests', name: 'Requests', icon: ClipboardCheck },
-      { id: 'changes', name: 'Changes', icon: FileCheck2 },
-      { id: 'activity', name: 'Activity', icon: ActivityIcon },
-    ],
-  },
-  {
-    title: 'Manage',
-    items: [
-      { id: 'integrations', name: 'Integrations', icon: PlugZap },
-      { id: 'ai', name: 'AI provider', icon: Bot },
-      { id: 'members', name: 'Members & roles', icon: Users },
-      { id: 'settings', name: 'Settings', icon: SettingsIcon },
-    ],
-  },
-];
-const memberNavigation: NavGroup[] = [
-  {
-    title: 'Your access',
-    items: [
-      { id: 'portal', name: 'Recent blocks', icon: Inbox },
-      { id: 'devices', name: 'My devices', icon: Server },
-      { id: 'requests', name: 'My requests', icon: ClipboardCheck },
-    ],
-  },
-];
 
 /** Tracks hash navigation and query parameters without sending client route state to the server. */
-function useRoute() {
+export function useRoute() {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
     /** Mirrors browser back/forward navigation into React's current route. */
@@ -109,134 +65,95 @@ function useRoute() {
   }, [hash]);
 }
 
-/**
- * Selects the view for a session's role and route. This is a navigation convenience;
- * each API endpoint independently authorizes the requested resources and actions.
- */
-function Content({
-  page,
-  params,
-  member,
-}: {
-  page: string;
-  params: URLSearchParams;
-  member: boolean;
-}) {
-  if (member) {
-    if (page === 'devices') return <Resources member />;
-    if (page === 'requests') return <Requests />;
-    return <Blocks />;
-  }
-  switch (page) {
-    case 'overview':
-      return <Overview />;
-    case 'explorer':
-      return <Explorer params={params} />;
-    case 'infrastructure':
-      return <Resources />;
-    case 'policies':
-      return <Resources policies />;
-    case 'findings':
-      return <Findings params={params} />;
-    case 'investigations':
-      return <Findings params={params} investigations />;
-    case 'blocks':
-    case 'portal':
-      return <Blocks />;
-    case 'traffic':
-      return <Blocks traffic />;
-    case 'requests':
-      return <Requests />;
-    case 'integrations':
-      return <Integrations />;
-    case 'activity':
-      return <Activity />;
-    case 'ai':
-      return <AIProvider />;
-    case 'changes':
-      return <Changes />;
-    case 'members':
-      return <Settings members />;
-    case 'settings':
-      return <Settings />;
-    default:
-      return (
-        <Empty
-          title="This view could not be found"
-          text="Return to the workspace to continue."
-          action={
-            <a className="button primary" href="#/overview">
-              Open overview
-            </a>
-          }
-        />
-      );
-  }
+/** States in one line what Nyctr is allowed to change, from the server's own settings. */
+function writeLine(rules: Rules | null, demo: boolean) {
+  if (demo) return 'Demo: every change is simulated';
+  if (!rules) return 'Checking what Nyctr may change';
+  const allowed = [
+    rules.writes.nextdns === 'enabled' && 'NextDNS',
+    rules.writes.unifi_network === 'enabled' && 'UniFi',
+  ].filter(Boolean);
+  return allowed.length ? `May change ${allowed.join(' and ')}` : 'Read-only for every source';
 }
 
 /**
- * Provides the authenticated workspace shell and a narrower member navigation.
- * Keeps demo/read-only capabilities visible and preserves server errors on sign-out.
+ * The administrator console: labelled sidebar, page area and the assistant drawer.
+ * Roles here only choose what to show; every API endpoint authorizes on its own.
  */
-export default function App() {
-  const { user, loading, logout } = useAuth();
-  const route = useRoute();
+function Console({ page, params }: { page: string; params: URLSearchParams }) {
+  const { user, logout } = useAuth();
+  const attention = useApi<AttentionItem[]>('/attention');
+  const rules = useApi<Rules>('/rules');
   const [navOpen, setNavOpen] = useState(false);
+  const [assistant, setAssistant] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const sidebar = useRef<HTMLElement>(null);
-  const member = user?.role === 'member';
-  const page =
-    member && !['portal', 'devices', 'requests'].includes(route.page)
-      ? 'portal'
-      : route.page || 'overview';
-  const navigation = member ? memberNavigation : adminNavigation;
-  const title =
-    navigation.flatMap((n) => n.items).find((n) => n.id === page)?.name ||
-    (member ? 'Recent blocks' : 'Workspace');
-  const group =
-    navigation.find((n) => n.items.some((item) => item.id === page))?.title || 'Workspace';
-  /** Resets view-local navigation affordances when the route or its query changes. */
+  const items = attention.data || [];
+  const count = (kind: string) => items.filter((item) => item.kind === kind).length || undefined;
+  const navigation: NavGroup[] = [
+    {
+      title: 'Network',
+      items: [
+        { id: 'briefing', name: 'Briefing', icon: LayoutDashboard },
+        { id: 'map', name: 'Map', icon: Network },
+        { id: 'inventory', name: 'Inventory', icon: Server },
+        { id: 'findings', name: 'Findings', icon: ShieldAlert, count: count('finding') },
+      ],
+    },
+    {
+      title: 'Access',
+      items: [
+        { id: 'queries', name: 'Queries', icon: Braces },
+        { id: 'blocks', name: 'Blocks', icon: Ban },
+        { id: 'requests', name: 'Requests', icon: Inbox, count: count('request') },
+        { id: 'access', name: 'Open now', icon: Unlock },
+        { id: 'guests', name: 'Guests', icon: Wifi, count: count('guest') },
+      ],
+    },
+    {
+      title: 'Platform',
+      items: [
+        { id: 'sources', name: 'Sources', icon: PlugZap, count: count('source') },
+        { id: 'activity', name: 'Activity', icon: History },
+        { id: 'setup', name: 'Setup', icon: SettingsIcon },
+      ],
+    },
+  ];
+  const current = navigation.flatMap((group) => group.items).find((item) => item.id === page);
+  const title = current?.name || 'Not found';
+  const reloadAttention = attention.reload;
+  /** Lets a screen refresh the shared attention list after it changed something. */
+  const refresh = useCallback(() => reloadAttention(), [reloadAttention]);
+
   useEffect(() => {
     setNavOpen(false);
     document.title = `${title} · Nyctr`;
     document.getElementById('main-content')?.scrollTo(0, 0);
-  }, [page, title, route.params.toString()]);
-  /** Confines keyboard focus to the open mobile drawer while the main content is inert. */
+  }, [page, title]);
   useEffect(() => {
-    if (!navOpen) return;
-    sidebar.current?.querySelector<HTMLElement>('a')?.focus();
-    /** Cycles drawer focus with Tab and returns focus to its trigger on Escape. */
-    const handle = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setNavOpen(false);
-        document.getElementById('nav-toggle')?.focus();
-      }
-      if (event.key === 'Tab') {
-        const items = [
-          ...(sidebar.current?.querySelectorAll<HTMLElement>('a, button:not([disabled])') || []),
-        ];
-        if (event.shiftKey && document.activeElement === items[0]) {
-          event.preventDefault();
-          items.at(-1)?.focus();
-        }
-        if (!event.shiftKey && document.activeElement === items.at(-1)) {
-          event.preventDefault();
-          items[0]?.focus();
-        }
-      }
+    /** Opens the drawer when any screen asks a question; A toggles it outside form fields. */
+    const onAsk = () => setAssistant(true);
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (
+        /INPUT|TEXTAREA|SELECT/.test(target.tagName) ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      )
+        return;
+      if (event.key.toLowerCase() === 'a') setAssistant((value) => !value);
+      if (event.key === 'Escape') setNavOpen(false);
     };
-    document.addEventListener('keydown', handle);
-    return () => document.removeEventListener('keydown', handle);
-  }, [navOpen]);
-  if (loading)
-    return (
-      <div className="boot-screen">
-        <Brand />
-        <Loading text="Opening your workspace…" />
-      </div>
-    );
-  if (!user) return <SignIn />;
+    window.addEventListener('nyctr:ask', onAsk);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('nyctr:ask', onAsk);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, []);
+
   /** Displays genuine revocation failures while AuthProvider handles success or session expiry. */
   const signOut = async () => {
     setLoggingOut(true);
@@ -249,8 +166,10 @@ export default function App() {
       setLoggingOut(false);
     }
   };
+  if (!user) return null;
+  const demo = user.mode === 'demo';
   return (
-    <div className={`app-shell ${member ? 'member-workspace' : ''}`}>
+    <div className={`app ${assistant ? 'with-drawer' : ''}`}>
       <a
         className="skip-link"
         href="#main-content"
@@ -262,75 +181,54 @@ export default function App() {
         Skip to content
       </a>
       {navOpen && (
-        <button
-          className="nav-backdrop"
-          aria-label="Close navigation"
-          onClick={() => setNavOpen(false)}
-        />
+        <button className="scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} />
       )}
       <aside
         ref={sidebar}
-        className={`sidebar ${navOpen ? 'open' : ''}`}
-        aria-label="Workspace navigation"
+        className={`side ${navOpen ? 'open' : ''}`}
+        aria-label="Console navigation"
       >
-        <a className="brand-link" href={member ? '#/portal' : '#/overview'} aria-label="Nyctr home">
-          <Brand />
-          <span className="version-chip">ALPHA</span>
-        </a>
-        <button
-          className="mobile-close icon-button"
-          onClick={() => setNavOpen(false)}
-          aria-label="Close navigation"
-        >
-          <X size={20} />
-        </button>
-        <div className="workspace-selector">
-          <span className="workspace-icon">
-            <Globe2 size={18} />
-          </span>
-          <div>
-            <strong>{member ? 'Member portal' : 'Network workspace'}</strong>
-            <small>{user.mode === 'demo' ? 'Demo environment' : 'Self-hosted'}</small>
-          </div>
+        <div className="side-brand">
+          <a href="#/briefing" aria-label="Nyctr home">
+            <Brand />
+          </a>
+          <button
+            className="icon-button side-close"
+            onClick={() => setNavOpen(false)}
+            aria-label="Close navigation"
+          >
+            <X size={18} />
+          </button>
         </div>
         <nav>
-          {navigation.map((nav) => (
-            <section className="nav-group" key={nav.title}>
-              <h2>{nav.title}</h2>
-              {nav.items.map((item) => (
+          {navigation.map((group) => (
+            <section className="nav-group" key={group.title}>
+              <h2>{group.title}</h2>
+              {group.items.map((item) => (
                 <a
                   key={item.id}
                   href={`#/${item.id}`}
                   className={`nav-item ${page === item.id ? 'active' : ''}`}
                   aria-current={page === item.id ? 'page' : undefined}
                 >
-                  <item.icon size={17} strokeWidth={1.7} />
+                  <item.icon size={16} strokeWidth={1.8} />
                   <span>{item.name}</span>
+                  {item.count !== undefined && <span className="count">{item.count}</span>}
                 </a>
               ))}
             </section>
           ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="read-only-label">
+        <div className="side-foot">
+          <a className="writes" href="#/sources" title="What Nyctr may change">
             <LockKeyhole size={13} />
-            <span>Read-only infrastructure</span>
-          </div>
-          <a
-            href="https://github.com/homelab-0/nyctr"
-            className="project-link"
-            target="_blank"
-            rel="noreferrer"
-          >
-            <GitBranch size={14} />
-            Open-source on GitHub
-            <ArrowUpRight size={13} />
+            <span>{writeLine(rules.data, demo)}</span>
           </a>
-          <div className="sidebar-user">
+          <div className="side-user">
             <span className="avatar">{(user.name || user.email).slice(0, 1).toUpperCase()}</span>
             <div>
               <strong>{user.name}</strong>
-              <small>{member ? 'Member' : 'Administrator'}</small>
+              <small>Administrator</small>
             </div>
             <button
               className="icon-button"
@@ -345,44 +243,111 @@ export default function App() {
           <InlineError message={logoutError} />
         </div>
       </aside>
-      <div className="main-window" inert={navOpen}>
-        <header className="topbar">
-          <div className="topbar-left">
-            <button
-              id="nav-toggle"
-              className="icon-button mobile-menu"
-              onClick={() => setNavOpen(true)}
-              aria-label="Open navigation"
-              aria-expanded={navOpen}
-            >
-              <Menu size={21} />
-            </button>
-            <span>{group}</span>
-            <ChevronRight size={13} />
-            <strong>{title}</strong>
-          </div>
-          <div className="topbar-right">
-            <span className="connection-label">
-              <span />
-              {user.mode === 'demo' ? 'Demo workspace' : 'Authenticated workspace'}
-            </span>
-            <Badge>{member ? 'Member' : 'Admin'}</Badge>
-          </div>
+      <div className="main" inert={navOpen}>
+        <header className="top">
+          <button
+            className="icon-button nav-toggle"
+            onClick={() => setNavOpen(true)}
+            aria-label="Open navigation"
+            aria-expanded={navOpen}
+          >
+            <Menu size={20} />
+          </button>
+          <strong className="top-title">{title}</strong>
+          <span className="top-fill" />
+          {demo && <span className="tag blue top-mode">Demo data</span>}
+          <button
+            className="button secondary small ask"
+            onClick={() => setAssistant((value) => !value)}
+            aria-pressed={assistant}
+          >
+            <Sparkles size={15} /> Ask Nyctr <kbd>A</kbd>
+          </button>
         </header>
-        {user.mode === 'demo' && (
-          <div className="demo-banner">
-            <BlocksIcon size={14} />
-            <span>
-              <strong>Demo mode</strong> · Synthetic network data. Requests and reviews are saved in
-              this demo workspace.
-            </span>
-            <Badge>Live collection disabled</Badge>
-          </div>
-        )}
-        <main id="main-content" className="page-content" tabIndex={-1}>
-          <Content key={`${page}-${user.id}`} page={page} params={route.params} member={member} />
+        <main id="main-content" className="content" tabIndex={-1}>
+          <Screen
+            page={page}
+            params={params}
+            attention={items}
+            loading={attention.loading}
+            refresh={refresh}
+            writes={rules.data?.writes}
+          />
         </main>
       </div>
+      <Assistant open={assistant} onClose={() => setAssistant(false)} attention={items} />
     </div>
   );
+}
+
+/** Selects the administrator screen for a route. */
+function Screen({
+  page,
+  params,
+  attention,
+  loading,
+  refresh,
+  writes,
+}: {
+  page: string;
+  params: URLSearchParams;
+  attention: AttentionItem[];
+  loading: boolean;
+  refresh: () => void;
+  writes?: Rules['writes'];
+}) {
+  switch (page) {
+    case 'briefing':
+      return <Briefing attention={attention} loading={loading} />;
+    case 'map':
+      return <MapPage params={params} />;
+    case 'inventory':
+      return <Inventory params={params} />;
+    case 'findings':
+      return <Findings params={params} />;
+    case 'queries':
+      return <Queries params={params} />;
+    case 'blocks':
+      return <Blocks />;
+    case 'requests':
+      return <Requests params={params} onChange={refresh} />;
+    case 'access':
+      return <OpenNow onChange={refresh} />;
+    case 'guests':
+      return <Guests params={params} onChange={refresh} />;
+    case 'sources':
+      return <Integrations writes={writes} />;
+    case 'activity':
+      return <Activity />;
+    case 'setup':
+      return <Setup params={params} />;
+    default:
+      return (
+        <Empty
+          title="This screen could not be found"
+          text="Go back to the briefing to continue."
+          action={
+            <a className="button primary" href="#/briefing">
+              Open the briefing
+            </a>
+          }
+        />
+      );
+  }
+}
+
+/** Chooses sign-in, the member portal or the administrator console for the current session. */
+export default function App() {
+  const { user, loading } = useAuth();
+  const route = useRoute();
+  if (loading)
+    return (
+      <div className="boot-screen">
+        <Brand />
+        <Loading text="Opening Nyctr…" />
+      </div>
+    );
+  if (!user) return <SignIn />;
+  if (user.role === 'member') return <Portal page={route.page} params={route.params} />;
+  return <Console key={user.id} page={route.page || 'briefing'} params={route.params} />;
 }
