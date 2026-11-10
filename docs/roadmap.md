@@ -32,7 +32,24 @@ Exit gate: clean installation and the isolated acceptance suite pass for the
 tested source revision. Publishing an image is a separate release action.
 Synthetic fixtures do not establish real-vendor compatibility or homelab reach.
 
-### Console MVP
+### Vendor-neutral core
+
+Done in this build: an integration registry and contract, capability-driven
+access and guest features, neutral attribute names, a catalog-driven Sources
+page, and Pi-hole as the first integration added without touching the core.
+
+Not done, and needed before larger deployments:
+
+- Organisations and sites above a single workspace, and roles beyond
+  administrator and member.
+- Pagination and server-side filtering for inventory, blocks and activity.
+- Collection workers outside the web process.
+- Integrations loaded from outside the repository, and the Helm chart exposing
+  per-integration settings.
+- Opening addresses in Pi-hole; DNS and firewall integrations beyond the four
+  shipped.
+
+## Console MVP
 
 A first working slice through stages 2 to 4, built before those stages' exit
 gates are met. Each item below is marked in its stage as **(first version)**.

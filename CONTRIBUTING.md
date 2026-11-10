@@ -41,6 +41,11 @@ for missing fields, provider errors, page limits, attribution, and TLS/redirect
 handling. A live environment check is useful evidence but is never a substitute
 for reproducible tests.
 
+Nyctr's core and console name no vendor. A new source is one module that declares
+its contract; start from [docs/integration-contract.md](docs/integration-contract.md)
+and do not add a provider check to a core module or the web app. Two tests in
+`services/api/tests/test_registry.py` enforce this.
+
 Keep collection read only. Provider changes live only in
 `services/api/nyctr/integrations/actions.py` behind `NYCTR_PROVIDER_WRITES`. A new
 kind of change requires its own design review, verification of the result and
