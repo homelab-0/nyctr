@@ -65,6 +65,8 @@ UNIFI_ROWS = {
             "loggingEnabled": False,
         }
     ],
+    # The 11.0.97 contract serves hotspot vouchers per site; this site has issued none.
+    f"{UNIFI_PREFIX}/sites/site-one/hotspot/vouchers": [],
 }
 
 
