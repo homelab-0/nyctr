@@ -94,7 +94,7 @@ These screenshots show the running application with synthetic demonstration data
 | Pi-hole | Read-only blocked lookups from a Pi-hole v6 resolver with its client labels. Reports blocks; does not open them, so its requests always wait for a person | Experimental; sign-in follows the published contract, query-log fields unverified against a live Pi-hole | Opening an address, list names |
 | Graph queries | Read-only GraphQL endpoint with length, depth and result limits; schema browser | Implemented | Saved queries, pagination |
 | Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint you configure | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
-| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The release workflow has not yet completed a first publication | Upgrade tooling |
+| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The release workflow publishes images from `v0.1.0-alpha.1` and the chart from `v0.1.0-alpha.2` | Upgrade tooling |
 
 Synthetic findings in demo mode demonstrate the workflow. The initial live
 collectors do not constitute a complete reachability engine or vulnerability scan.
@@ -197,9 +197,10 @@ one application replica during alpha and validates explicit live-mode settings.
 It does not provision an identity provider or a production database for you.
 
 The [release workflow](docs/releases.md) validates a tagged source version before
-publishing AMD64/ARM64 images with SBOM and provenance metadata. A workflow in the
-repository is not proof that a release image has been published: use only a
-completed release's recorded image digest. The source-build quick start above
+publishing AMD64/ARM64 images with SBOM and provenance metadata, followed by the
+Helm chart under the same version. A workflow in the repository is not proof
+that a release image has been published: use only a completed release's
+recorded image digest. The source-build quick start above
 works before the first published image.
 
 For independent testing, use the [Cloudex acceptance handoff](docs/testing/cloudex.md).

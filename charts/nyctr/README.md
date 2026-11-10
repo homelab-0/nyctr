@@ -126,16 +126,55 @@ the chart, leave both disabled and target the ClusterIP Service.
 
 ### Proxy identity and network restrictions
 
-Live mode requires `forwardedAllowIps`: exact IPv4/IPv6 addresses of trusted
-proxy peers **as seen by the application**. The chart rejects wildcard trust,
-CIDRs, and hostnames. The public edge must replace untrusted client-supplied
+Live mode requires `forwardedAllowIps`: IPv4/IPv6 addresses of trusted proxy
+peers **as seen by the application**. The chart rejects wildcard trust and
+hostnames.
+
+Exact addresses are the default and the safest choice. Gateways whose proxy pods
+get a new address on every restart (Envoy Gateway, most ingress controllers)
+make an exact list impractical, so a range is accepted under two conditions:
+
+- `networkPolicy.enabled` is true. The policy's `ingressFrom` should then decide
+  who can open a connection at all, and the range only says that those peers'
+  forwarding headers are believed.
+- The range is no wider than `/16` for IPv4 or `/48` for IPv6, for example the
+  cluster's pod network.
+
+Enabling the policy is necessary but it is not a guarantee, and the chart cannot
+check the rest. Before trusting a range, make sure that only your proxies can
+reach the pod:
+
+- `ingressFrom` selects the proxy pods and nothing else. A peer it admits that
+  sits inside the range can claim to be any client.
+- No other NetworkPolicy, or policy of your network plugin, selects the Nyctr
+  pod and admits more. Kubernetes adds the allowances of every policy that
+  selects a pod together.
+- Your network plugin enforces NetworkPolicy. Where it does not, the policy
+  is ignored.
+
+If you cannot establish all three, use exact proxy addresses.
+
+```yaml
+forwardedAllowIps:
+  - 10.42.0.0/16
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+```
+ The public edge must replace untrusted client-supplied
 forwarding headers; subsequent trusted hops must maintain a verified chain.
 Uvicorn uses these addresses to determine whether `X-Forwarded-For` and
 `X-Forwarded-Proto` are trustworthy. A missing/untrusted proxy collapses users
 onto the same peer login quota; overbroad trust enables spoofing. See the
 [deployment proxy guidance](../../deploy/README.md#trusted-reverse-proxies-and-login-limits).
 
-IP lists must be updated when proxy peer addresses change. Do not trust a NAT or
+Exact IP lists must be updated when proxy peer addresses change. Do not trust a NAT or
 bridge address unless network controls guarantee that connections through it
 come only from the intended proxies. Use the chart's NetworkPolicy or equivalent
 existing controls to restrict direct access. The default policy is ingress-only,
@@ -241,19 +280,43 @@ as part of a coordinated trust rotation to avoid inconsistent in-flight requests
 
 ## Helm and Flux usage
 
-From a repository checkout, render your nonsecret values for review first:
+From `v0.1.0-alpha.2` each release publishes this chart to
+`oci://ghcr.io/homelab-0/charts/nyctr` under the release version. The chart never
+chooses an image: set `image.digest` to the digest recorded by the same release.
+Render your nonsecret values for review first:
+
+```sh
+helm template nyctr oci://ghcr.io/homelab-0/charts/nyctr --version 0.1.0-alpha.2 \
+  -n nyctr -f nyctr-values.yaml
+helm upgrade --install nyctr oci://ghcr.io/homelab-0/charts/nyctr --version 0.1.0-alpha.2 \
+  -n nyctr --create-namespace -f nyctr-values.yaml --wait --timeout 5m
+```
+
+From a repository checkout, use the chart path instead:
 
 ```sh
 helm lint ./charts/nyctr -f nyctr-values.yaml --strict
 helm template nyctr ./charts/nyctr -n nyctr -f nyctr-values.yaml
-helm upgrade --install nyctr ./charts/nyctr -n nyctr --create-namespace \
-  -f nyctr-values.yaml --wait --timeout 5m
 ```
 
-For Flux, reference the chart path in an existing Git source and put the same
+For Flux, point an `OCIRepository` at the published chart and put the same
 nonsecret values in the HelmRelease. An outline is:
 
 ```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: nyctr
+  namespace: nyctr
+spec:
+  interval: 15m
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  ref:
+    tag: 0.1.0-alpha.2
+  url: oci://ghcr.io/homelab-0/charts/nyctr
+---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -261,18 +324,13 @@ metadata:
   namespace: nyctr
 spec:
   interval: 10m
-  chart:
-    spec:
-      chart: ./charts/nyctr
-      reconcileStrategy: Revision
-      sourceRef:
-        kind: GitRepository
-        name: nyctr
-        namespace: flux-system
+  chartRef:
+    kind: OCIRepository
+    name: nyctr
   values:
     # Insert the complete reviewed nonsecret configuration from above.
     image:
-      tag: sha-REPLACE_WITH_PUBLISHED_COMMIT
+      digest: sha256:REPLACE_WITH_THE_RELEASE_DIGEST
 ```
 
 This outline is intentionally incomplete until actual dependencies and values

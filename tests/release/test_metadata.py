@@ -22,6 +22,7 @@ def test_version_and_commit_tags_identify_the_same_release(tag):
     result = MODULE.release_metadata(tag, "Homelab-0/Nyctr", REVISION)
     assert result == {
         "image": "ghcr.io/homelab-0/nyctr",
+        "chart_registry": "oci://ghcr.io/homelab-0/charts",
         "version": tag[1:],
         "version_tag": "ghcr.io/homelab-0/nyctr:" + tag,
         "commit_tag": "ghcr.io/homelab-0/nyctr:sha-" + REVISION,

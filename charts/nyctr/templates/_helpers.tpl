@@ -66,8 +66,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 {{- end -}}
 {{- range .Values.forwardedAllowIps -}}
-{{- if or (contains "*" .) (contains "/" .) (contains "," .) -}}
-{{- fail "forwardedAllowIps must contain only exact trusted proxy IP addresses." -}}
+{{- if or (contains "*" .) (contains "," .) -}}
+{{- fail "forwardedAllowIps must contain only trusted proxy IP addresses or bounded ranges." -}}
+{{- end -}}
+{{- if and (contains "/" .) (not $.Values.networkPolicy.enabled) -}}
+{{- fail "A forwardedAllowIps range requires networkPolicy.enabled=true, and you must make sure that only trusted proxies in the range can connect: check ingressFrom and every other policy that selects the pod. Use exact addresses otherwise." -}}
 {{- end -}}
 {{- end -}}
 {{- $names := dict -}}

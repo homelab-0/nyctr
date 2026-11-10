@@ -63,7 +63,10 @@ Set `FORWARDED_ALLOW_IPS` to the comma-separated **actual proxy peer IP addresse
 seen by the application**. The production Compose override requires this value.
 It is a Uvicorn setting, so it has no `NYCTR_` prefix. For example, use
 `FORWARDED_ALLOW_IPS=10.42.0.10,10.42.0.11` only if those are your trusted proxies.
-Do not use `*`, a client network, or a shared container/cluster subnet. Docker
+Do not use `*`, a client network, or a shared container/cluster subnet. (The Helm
+chart accepts a bounded range only together with its NetworkPolicy, and only
+when you have made sure that nothing but your proxies can reach the pod; Compose
+has no such control.) Docker
 port forwarding or ingress networking can change the peer address the container
 sees; confirm it from connection/access logs before configuring trust. Trust a
 NAT/bridge address only when network controls ensure that every connection from

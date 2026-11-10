@@ -14,7 +14,7 @@ VERSION_PATTERN = r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:alp
 
 
 def release_metadata(tag: str, repository: str, revision: str) -> dict[str, str]:
-    """Build bounded image metadata from a version tag, repository, and exact commit.
+    """Build bounded image and chart metadata from a version tag, repository, and exact commit.
 
     Reject build metadata, shell syntax, newlines, and moving branch names. The
     release workflow separately proves that this commit belongs to main.
@@ -26,8 +26,12 @@ def release_metadata(tag: str, repository: str, revision: str) -> dict[str, str]
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("Revision must be a full lowercase Git commit SHA")
     image = "ghcr.io/" + repository.lower()
+    # Charts live beside the image under the same owner, in their own namespace,
+    # so an image and a chart can never share a tag by accident.
+    chart_registry = "oci://ghcr.io/" + repository.lower().split("/", 1)[0] + "/charts"
     return {
         "image": image,
+        "chart_registry": chart_registry,
         "version": tag.removeprefix("v"),
         "version_tag": image + ":" + tag,
         "commit_tag": image + ":sha-" + revision,

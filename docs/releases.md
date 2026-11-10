@@ -1,4 +1,4 @@
-# Container releases
+# Container and chart releases
 
 Nyctr is an experimental alpha. The release workflow is implemented, but a
 release exists only after its publication run has succeeded. Source builds and
@@ -8,7 +8,7 @@ the isolated acceptance stack remain usable before the first publication.
 
 Publishing a GitHub Release triggers `.github/workflows/release.yml`. Both stable
 and prerelease versions use that event. A pull request or ordinary branch push
-does not publish an image. The workflow:
+does not publish an image or a chart. The workflow:
 
 1. Runs the reusable CI workflow against the exact release commit, including API,
    frontend, container, chart, and isolated integration checks.
@@ -22,7 +22,12 @@ does not publish an image. The workflow:
    `ghcr.io/<repository-owner>/<repository-name>`.
 5. Includes BuildKit SBOM/provenance metadata and creates a GitHub provenance
    attestation for the published image digest.
-6. Records the immutable `image@sha256:...` reference in the workflow summary.
+6. Packages the Helm chart with the release version as both its chart version
+   and its application version, and pushes it to
+   `oci://ghcr.io/<repository-owner>/charts/nyctr`. This happens after the image,
+   so a chart version never exists without its image.
+7. Records the immutable `image@sha256:...` reference and the chart reference
+   in the workflow summary.
 
 Only the publication job receives package-write and attestation permissions. No
 provider credentials or deployment secrets belong in build arguments or images.
@@ -34,11 +39,15 @@ Accepted tags are `vMAJOR.MINOR.PATCH` and
 Publication creates the exact version tag and a full-commit `sha-<commit>` tag.
 There is no floating `latest` tag. Deploy by digest for a fixed artifact.
 
+The chart is published from `v0.1.0-alpha.2` onwards, under the release version
+without the leading `v`, for example `0.1.0-alpha.2`. A chart does not choose an
+image: set `image.digest` to the digest recorded by the same release.
+
 ## Maintainer release checklist
 
 - Merge the reviewed change and confirm its CI results.
-- Keep API, Python package, frontend, lockfile, and chart application-version
-  metadata aligned with the intended release. Update the README's release status
+- Keep API, Python package, frontend, lockfile, chart version and chart
+  application-version metadata aligned with the intended release. Update the README's release status
   when preparing the first published version.
 - Run the isolated acceptance instructions and retain a report that identifies
   the exact source commit, operating system, architecture, and tested scenarios.
@@ -46,9 +55,10 @@ There is no floating `latest` tag. Deploy by digest for a fixed artifact.
   Release, marking alpha/beta/rc releases as prereleases.
 - Wait for the release workflow to complete. A failed publication or attestation
   step is not a completed release, even if an image tag was created earlier.
-- Verify package visibility and access. On first publication, ensure the GHCR
-  package is public before documenting anonymous pulls; repository visibility
-  alone is not evidence of package visibility.
+- Verify package visibility and access. The image and the chart are two separate
+  GHCR packages. On the first publication of each, ensure the package is public
+  before documenting anonymous pulls; repository visibility alone is not
+  evidence of package visibility.
 - Record the resulting digest in deployment configuration and verify the image's
   provenance with `gh attestation verify oci://<image>@<digest> --repo <owner>/<repo>`.
 
