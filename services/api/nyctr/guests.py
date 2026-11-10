@@ -193,6 +193,10 @@ async def apply_action(db: Session, settings: Settings, device: Resource, action
     if mode == "simulated":
         record.execution = "simulated"
         device.attributes = {**device.attributes, "guest_authorized": allow}
+    elif mode == "enabled" and not allow and device.attributes.get("guest_authorized") is False:
+        # Already without access at the last collection: nothing to send, and UniFi
+        # would reject unauthorising a guest that holds no authorisation.
+        record.execution = "applied"
     elif mode == "enabled":
         try:
             integration, site, key = _site_and_key(db, device)

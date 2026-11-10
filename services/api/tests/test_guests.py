@@ -186,6 +186,11 @@ def test_live_writes_use_only_the_documented_unifi_calls(tmp_path, monkeypatch):
         assert calls[0] == ("POST", "/v1/sites/s1/clients/g1/actions", {"action": "UNAUTHORIZE_GUEST_ACCESS"})
         assert calls[1][:2] == ("GET", "/v1/sites/s1/clients/g1")
         assert guest(client, "Visitor phone")["state"] == "cut"
+        # Locking a device that is already cut needs no provider call.
+        before = len(calls)
+        locked = client.post("/api/guests/actions", headers=headers,
+                             json={"device_id": "unifi:client:g1", "action": "lock"})
+        assert locked.json()["state"] == "locked" and len(calls) == before
         made = client.post("/api/guests/passes", headers=headers,
                            json={"name": "Friend", "minutes": 90, "guest_limit": 2})
         assert made.status_code == 201 and made.json()["execution"] == "applied" and made.json()["code"] == "1234567890"

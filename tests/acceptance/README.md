@@ -68,8 +68,8 @@ CSRF rejection, and sanitized diagnostic audit events.
 Only after these checks does it explicitly collect the two positive fixtures.
 The expected saved result is **13 resources, 14 relationships, and one fresh DNS
 block**. Both provider-reported clients stay unassigned. The DNS observation has
-no trusted device ID and no assigned risk score. No source writes or exceptions
-are created.
+no trusted device ID and no score, because the fixture's block reason is one the
+scorer does not recognise. No source writes or exceptions are created.
 
 The isolated HTTPS fixture routes are:
 

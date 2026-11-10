@@ -80,8 +80,19 @@ organizational Blueprint/Canvas controls.
 
 The intended flow is collection → normalized evidence → analysis → proposal →
 authorization → execution → verification. Each step has an explicit owner.
-The alpha implements the read path and internal request review. It has no
-infrastructure change executor.
+
+- Collection: `nyctr/integrations/*` adapters and `nyctr/collection.py`. GET only.
+- Analysis: `nyctr/risk.py` (block scoring), `nyctr/analysis.py` (rule-based
+  findings) and `nyctr/links.py` (inferred links between sources). No model.
+- Authorization: an administrator's decision, or a rule in `nyctr/policy.py`.
+- Execution: `nyctr/integrations/actions.py`, gated by `NYCTR_PROVIDER_WRITES`,
+  called from `nyctr/access.py` (leases) and `nyctr/guests.py`.
+- Verification: each action reads back the provider state; `nyctr/worker.py`
+  and every lease read reconcile expired leases.
+- Explanation: `nyctr/assistant.py` and the read-only `nyctr/query.py`.
+
+Execution still runs inside the API process. Separating it, and binding
+approvals to an immutable plan digest, remain to be done.
 
 Deterministic analysis should establish facts and policy semantics before AI
 summarizes them. AI responses must refer to authorized evidence, identify gaps
@@ -96,10 +107,10 @@ preconditions and plan digest. The executor independently verifies identity,
 policy and drift. Changed plans require renewed approval. A successful provider
 response and verified restoration of user access are separate outcomes.
 
-Preauthorized temporary grants will require a deterministic administrator policy
-with limits. AI cannot author or broaden that policy. Durable leases, ownership
-tracking, overlapping requests, restart recovery and failed revocation are
-required before automatic grants are enabled.
+Preauthorized temporary grants require the deterministic administrator rule with
+its limits. AI cannot author or broaden that rule. Leases are durable, track
+whether Nyctr owns the provider entry, tolerate overlapping requests, are
+reconciled after restart, and stay open and visible when a removal fails.
 
 ## Identity and member privacy
 

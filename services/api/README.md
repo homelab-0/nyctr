@@ -2,8 +2,10 @@
 
 FastAPI and SQLAlchemy backend for the first Nyctr implementation. It stores
 identity, inventory, typed relationships, block observations, access requests,
-source-collection state and audit events. Infrastructure collection is read only.
-An internal review records a decision; it does not grant network access.
+source-collection state, leases, guest passes and audit events. Collection is
+read only. Provider changes are confined to `nyctr/integrations/actions.py` and
+are off unless `NYCTR_PROVIDER_WRITES` names the provider. A decision and what
+happened at the provider are recorded separately.
 
 ## Development
 
@@ -168,7 +170,8 @@ persist a diagnostic report, change provider configuration, or grant access.
 
 ## Collection and schema lifecycle
 
-UniFi Network and NextDNS adapters expose bounded read-only snapshot collection.
+UniFi Network, NextDNS and the experimental Proxmox adapter expose bounded
+read-only snapshot collection.
 Collection has a 90-second deadline and a database-backed per-integration lease.
 Failed collection preserves the prior snapshot. Source identifiers are
 integration-namespaced. Existing device grants survive successful refreshes, and

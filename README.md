@@ -29,10 +29,13 @@ Nyctr is designed for homelabs, small teams, and administrators managing mixed
 infrastructure. Integrations are adapters to a shared model. UniFi and NextDNS are
 the first targets; the architecture leaves room for hypervisor and cloud controls.
 
-> **Status: early alpha, unreleased.** This repository contains the first working
-> application foundation. Infrastructure connectors are read only. Access requests
-> are recorded for review; this version cannot unblock a domain or change a firewall.
-> The capability table below distinguishes implemented behavior from the roadmap.
+> **Status: early alpha, unreleased.** Collection is read only. Nyctr can change a
+> provider in exactly three ways (add or remove a NextDNS allowlist entry, create
+> or delete a UniFi guest pass, authorise or unauthorise a UniFi guest device) and
+> only when an operator names that provider in `NYCTR_PROVIDER_WRITES`. It is off
+> by default. Nothing here has been run against real UniFi, NextDNS or Proxmox
+> systems; tests use synthetic provider responses. The capability table below
+> separates what is implemented, simulated in demo, experimental and planned.
 
 ## Why Nyctr?
 
@@ -41,37 +44,48 @@ rule, an inherited policy, or missing routing. Those controls often live in
 different consoles. Nyctr's goal is to connect the evidence and explain which
 control matters, while keeping the administrator in charge of changes.
 
-The member portal applies the same idea to everyday access problems. People can
-sign in, see recent blocks associated with their assigned devices, and submit a
-request with a reason. A washing machine's telemetry, an unattributed DNS query,
-and another person's browsing activity do not become a member's inbox entries.
+The member portal applies the same idea to everyday access problems. People sign
+in, see what was blocked on the device in their hand, read a plain reason and a
+risk score, and ask for it to be opened. A low-risk privacy-list block can open
+for a limited time under a rule the administrator wrote; anything else waits for
+a person. A washing machine's telemetry, an unattributed DNS query, and another
+person's browsing activity do not become a member's inbox entries.
 
 ## In the application
 
-Drill into a resource and inspect the relationships and evidence around it:
+The briefing ranks what needs a person, using fixed rules rather than a model:
 
-![Nyctr network explorer showing a focused device neighborhood](docs/assets/network-explorer.png)
+![Nyctr briefing listing a cut-off guest, a waiting request and two findings](docs/assets/console-briefing.png)
 
-Member requests enter a persistent review workflow with explicit outcomes:
+The map puts each network in a column and each layer in a row. Line style shows
+whether a link was observed, configured or inferred by Nyctr:
 
-![Nyctr access request with a recorded administrator review](docs/assets/access-review.png)
+![Nyctr network map following a UniFi device into its Proxmox host](docs/assets/network-map.png)
+
+A member sees the score, what it is based on, and how to reconnect once it opens:
+
+![Nyctr member portal showing an opened address and reconnect steps](docs/assets/member-portal.png)
 
 These screenshots show the running application with synthetic demonstration data.
 
 ## Current capabilities
 
-| Area | Initial implementation | Next stages |
-| --- | --- | --- |
-| Workspace | Branded React interface, overview, inventory, integrations, audit | Saved investigations, richer search, multiple workspaces |
-| Network explorer | Interactive graph, resource inspector, focused neighborhoods, finding context | Large-graph layouts, temporal comparison, path simulation |
-| Identity | Local accounts, cookie sessions, administrator/member roles, optional OIDC | Account administration, richer role and group policies |
-| Evidence | Persistent resources, typed relationships, observations and source timestamps | Historical snapshots, drift and coverage analysis |
-| UniFi Network | Read-only inventory and configured-policy adapter; guided connection diagnostics | Port posture, event receiver, broader policy analysis |
-| NextDNS | Read-only profile and blocked-query adapter; diagnostics for read access and logging coverage | Stronger endpoint attribution and policy evaluation |
-| Member portal | Authorized recent blocks, assigned devices, persistent requests | Background risk evaluation and temporary access |
-| Change handling | Internal request review and audit; no provider write operations | Exact-plan approval, isolated execution, verification and expiry |
-| AI | Architectural boundary documented; no model called in this version | BYO provider through LiteLLM/Spektr, evidence-backed explanations |
-| Packaging | Application Dockerfile, PostgreSQL Compose, Helm chart, isolated acceptance stack, versioned image-release workflow | Published release validation, upgrade tooling and operational hardening |
+| Area | In this build | Status | Next |
+| --- | --- | --- | --- |
+| Console | Briefing, map, inventory, findings, blocks, requests, open access, guests, sources, activity, setup | Implemented | Saved views, multiple workspaces |
+| Network map | Column per network, row per layer; per-source views; follow a UniFi device into Proxmox | Implemented; layout tested to a 40-device cell, not at enterprise scale | Temporal comparison, path simulation |
+| Identity | Local accounts, cookie sessions, administrator and member roles, optional OIDC | Implemented | Account administration, group policies |
+| Evidence | Resources, typed relationships and observations, each marked observed, configured or inferred | Implemented | Historical snapshots, drift |
+| Risk score | Rule-based score from the stored block reason and the shape of the name; unknown stays unknown | Implemented. It is not a reputation lookup | Background investigation with source links |
+| Access rule and leases | Administrator-written rule may open a low-risk privacy-list block; durable leases; expiry and restart reconciliation; suggestions for permanent exceptions | Implemented; simulated in demo; real NextDNS writes untested | Exact-plan approval binding, drift checks |
+| Member portal | Blocks on the device in hand, score and factors, one request form, reconnect steps per device type | Implemented. Device recognition needs the member's LAN address to reach Nyctr | Push or email when a person decides |
+| Guest Wi-Fi | Passes, who is on, access point history, data use, blocked lookups, cut off, restore, lock out, counted cut-off rule | Implemented; simulated in demo; real UniFi writes untested | Firewall log receiver, UniFi-side block rule |
+| UniFi Network | Read-only inventory, policies, guest access state and vouchers; diagnostics | Implemented against the 11.0.97 contract | Ports, event receiver, policy analysis |
+| NextDNS | Read-only profile and blocked lookups with reason codes; administrator device-label links | Implemented | Incremental collection |
+| Proxmox VE | Read-only nodes, bridges, guests, network cards and firewall switches | Experimental; never run against a cluster | Firewall rules, SDN |
+| Graph queries | Read-only GraphQL endpoint with length, depth and result limits; schema browser | Implemented | Saved queries, pagination |
+| Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint you configure | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
+| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The Helm chart does not yet expose the new settings | Upgrade tooling |
 
 Synthetic findings in demo mode demonstrate the workflow. The initial live
 collectors do not constitute a complete reachability engine or vulnerability scan.
@@ -134,9 +148,20 @@ credential value. For example, an administrator can reference
 `NYCTR_CONNECTOR_SECRET_UNIFI` when adding a UniFi integration. Explicitly allow
 the UniFi console's HTTPS hostname using `NYCTR_CONNECTOR_HOSTS`.
 
-The application's connector code only sends GET requests. Use the narrowest
-provider-side permissions available for the selected API; the application cannot
-make an unrestricted provider key read only at the provider itself.
+Collection only sends GET requests. Changes are a separate code path that refuses
+to run unless the provider is named in `NYCTR_PROVIDER_WRITES`:
+
+| Setting | Effect |
+| --- | --- |
+| `NYCTR_PROVIDER_WRITES=nextdns` | The access rule and approvals may add and later remove a NextDNS allowlist entry. An exception applies to the whole profile, and the console says so before approval. |
+| `NYCTR_PROVIDER_WRITES=unifi_network` | Administrators may issue and end guest passes and cut off, restore or lock out a guest device; the cut-off rule may unauthorise a guest. |
+| `NYCTR_COLLECT_INTERVAL_SECONDS=300` | Collect every five minutes. Without it, collection happens only when an administrator presses Collect, so the cut-off rule only runs then. |
+| `NYCTR_AI_BASE_URL`, `NYCTR_AI_MODEL`, `NYCTR_AI_API_KEY` | An OpenAI-compatible chat endpoint for the assistant, such as a LiteLLM proxy. The model receives a bounded, redacted evidence pack and no credentials. |
+
+Leave `NYCTR_PROVIDER_WRITES` empty to keep every source read only; requests are
+still scored and shown, and approvals are recorded as not applied. Use the
+narrowest provider-side permissions available; Nyctr cannot make an unrestricted
+provider key read only at the provider itself.
 
 Use **Run diagnostics** on a saved integration to check configuration, credentials,
 verified HTTPS reads, supported response shapes, and evidence gaps. Results
@@ -177,10 +202,11 @@ server to try it.
 
 | Component | Technology and responsibility |
 | --- | --- |
-| Web application | React, TypeScript, Vite; interactive graph with React Flow |
+| Web application | React, TypeScript, Vite; SVG network map with a small deterministic layout |
 | API | Python, FastAPI; authentication, authorization and application workflows |
 | Persistence | SQLAlchemy; PostgreSQL for deployment, SQLite for isolated tests |
-| Adapters | Provider-specific collection and normalization behind a GET-only boundary |
+| Adapters | Provider-specific collection behind a GET-only client; provider changes isolated in one gated module |
+| Queries | graphql-core; read-only schema over stored evidence |
 | Distribution | Node build stage plus non-root Python runtime in one Docker image |
 
 The web application calls a same-origin API. Provider credentials stay on the
@@ -243,10 +269,11 @@ for commands and the distinction between automated coverage and browser review.
 
 - **Evidence before explanation.** Keep observed, configured and inferred facts
   distinct, with source and collection time attached.
-- **Read only by default.** Collection and analysis do not carry authority to
-  change infrastructure.
-- **People retain control.** Future writes must match an authorized, bounded plan.
-  A model recommendation cannot grant itself permission.
+- **Read only by default.** Collection and analysis never change infrastructure.
+  The few changes Nyctr can make are off until an operator allows each provider.
+- **People retain control.** Nyctr acts on its own only under a rule an
+  administrator wrote, within bounds the code enforces. A model cannot trigger a
+  change, edit a rule or grant itself permission.
 - **Privacy in the member portal.** Device ownership, event-time attribution,
   freshness and current authorization govern visibility.
 - **Vendor neutrality.** Keep provider behavior in adapters and expose capability

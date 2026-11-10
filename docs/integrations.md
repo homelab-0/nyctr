@@ -1,5 +1,8 @@
 # Integrations
 
+Collection is always read only. What Nyctr may change at a provider is a separate
+server setting, described under [Provider changes](#provider-changes).
+
 ## Read-only collection
 
 Live integration setup requires administrator access. Demo mode cannot configure
@@ -9,6 +12,7 @@ and use its name in the integration form:
 ```text
 NYCTR_CONNECTOR_SECRET_UNIFI=<set through your secret manager>
 NYCTR_CONNECTOR_SECRET_NEXTDNS=<set through your secret manager>
+NYCTR_CONNECTOR_SECRET_PROXMOX=<API token: user@realm!name=value>
 ```
 
 Only names starting with `NYCTR_CONNECTOR_SECRET_` are accepted. Credential values
@@ -40,8 +44,11 @@ the maintainer's network.
 
 ## UniFi Network
 
-The initial adapter targets the supplied **UniFi Network API 11.0.97** contract:
-sites, networks, devices, clients and configured firewall policies. The local
+The adapter targets the supplied **UniFi Network API 11.0.97** contract: sites,
+networks, devices, clients, configured firewall policies, guest access state and
+hotspot vouchers. Guest authorisation details (time, expiry, data use) are read
+per guest client, for at most 40 guests per collection. If the voucher list is
+not available to the key, collection continues and reports the gap. The local
 integration base URL has this shape:
 
 ```text
@@ -60,6 +67,12 @@ will be separate channels under the UniFi Network integration.
 Client display names and IPs do not create user assignments. Imported clients
 start unassigned. Configured rules do not prove which rule matched a real packet.
 
+The API lists only connected clients, has no event or flow feed, and does not say
+which voucher a guest used. Nyctr therefore keeps its own record of which access
+point each guest was on at each collection, shows the pass a guest most likely
+used as an inferred match on activation time, and cannot see connection attempts
+or port scans. Guest activity comes from blocked DNS lookups tied to the device.
+
 ## NextDNS
 
 The adapter uses the fixed official `https://api.nextdns.io` endpoint and a
@@ -75,15 +88,51 @@ per-device identity. Nyctr keeps these blocks unattributed and administrator-onl
 Even a provider device label is not enough to assign a real user without a trusted
 mapping. Member self-service requires that separate attribution layer.
 
-No allowlist operation is implemented. A future allowlist exception is generally
-profile scoped and needs scope disclosure, owned leases and expiry reconciliation.
+Blocked lookups keep the provider's reason identifiers, which the risk score
+reads. An administrator can link a NextDNS device label to an inventory device
+under Setup; the link applies only to lookups observed after it is made, so it
+never backdates what a member can see.
+
+## Proxmox VE (experimental)
+
+Reads `/cluster/resources`, each node's `/network`, each guest's `/config` and
+`/firewall/options`, and `/cluster/firewall/options`, using an API token sent as
+`Authorization: PVEAPIToken=...`. Give the token a read-only role such as
+`PVEAuditor`. Enter the host address, for example `https://pve.example:8006`,
+and add the hostname to `NYCTR_CONNECTOR_HOSTS`. At most 48 guests are read per
+collection.
+
+This adapter was written from the documented API and has not been run against a
+cluster. Firewall rules are not read, only the on/off switches. A failed firewall
+option read leaves the state unknown, never off.
+
+Nyctr joins Proxmox to UniFi at read time: a guest network card and a UniFi
+client with the same hardware address, a card's VLAN tag and a UniFi network
+with that VLAN, a node address and a UniFi client with that address. Each is
+shown as inferred with its basis, and an ambiguous match produces no link.
+
+## Provider changes
+
+Off unless the provider is listed in `NYCTR_PROVIDER_WRITES` (comma separated).
+
+| Provider | Call | Used for |
+| --- | --- | --- |
+| `nextdns` | `GET`, `POST /profiles/{id}/allowlist`, `DELETE /profiles/{id}/allowlist/{domain}` | Opening and closing a lease |
+| `unifi_network` | `POST`, `DELETE /v1/sites/{site}/hotspot/vouchers` | Issuing and ending a guest pass |
+| `unifi_network` | `POST /v1/sites/{site}/clients/{client}/actions` with `AUTHORIZE_GUEST_ACCESS` or `UNAUTHORIZE_GUEST_ACCESS` | Cutting off, restoring and locking out a guest |
+
+A NextDNS allowlist entry applies to everyone on the profile. An entry that
+already existed is never removed. The NextDNS allowlist path follows the API's
+documented rule that every nested array has its own endpoint; the documentation
+shows the denylist form explicitly. None of these calls has been exercised
+against a live service by this project.
 
 ## Planned integrations and capability boundaries
 
 | Integration | Planned scope | Boundary |
 | --- | --- | --- |
 | UniFi Fabric | Site Manager discovery/health, verified shared policy capabilities | Separate API connections and evidence coverage within one product section |
-| Proxmox | Nodes, guests, bridges and firewall configuration | Hypervisor policies can add another enforcement layer |
+| Proxmox | Firewall rules, SDN zones and virtual networks | The experimental adapter reads only inventory, cards and firewall switches |
 | AWS | VPC topology, security groups, NACLs, routes and available observations | Account/region permissions and observation coverage remain explicit |
 | Azure | VNets, subnets, NSGs, routes and available observations | Subscription/resource scope remains explicit |
 | Additional log sources | Supported event formats for otherwise unsupported sources | Receiver configuration alone does not prove complete logging |

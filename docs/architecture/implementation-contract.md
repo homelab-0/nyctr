@@ -32,19 +32,21 @@ specified. Errors use FastAPI's `detail` string. Version: `0.1.0-alpha.1`.
 
 Resource: `{id,name,kind,provider,source_id,site_id,observed_at,evidence_kind,
 classification,owner_id,attributes}`. `kind`: site, gateway, switch, access_point,
-network, client, host, workload, dns_profile, domain, policy. `evidence_kind`:
+network, client, host, bridge, workload, dns_profile, domain, policy. `evidence_kind`:
 observed, configured, inferred. `classification`: personal, shared, infrastructure,
 unassigned. IDs are integration-namespaced. `attributes` holds provider details.
 
 Relationship: `{id,source,target,kind,provider,evidence_kind,observed_at,attributes}`.
 Kinds are descriptive: contains, connects_to, member_of, hosted_by, governed_by,
-resolves_via. Connections do not prove reachability.
+resolves_via, same_device. Connections do not prove reachability. `/api/graph`
+also returns relationships with provider `nyctr` and evidence `inferred`, computed
+at read time by matching hardware address, VLAN tag or address across sources.
 
 Finding: `{id,title,severity,summary,resource_ids,relationship_ids,evidence,status}`.
 Severity: high, medium, low, informational. Evidence is an array of strings.
 
 Integration: `{id,provider,name,status,last_sync,last_error,config,secret_ref,
-capabilities}`. Providers: demo, unifi_network, nextdns, unifi_fabric. Credentials
+capabilities}`. Providers: unifi_network, nextdns, proxmox (experimental). Credentials
 are resolved from environment by reference and never returned. Capabilities are
 strings. Unsupported providers appear in the UI as planned, never connected.
 
@@ -55,25 +57,87 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 - `GET /api/devices` -> Resource[] permitted to the caller.
 - `GET /api/requests` -> AccessRequest[] permitted to the caller.
 - `POST /api/requests` with `{block_id,reason,duration_minutes}` -> AccessRequest.
-  Duration bounded to 15–240 minutes. Reject stale or unauthorized blocks.
-- `POST /api/requests/{id}/review` with `{decision:"reviewed"|"denied",note}`
-  is admin-only and records an internal review; it NEVER grants access.
+  Duration bounded to 15–240 minutes. Reject stale or unauthorized blocks. The
+  request is assessed immediately; the access rule may set `auto_approved` and
+  open a lease.
+- `POST /api/requests/{id}/review` with
+  `{decision:"reviewed"|"denied"|"approved",note,minutes?}` is admin-only.
+  `reviewed` and `denied` change nothing on the network. `approved` opens a
+  temporary lease whose `execution` says whether the provider was changed.
+- `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
+- `GET /api/me/device` -> `{device_id,name,simulated}`; only among the caller's devices.
 
-Block: `{id,device_id,device_name,domain,source,reason,observed_at,expires_at,
-evidence_kind,attribution,risk_score,risk_explanation}`. Unknown risk is null.
+Block: `{id,device_id,device_name,domain,source,reason,reason_codes,observed_at,
+expires_at,evidence_kind,attribution,risk_score,risk_band,risk_category,
+risk_factors,risk_explanation}`. `risk_score` is computed by `nyctr.risk` from the
+stored reason; unknown risk is null with band `unknown`. `attribution`: assigned,
+inferred, unverified or unattributed. Members see only `assigned`.
 AccessRequest: `{id,block_id,domain,device_name,requester_id,reason,duration_minutes,
-status,created_at,review_note}`. Initial status `pending`; no execution endpoint.
+status,created_at,review_note,risk_score,risk_category,risk_factors,decided_by,
+decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
+
+## Access rule, leases and suggestions
+
+- `GET /api/rules` (admin) -> `{access,guest,writes,collect_interval_seconds}`.
+  `writes` maps `nextdns` and `unifi_network` to simulated, enabled or disabled.
+- `PUT /api/rules/access` with `{enabled,max_score 0–60,max_minutes 15–240,per_day 1–20}`.
+- `PUT /api/rules/guest` with `{enabled,hits 1–50,minutes 1–120}`.
+- `GET /api/leases` -> Lease[]; members see their own. Reading reconciles expiry.
+- `POST /api/leases/{id}/end` (admin). 502 if the provider entry could not be
+  removed; the lease stays active with `last_error`.
+- `GET /api/suggestions` (admin) -> `{domain,times,people,last_at,risk_score,scope}`[].
+- `POST /api/suggestions` with `{domain,action:"make_permanent"|"dismiss"}`.
+- `GET /api/device-links`, `PUT /api/device-links` with `{source_id,device_id|null}`.
+- `GET /api/users` (admin) -> `{id,name,email,role,active}`[].
+
+Lease: `{id,request_id,integration_id,domain,device_name,requester_id,kind:
+"temporary"|"permanent",status:"active"|"ended",ended_reason,execution:
+"simulated"|"applied"|"not_applied"|"failed",owned,scope,decided_by,risk_score,
+created_at,expires_at,ended_at,last_error}`. `decided_by` is `rule` or a user ID.
+
+## Guest Wi-Fi
+
+- `GET /api/guests` (admin) -> `{writes,rule,sources,passes,devices,not_collected}`.
+- `POST /api/guests/passes` with `{name,minutes 30–10080,guest_limit 1–20}`.
+  409 when UniFi writes are disabled.
+- `POST /api/guests/passes/{id}/end`.
+- `POST /api/guests/actions` with `{device_id,action:"cut"|"restore"|"lock",reason?}`.
+- `POST /api/demo/guest-activity` exists only in demo mode.
+
+A guest device's `state` is derived from actions that were applied or simulated:
+online, waiting, cut, locked or offline. `pass.evidence` is always `inferred`.
+
+## Queries and assistant
+
+- `POST /api/graph/query` with `{query,variables?}` (admin) -> GraphQL `{data,errors}`.
+  Queries only; at most 6000 characters, 10 levels and 20000 returned objects.
+- `GET /api/attention` (admin) -> ranked `{kind,id,severity,title,detail,at}`[]. No model.
+- `GET /api/assistant` -> `{provider:"model"|"sample"|"off",model}`.
+- `POST /api/assistant/ask` with `{question,finding_id?}` ->
+  `{answer,references:[{ref,kind,id,label}],provider,model}`. `[[ref]]` tokens in
+  `answer` resolve to `references`. 409 when no model is configured in live mode.
+- `POST /api/findings/{id}/insight` -> `{take,reasoning,next_steps,confidence,
+  provider,model,created_at}`; cached until the finding's evidence changes.
 
 ## Integration adapter boundary
 
 Adapters are independent of the database and web framework. Implement in
 `nyctr/integrations/`: `async collect(provider, integration_id, config, api_key)`
-returns a `Snapshot` with lists `resources`, `relationships`, `blocks`, and
-`capabilities`. Dictionaries match the above contracts. Incoming NextDNS blocks
+returns a `Snapshot` with lists `resources`, `relationships`, `blocks`,
+`capabilities` and `vouchers`. Dictionaries match the above contracts. Incoming NextDNS blocks
 without reliable device mapping remain unattributed/admin-only. GET-only transport,
 TLS verification, no credential forwarding on redirects, bounded pagination.
 
 Only `NYCTR_CONNECTOR_SECRET_[A-Z0-9_]+` references may resolve to environment
 secrets. UniFi HTTPS endpoint hosts must be explicitly allowed by the server's
 `NYCTR_CONNECTOR_HOSTS` setting. NextDNS uses the fixed official API endpoint.
-Full source snapshots carry integration ID and collection time. No live writes.
+Full source snapshots carry integration ID and collection time. Collection never
+writes. Provider changes are confined to `nyctr/integrations/actions.py`, each
+taking an explicit `allowed` flag derived from `NYCTR_PROVIDER_WRITES`.
+
+## Schema
+
+Schema version 2. `migrate` upgrades a version-1 database in place by creating
+the new tables (settings, leases, device_links, guest_passes, guest_actions,
+sightings, insights) and adding nullable columns to observations and
+access_requests. No existing row is rewritten.
