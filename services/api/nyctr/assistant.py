@@ -111,7 +111,9 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
                       "detail": f"{row.device_name}, {score}. {row.decision_note or ''}".strip()})
     for finding in sorted(db.scalars(select(Finding).where(Finding.status == "open")),
                           key=lambda f: _SEVERITY.get(f.severity, 9)):
-        if finding.id.startswith("auto:guest-cut:") or finding.severity not in {"high", "medium"}:
+        # Cut-off guests and stuck leases are already listed above from their own records.
+        if finding.id.startswith(("auto:guest-cut:", "auto:lease-stuck:")) \
+                or finding.severity not in {"high", "medium"}:
             continue
         items.append({"kind": "finding", "id": finding.id, "severity": finding.severity, "at": None,
                       "title": finding.title, "detail": finding.summary[:200]})

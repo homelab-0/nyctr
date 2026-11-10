@@ -72,4 +72,22 @@ describe('assistant drawer', () => {
     );
     expect(screen.getByText('What is open?')).toBeDefined();
   });
+
+  it('lets the person turn the A shortcut off, and hides the switch where it does not apply', async () => {
+    mockApi({ 'GET /assistant': { provider: 'off', model: '' } });
+    const changed = vi.fn();
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <Assistant open onClose={() => {}} attention={[]} shortcut onShortcut={changed} />,
+    );
+    const toggle = await screen.findByRole('switch', {
+      name: 'Open and close the assistant with the A key',
+    });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    await user.click(toggle);
+    expect(changed).toHaveBeenCalledWith(false);
+    unmount();
+    render(<Assistant open onClose={() => {}} attention={[]} />);
+    expect(screen.queryByRole('switch')).toBeNull();
+  });
 });

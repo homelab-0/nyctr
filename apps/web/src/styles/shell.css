@@ -268,6 +268,20 @@ kbd {
   padding: 12px;
   border-top: 1px solid var(--line);
 }
+.drawer-pref {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 12px;
+  font-size: 12.5px;
+  color: var(--fg3);
+}
+.drawer-pref .switch {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg2);
+}
 .drawer-foot textarea {
   resize: none;
 }

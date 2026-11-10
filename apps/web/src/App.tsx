@@ -38,6 +38,7 @@ import Requests from './pages/Requests';
 import Setup from './pages/Setup';
 import SignIn from './pages/SignIn';
 import Portal from './pages/member/Portal';
+import { isAssistantKey, rememberShortcut, shortcutEnabled } from './lib/shortcut';
 
 interface NavItem {
   id: string;
@@ -86,6 +87,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
   const rules = useApi<Rules>('/rules');
   const [navOpen, setNavOpen] = useState(false);
   const [assistant, setAssistant] = useState(false);
+  const [shortcut, setShortcut] = useState(shortcutEnabled);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const sidebar = useRef<HTMLElement>(null);
@@ -132,18 +134,13 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
     document.getElementById('main-content')?.scrollTo(0, 0);
   }, [page, title]);
   useEffect(() => {
-    /** Opens the drawer when any screen asks a question; A toggles it outside form fields. */
+    /**
+     * Opens the drawer when any screen asks a question. A toggles it outside form fields,
+     * unless the person turned that shortcut off in the drawer.
+     */
     const onAsk = () => setAssistant(true);
     const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement;
-      if (
-        /INPUT|TEXTAREA|SELECT/.test(target.tagName) ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.altKey
-      )
-        return;
-      if (event.key.toLowerCase() === 'a') setAssistant((value) => !value);
+      if (isAssistantKey(event, shortcut)) setAssistant((value) => !value);
       if (event.key === 'Escape') setNavOpen(false);
     };
     window.addEventListener('nyctr:ask', onAsk);
@@ -152,7 +149,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
       window.removeEventListener('nyctr:ask', onAsk);
       document.removeEventListener('keydown', onKey);
     };
-  }, []);
+  }, [shortcut]);
 
   /** Displays genuine revocation failures while AuthProvider handles success or session expiry. */
   const signOut = async () => {
@@ -261,7 +258,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             onClick={() => setAssistant((value) => !value)}
             aria-pressed={assistant}
           >
-            <Sparkles size={15} /> Ask Nyctr <kbd>A</kbd>
+            <Sparkles size={15} /> Ask Nyctr {shortcut && <kbd>A</kbd>}
           </button>
         </header>
         <main id="main-content" className="content" tabIndex={-1}>
@@ -275,7 +272,16 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
           />
         </main>
       </div>
-      <Assistant open={assistant} onClose={() => setAssistant(false)} attention={items} />
+      <Assistant
+        open={assistant}
+        onClose={() => setAssistant(false)}
+        attention={items}
+        shortcut={shortcut}
+        onShortcut={(value) => {
+          rememberShortcut(value);
+          setShortcut(value);
+        }}
+      />
     </div>
   );
 }

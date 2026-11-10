@@ -43,7 +43,7 @@ export const clock = (value: string) =>
 export function span(minutes: number) {
   if (minutes % 1440 === 0) return `${minutes / 1440} day${minutes === 1440 ? '' : 's'}`;
   if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? '' : 's'}`;
-  return `${minutes} minutes`;
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 /** Megabytes or gigabytes from a byte count. */

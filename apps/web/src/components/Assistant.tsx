@@ -3,7 +3,7 @@ import { ArrowUp, Sparkles, X } from 'lucide-react';
 import { post, useApi } from '../api';
 import { hrefFor } from '../lib/links';
 import type { AssistantAnswer, AssistantConfig, AssistantReference, AttentionItem } from '../types';
-import { InlineError } from './ui';
+import { InlineError, Switch } from './ui';
 
 interface Message {
   role: 'you' | 'nyctr';
@@ -47,10 +47,16 @@ export default function Assistant({
   open,
   onClose,
   attention,
+  shortcut = true,
+  onShortcut,
 }: {
   open: boolean;
   onClose: () => void;
   attention: AttentionItem[];
+  /** Whether the A key opens and closes this drawer. */
+  shortcut?: boolean;
+  /** Present when the person may turn the A key on or off. */
+  onShortcut?: (enabled: boolean) => void;
 }) {
   const config = useApi<AssistantConfig>('/assistant');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -221,6 +227,18 @@ export default function Assistant({
           <ArrowUp size={16} />
         </button>
       </form>
+      {onShortcut && (
+        <div className="drawer-pref">
+          <span>
+            Open and close this with the <kbd>A</kbd> key
+          </span>
+          <Switch
+            checked={shortcut}
+            onChange={onShortcut}
+            label="Open and close the assistant with the A key"
+          />
+        </div>
+      )}
     </aside>
   );
 }

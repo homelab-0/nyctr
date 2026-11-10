@@ -463,6 +463,18 @@ function Result({ data, id }: { data: Data; id: string }) {
             once more.
           </p>
         </header>
+      ) : row.status === 'reviewed' ? (
+        <header className="m-result">
+          <span className="m-badge">
+            <Clock size={24} />
+          </span>
+          <h1 className="display d1">Looked at, nothing changed.</h1>
+          <p className="lede">
+            {row.review_note
+              ? `The note says: “${row.review_note}”`
+              : 'Someone looked at this request and did not open the address.'}
+          </p>
+        </header>
       ) : (
         <header className="m-result wait">
           <span className="m-badge">
@@ -510,7 +522,12 @@ function MyRequests({ data }: { data: Data }) {
         <section className="m-card">
           {rows.map((row) => {
             const lease = leaseFor.get(row.id);
-            const remaining = lease?.status === 'active' ? left(lease.expires_at, now) : null;
+            // A countdown reads as "it is open", so show one only when the change really happened.
+            const active = lease?.status === 'active';
+            const switchedOn =
+              active && lease.execution !== 'not_applied' && lease.execution !== 'failed';
+            const remaining = switchedOn ? left(lease.expires_at, now) : null;
+            const waiting = active && !switchedOn;
             return (
               <a className="m-row" key={row.id} href={`#/portal?request=${row.id}`}>
                 <span>
@@ -520,10 +537,14 @@ function MyRequests({ data }: { data: Data }) {
                   </span>
                 </span>
                 <span
-                  className={`tag ${remaining ? 'green' : lease?.status === 'ended' ? '' : STATUS[row.status]?.tone || ''}`}
+                  className={`tag ${remaining ? 'green' : waiting ? 'yellow' : lease?.status === 'ended' ? '' : STATUS[row.status]?.tone || ''}`}
                 >
                   {remaining ||
-                    (lease?.status === 'ended' ? 'Closed again' : STATUS[row.status]?.text)}
+                    (waiting
+                      ? 'Approved, not on yet'
+                      : lease?.status === 'ended'
+                        ? 'Closed again'
+                        : STATUS[row.status]?.text)}
                 </span>
               </a>
             );

@@ -75,7 +75,7 @@ async def _optional(reader: ReadClient, path: str, gap: str) -> dict[str, Any] |
     try:
         return await reader.get(path)
     except IntegrationError as error:
-        if error.category in {"authentication", "tls", "transport", "timeout", "rate_limit"}:
+        if core.must_stop(error) or error.category == "authentication":
             raise
         core.record_gap(gap)
         return None

@@ -141,6 +141,36 @@ def test_administrator_approval_opens_a_lease_and_expiry_closes_it(client, app, 
     assert client.post(f"/api/leases/{lease['id']}/end", headers=admin_headers).status_code == 409
 
 
+def test_approval_needs_current_evidence_but_refusing_does_not(client, app, member_headers):
+    """A request whose blocked lookup has expired cannot be approved; it can still be refused.
+
+    Approving changes a provider, so stale evidence must not turn into access.
+    The request and its history stay, and no lease is created.
+    """
+    made = [client.post("/api/requests", headers=member_headers, json={
+        "block_id": block, "reason": "Need it for work", "duration_minutes": 30}).json()
+        for block in ("block-verify", "block-stream")]
+    admin_headers = signin(client)
+    with app.state.session_factory() as db:
+        for block in ("block-verify", "block-stream"):
+            db.get(Observation, block).expires_at = utcnow() - timedelta(minutes=1)
+        db.commit()
+    before = len(client.get("/api/leases").json())
+    stale = client.post(f"/api/requests/{made[0]['id']}/review", headers=admin_headers,
+                        json={"decision": "approved", "note": "Looks fine"})
+    assert stale.status_code == 409 and "no longer current" in stale.json()["detail"]
+    assert len(client.get("/api/leases").json()) == before
+    still = next(x for x in client.get("/api/requests").json() if x["id"] == made[0]["id"])
+    assert still["status"] == "pending"
+    # Reading the inbox removes expired evidence entirely; the answer must stay the same.
+    client.get("/api/blocks")
+    assert client.post(f"/api/requests/{made[0]['id']}/review", headers=admin_headers,
+                       json={"decision": "approved", "note": "Looks fine"}).status_code == 409
+    denied = client.post(f"/api/requests/{made[1]['id']}/review", headers=admin_headers,
+                         json={"decision": "denied", "note": "Not for work"})
+    assert denied.status_code == 200 and denied.json()["status"] == "denied"
+
+
 def test_suggestions_come_from_rule_openings_and_need_an_administrator(client, admin_headers):
     """Repeated automatic openings are suggested; nothing becomes permanent until an administrator says so."""
     items = client.get("/api/suggestions").json()

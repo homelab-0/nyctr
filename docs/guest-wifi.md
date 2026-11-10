@@ -109,5 +109,9 @@ them. None of this has been run against a real console by this project.
 - Ubiquiti does not document the Alarm Manager webhook body. Nyctr ignores it.
 - Without the nudge or a collection interval, Nyctr sees a new guest only when
   an administrator presses Collect.
+- A cut-off lasts until the device gets access again. If a cut guest signs in
+  with another pass, or is let on in the UniFi console, the next collection shows
+  it as online and the cut-off rule looks at it again. Use lock out to keep a
+  device off: Nyctr cuts a locked device again at every collection.
 - UniFi's API lists connected clients only and has no flow or event feed.
   Guest activity is blocked DNS lookups; port scans are not visible.
