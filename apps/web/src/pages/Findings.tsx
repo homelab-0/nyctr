@@ -208,7 +208,7 @@ export default function Findings({ params }: { params: URLSearchParams }) {
                 )}
               </div>
             </Panel>
-            <Read finding={finding} />
+            <Read key={finding.id} finding={finding} />
           </div>
         </div>
       )}

@@ -86,6 +86,44 @@ def test_the_written_rule_cuts_a_guest_and_an_administrator_decides_what_next(cl
                        json={"device_id": "laptop-jamie", "action": "cut"}).status_code == 404
 
 
+def test_a_cut_stops_describing_a_device_the_network_let_back_on(client, app, admin_headers):
+    """A cut guest that signs in again is shown as online, and the rule can act on it again.
+
+    Nyctr did not let it on, so the cut must not linger as a false "Cut off",
+    and the device must not become invisible to the written rule.
+    """
+    client.post("/api/guests/actions", headers=admin_headers,
+                json={"device_id": "guest-hvac", "action": "cut", "reason": "Unknown device"})
+    assert guest(client, "HVAC-Laptop")["state"] == "cut"
+    with app.state.session_factory() as db:
+        device = db.get(Resource, "guest-hvac")
+        # An older observation that still says "authorised" is not evidence of anything new.
+        device.attributes = {**device.attributes, "guest": {**device.attributes["guest"], "authorized": True}}
+        db.commit()
+    assert guest(client, "HVAC-Laptop")["state"] == "cut"
+    with app.state.session_factory() as db:
+        # A collection after the cut reports the device with access again.
+        db.get(Resource, "guest-hvac").observed_at = utcnow() + timedelta(seconds=5)
+        db.commit()
+    back = guest(client, "HVAC-Laptop")
+    assert back["state"] == "online" and back["authorized"] is True
+    assert back["timeline"][0]["text"] == "Has access again after being cut off"
+    after = client.post("/api/demo/guest-activity", headers=admin_headers, json={"device_id": "guest-hvac"})
+    hvac = next(x for x in after.json()["devices"] if x["id"] == "guest-hvac")
+    assert hvac["state"] == "cut" and hvac["timeline"][0]["text"].startswith("The cut-off rule cut this device off")
+
+
+def test_a_lock_out_is_not_undone_by_the_network_letting_the_device_on(client, app, admin_headers):
+    """A lock-out is a standing decision: a device that gets back on stays locked and is cut again."""
+    client.post("/api/guests/actions", headers=admin_headers, json={"device_id": "guest-hvac", "action": "lock"})
+    with app.state.session_factory() as db:
+        device = db.get(Resource, "guest-hvac")
+        device.attributes = {**device.attributes, "guest": {**device.attributes["guest"], "authorized": True}}
+        device.observed_at = utcnow() + timedelta(seconds=5)
+        db.commit()
+    assert guest(client, "HVAC-Laptop")["state"] == "locked"
+
+
 def test_rule_does_not_fire_when_switched_off_or_below_its_count(client, app, admin_headers):
     """No rule, no automatic action; fewer hits than written, no action either."""
     assert client.put("/api/rules/guest", headers=admin_headers,

@@ -280,6 +280,24 @@ def make_http_client(api_key: str, *, authorization_scheme: str = "", send_key: 
     )
 
 
+class BudgetExceeded(IntegrationError):
+    """A collection used up its request or record budget.
+
+    Raised as its own type so an optional read never mistakes "Nyctr stopped
+    asking" for "the provider does not offer this".
+    """
+
+
+def must_stop(error: IntegrationError) -> bool:
+    """Say whether an error on an optional read must fail the collection instead of becoming a gap.
+
+    A missing optional feature is a gap. A broken connection, a rate limit or a
+    spent budget is not: continuing would return an incomplete snapshot labelled
+    with the wrong cause.
+    """
+    return isinstance(error, BudgetExceeded) or error.category in {"tls", "transport", "timeout", "rate_limit"}
+
+
 class ReadClient:
     """GET-only, same-origin requests; external pagination URLs are never followed."""
 
@@ -294,7 +312,7 @@ class ReadClient:
         """Charge returned rows against the shared collection budget or fail closed."""
         self.records += count
         if self.records > MAX_RECORDS:
-            raise IntegrationError("Collection exceeded its record budget; narrow the integration scope.")
+            raise BudgetExceeded("Collection exceeded its record budget; narrow the integration scope.")
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Read a local provider path with bounded size and sanitized failures.
@@ -317,7 +335,7 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
         raise IntegrationError("Invalid connector request path.")
     self.requests += 1
     if self.requests > MAX_REQUESTS:
-        raise IntegrationError("Collection exceeded its request budget; narrow the site scope.")
+        raise BudgetExceeded("Collection exceeded its request budget; narrow the site scope.")
     try:
         async with self.client.stream(method, self.base_url + path, params=params, json=body) as response:
             if (evidence := _probe_evidence.get()) is not None:

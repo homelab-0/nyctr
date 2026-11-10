@@ -4,9 +4,11 @@ import json
 
 from conftest import live_app, live_signin
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from nyctr import assistant
-from nyctr.models import AccessRequest, Finding
+from nyctr.analysis import refresh_findings
+from nyctr.models import AccessRequest, Finding, Lease
 
 
 def test_attention_is_ranked_without_a_model(client, admin_headers):
@@ -17,6 +19,21 @@ def test_attention_is_ranked_without_a_model(client, admin_headers):
     assert [x["severity"] for x in items] == sorted((x["severity"] for x in items),
                                                     key=["high", "medium", "low"].index)
     assert client.get("/api/assistant").json() == {"provider": "sample", "model": ""}
+
+
+def test_a_stuck_lease_is_listed_once(client, app, admin_headers):
+    """A lease that could not be closed appears as itself, not a second time as its own finding."""
+    with app.state.session_factory() as db:
+        lease = db.scalars(select(Lease).where(Lease.status == "active")).first()
+        lease.last_error = "The provider refused the change."
+        db.flush()
+        refresh_findings(db)
+        db.commit()
+        assert db.get(Finding, f"auto:lease-stuck:{lease.id}").status == "open"
+        lease_id = lease.id
+    about = [item for item in client.get("/api/attention").json()
+             if item["id"] in {lease_id, f"auto:lease-stuck:{lease_id}"}]
+    assert [item["kind"] for item in about] == ["lease"]
 
 
 def test_sample_answers_are_labelled_and_cite_real_items(client, admin_headers):

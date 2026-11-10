@@ -493,6 +493,13 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Request not found")
         if row.status != "pending":
             raise HTTPException(409, "This request has already been reviewed")
+        if body.decision == "approved":
+            # An approval changes a provider, so the evidence behind it must still be current.
+            # Saying no, or only noting a request, needs no fresh evidence.
+            source = db.get(Observation, row.block_id)
+            if not source or utc(source.expires_at) <= utcnow():
+                raise HTTPException(409, "The blocked lookup behind this request is no longer current. "
+                                         "Ask the person to open the page again and send a new request.")
         # Compare and swap prevents simultaneous administrators overwriting each other.
         result = db.execute(update(AccessRequest).where(AccessRequest.id == request_id,
                                                        AccessRequest.status == "pending").values(

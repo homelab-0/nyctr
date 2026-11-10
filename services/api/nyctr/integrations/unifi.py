@@ -103,6 +103,9 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
         core.record_capability("sites:read")
         if not sites:
             core.record_gap("unifi_no_visible_sites")
+        # Detail reads are capped for the whole collection, not per site, so many sites
+        # cannot spend the request budget on guests.
+        guest_details = 0
         for site in sites:
             sid = source_id(site.get("id"))
             site_resource = resource(integration_id, ID, "site", sid, site.get("name", sid), now)
@@ -148,7 +151,6 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                         integration_id, ID, node["id"], managing_device, "managed_by", now,
                         attributes={"source_field": "network.deviceId"},
                     ))
-            guest_details = 0
             for row in clients:
                 remote_id = source_id(row.get("id"))
                 attributes = {**selected(row, ("type",)), **_renamed(row, {
@@ -162,7 +164,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                         try:
                             grant = _guest_authorization(await reader.get(f"{base}/clients/{remote_id}"))
                         except IntegrationError as error:
-                            if error.category in {"tls", "transport", "timeout"}:
+                            if core.must_stop(error):
                                 raise
                             grant = None
                             core.record_gap("unifi_guest_details_unavailable")
@@ -208,7 +210,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                     snapshot.passes.extend(vouchers)
                 core.record_capability("hotspot_vouchers:read")
             except IntegrationError as error:
-                if error.category in {"tls", "transport", "timeout"}:
+                if core.must_stop(error):
                     raise
                 core.record_gap("unifi_vouchers_unavailable")
                 # Not read for one site means the list is incomplete: leave stored passes alone.
@@ -229,7 +231,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                 site_resource["attributes"] = {**site_resource["attributes"], "wifi": wifi[:64]}
                 core.record_capability("wifi_broadcasts:read")
             except IntegrationError as error:
-                if error.category in {"tls", "transport", "timeout"}:
+                if core.must_stop(error):
                     raise
                 core.record_gap("unifi_wifi_unavailable")
                 snapshot.capabilities = [x for x in snapshot.capabilities if x != "wifi_broadcasts:read"]

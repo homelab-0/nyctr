@@ -53,8 +53,11 @@ the maintainer's network.
 The adapter targets the supplied **UniFi Network API 11.0.97** contract: sites,
 networks, devices, clients, configured firewall policies, guest access state and
 hotspot vouchers. Guest authorisation details (time, expiry, data use) are read
-per guest client, for at most 40 guests per collection. If the voucher list is
-not available to the key, collection continues and reports the gap. The local
+per guest client, for at most 40 guests per collection across all sites. If the
+voucher list is not available to the key, collection continues and reports the
+gap. A rate limit, a broken connection or a spent request budget during one of
+these optional reads fails the collection instead, so an incomplete snapshot is
+never stored under the wrong explanation. The local
 integration base URL has this shape:
 
 ```text

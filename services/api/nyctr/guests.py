@@ -78,12 +78,23 @@ def _actions(db: Session, device_id: str) -> list[GuestAction]:
                            .order_by(GuestAction.created_at.desc())))
 
 
+def _back_on(device: Resource, cut: GuestAction) -> bool:
+    """Say whether a collection made after a cut reports the device with access again.
+
+    A cut guest can sign in with another pass, or be let on in the network's own
+    console. From then on the cut no longer describes the device: showing it as
+    cut off would be false, and the cut-off rule would never look at it again.
+    A lock-out is different and is re-applied by `enforce`.
+    """
+    return _grant(device).get("authorized") is True and utc(device.observed_at) > utc(cut.created_at)
+
+
 def state_of(device: Resource, actions: list[GuestAction]) -> str:
     """Name the device's current state from what was actually carried out, not what was intended."""
     latest = next((a for a in actions if a.execution in EFFECTIVE), None)
     if latest and latest.action == "lock":
         return "locked"
-    if latest and latest.action == "cut":
+    if latest and latest.action == "cut" and not _back_on(device, latest):
         return "cut"
     if device.attributes.get("missing_from_latest_snapshot"):
         return "offline"
@@ -184,6 +195,11 @@ def guest_json(db: Session, device: Resource, passes: list[GuestPass]) -> dict:
                    "failed": f" but {source} refused"}[action.execution]
         timeline.append({"at": utc(action.created_at).isoformat(), "kind": action.action, "evidence": "observed",
                          "text": f"{who} {verb}{outcome}", "detail": action.reason})
+    latest = next((a for a in actions if a.execution in EFFECTIVE), None)
+    if latest and latest.action == "cut" and _back_on(device, latest):
+        timeline.append({"at": utc(device.observed_at).isoformat(), "kind": "joined", "evidence": "observed",
+                         "text": "Has access again after being cut off",
+                         "detail": "Not let on from here: it signed in again or was let on in the network console."})
     timeline.sort(key=lambda item: item["at"], reverse=True)
     return {
         "id": device.id, "name": device.name, "integration_id": device.integration_id,

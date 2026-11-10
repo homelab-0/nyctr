@@ -283,6 +283,65 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
         {"name": "Home Guest", "enabled": True, "captive_portal": True, "network_id": "network-one"}]
 
 
+def unifi_guests(monkeypatch, sites, guests_per_site, *, detail_status=200, voucher_status=200):
+    """Serve a synthetic UniFi with guest clients on every site and count the detail reads."""
+    monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "unifi.example")
+
+    def handler(request):
+        """Answer the documented list paths, one guest detail path and the optional reads."""
+        path = request.url.path.removeprefix("/proxy/network/integration")
+        if path == "/v1/sites":
+            return httpx.Response(200, json=unifi_page([{"id": f"site-{n}", "name": f"Site {n}"} for n in range(sites)]))
+        site, _, rest = path.removeprefix("/v1/sites/").partition("/")
+        if rest == "clients":
+            return httpx.Response(200, json=unifi_page([
+                {"id": f"{site}-guest-{n}", "name": f"Guest {n}", "access": {"type": "GUEST", "authorized": True}}
+                for n in range(guests_per_site)]))
+        if rest.startswith("clients/"):
+            return httpx.Response(detail_status, json={"id": rest.removeprefix("clients/"), "access": {
+                "type": "GUEST", "authorized": True,
+                "authorization": {"authorizationMethod": "VOUCHER", "authorizedAt": "2026-07-02T11:00:00Z"}}})
+        if rest == "hotspot/vouchers":
+            return httpx.Response(voucher_status, json=unifi_page([]))
+        return httpx.Response(200, json=unifi_page([]))
+
+    calls = mock_client(monkeypatch, handler)
+    return calls, lambda: asyncio.run(collect(
+        "unifi_network", "u-one", {"base_url": "https://unifi.example/proxy/network/integration"}, KEY))
+
+
+def test_guest_detail_reads_are_capped_for_the_whole_collection(monkeypatch):
+    """The cap on per-guest reads is one total, so several busy sites cannot spend the request budget."""
+    calls, run = unifi_guests(monkeypatch, sites=3, guests_per_site=30)
+    snapshot = run()
+    details = [c for c in calls if "/clients/" in c.url.path]
+    assert len(details) == 40
+    guests = [r for r in snapshot.resources if r["kind"] == "client"]
+    assert len(guests) == 90 and sum(g["attributes"]["guest"].get("method") == "pass" for g in guests) == 40
+    assert len(calls) <= core.MAX_REQUESTS
+
+
+def test_a_spent_request_budget_fails_the_collection_instead_of_posing_as_a_missing_feature(monkeypatch):
+    """Running out of requests during an optional read is a failure, not "the key cannot read this"."""
+    monkeypatch.setattr(core, "MAX_REQUESTS", 8)
+    _calls, run = unifi_guests(monkeypatch, sites=1, guests_per_site=10)
+    with pytest.raises(core.BudgetExceeded, match="request budget"):
+        run()
+
+
+@pytest.mark.parametrize("status, stops", [(429, True), (403, False), (404, False)])
+def test_optional_reads_stop_on_a_rate_limit_but_record_a_gap_when_unavailable(monkeypatch, status, stops):
+    """A rate limit must end the collection; a read this key or site lacks is only a gap."""
+    _calls, run = unifi_guests(monkeypatch, sites=1, guests_per_site=1, voucher_status=status)
+    if stops:
+        with pytest.raises(IntegrationError) as caught:
+            run()
+        assert caught.value.category == "rate_limit"
+    else:
+        snapshot = run()
+        assert "hotspot_vouchers:read" not in snapshot.capabilities and len(snapshot.resources) == 2
+
+
 def test_repeated_offset_page_is_rejected(monkeypatch):
     """Detect repeated inventory pages even when their offset metadata changes."""
     monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "unifi.example")

@@ -221,4 +221,43 @@ describe('member portal', () => {
     expect(screen.getByText(/blocked for safety or by an administrator's rule/)).toBeDefined();
     expect(screen.getByText('72')).toBeDefined();
   });
+
+  it('says a request that was only looked at changed nothing', async () => {
+    open(
+      {
+        'GET /requests': [
+          request({ status: 'reviewed', decided_by: 'admin', review_note: 'Ask me on Monday' }),
+        ],
+      },
+      '/portal?request=r1',
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Looked at, nothing changed.' }),
+    ).toBeDefined();
+    expect(screen.getByText('The note says: “Ask me on Monday”')).toBeDefined();
+    expect(screen.queryByText(/Approved/)).toBeNull();
+    expect(screen.queryByText("It's open.")).toBeNull();
+  });
+
+  it('shows a countdown in My requests only when the change really happened', async () => {
+    const { user } = open({
+      'GET /requests': [
+        request({ id: 'r1', domain: 'photos.example' }),
+        request({ id: 'r2', domain: 'bank.example', status: 'approved', decided_by: 'admin' }),
+        request({ id: 'r3', domain: 'shop.example', status: 'approved', decided_by: 'admin' }),
+      ],
+      'GET /leases': [
+        lease({ id: 'l1', request_id: 'r1' }),
+        lease({ id: 'l2', request_id: 'r2', execution: 'not_applied', owned: false }),
+        lease({ id: 'l3', request_id: 'r3', execution: 'failed', owned: false }),
+      ],
+    });
+    await user.click(await screen.findByRole('link', { name: /My requests/ }));
+    const row = (domain: string) => within(screen.getByText(domain).closest('a') as HTMLElement);
+    expect(row('photos.example').getByText(/min left/)).toBeDefined();
+    for (const domain of ['bank.example', 'shop.example']) {
+      expect(row(domain).getByText('Approved, not on yet')).toBeDefined();
+      expect(row(domain).queryByText(/left/)).toBeNull();
+    }
+  });
 });

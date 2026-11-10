@@ -80,6 +80,9 @@ export function useApi<T>(path: string | null) {
     const controller = new AbortController();
     const refresh = loaded.current === path;
     if (!refresh) {
+      // The data on screen is cleared, so nothing is loaded any more. Without this a failed
+      // read of another path would leave "loaded" pointing at data that is no longer held.
+      loaded.current = null;
       setLoading(true);
       setData(null);
     }

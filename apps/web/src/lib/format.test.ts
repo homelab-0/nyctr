@@ -13,7 +13,8 @@ describe('formatting', () => {
     expect(left(null, now)).toBeNull();
   });
   it('formats spans, sizes and small counts', () => {
-    expect([span(45), span(60), span(120), span(1440)]).toEqual([
+    expect([span(1), span(45), span(60), span(120), span(1440)]).toEqual([
+      '1 minute',
       '45 minutes',
       '1 hour',
       '2 hours',
