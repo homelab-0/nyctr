@@ -64,3 +64,26 @@ def test_a_source_without_a_classifier_gets_only_the_generic_table():
     assert risk.assess("x.example", "Malware feed", [], "something_new").category == risk.SECURITY
     assert risk.assess("x.example", "Vendor blocklist", [], "something_new").score is None
     assert risk.assess("x.example", "Vendor blocklist", [], None).score is None
+
+
+def test_a_privacy_score_never_hides_a_reason_nyctr_does_not_recognise():
+    """A block with a privacy list and an unrecognised reason identifier is unknown, not low.
+
+    Opening the address would lift every reason at once, so the one score that
+    can open things without a person must account for all of them.
+    """
+    mixed = risk.assess("shop.example", "HaGeZi Multi PRO++; Something new",
+                        ["blocklist:hagezi-multi-pro-plusplus", "newfeature:xyz"], "nextdns")
+    assert mixed.score is None and mixed.band == "unknown"
+    assert "does not recognise" in mixed.factors[0]["label"]
+    # A free-form list name beside recognised identifiers is fine: identifiers decide.
+    named = risk.assess("shop.example", "HaGeZi Multi PRO++", ["blocklist:hagezi-multi-pro-plusplus"], "nextdns")
+    assert named.band == "low"
+    # Without identifiers, the names decide.
+    assert risk.assess("shop.example", "Tracker blocklist; Something new", [], "nextdns").score is None
+    assert risk.assess("shop.example", "Tracker blocklist", [], "nextdns").band == "low"
+    # The same rule holds for a source with no classifier of its own.
+    assert risk.assess("shop.example", "", ["tracker list", "something new"], "something_else").score is None
+    # A recognised security reason still wins and is still scored, whatever sits beside it.
+    threat = risk.assess("shop.example", "", ["blocklist:x", "threat-intelligence-feeds", "newfeature:xyz"], "nextdns")
+    assert threat.category == risk.SECURITY and threat.band == "high"

@@ -100,25 +100,36 @@ def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
     classifier explains each reason, by identifier and by name; a source
     without one falls back to a short generic table. The highest base score
     sets the category and name-shape factors add to it. No recognised reason,
-    or a source that says it cannot tell, returns an unknown assessment.
+    or a source that says it cannot tell, returns an unknown assessment. So
+    does a privacy-list score beside a reason that could not be explained.
     """
     from .integrations import registry
 
     provider = registry.find(source)
     explain = provider.classify if provider and provider.classify else _generic
-    texts = [code for code in (reason_codes or []) if isinstance(code, str)]
-    texts += [part.strip() for part in reason.split(";") if part.strip()]
+    codes = [code for code in (reason_codes or []) if isinstance(code, str)]
+    names = [part.strip() for part in reason.split(";") if part.strip()]
     best: tuple[int, str, str] | None = None
     cannot_tell: str | None = None
-    for text in texts:
+    scored: set[str] = set()
+    for text in codes + names:
         found = explain(text)
         if found is None:
             continue
         category, score, label = found
         if score is None:
             cannot_tell = cannot_tell or label
-        elif best is None or score > best[0]:
+            continue
+        scored.add(text)
+        if best is None or score > best[0]:
             best = (score, category, label)
+    # A privacy-list score is the only one that can open an address without a person, so it
+    # must cover every reason on the block: opening the address lifts all of them at once.
+    # Identifiers decide when the source gave any, because names are free-form list names.
+    if best is not None and best[1] == PRIVACY and any(text not in scored for text in codes or names):
+        return Assessment(None, UNKNOWN, [{
+            "label": cannot_tell or "A privacy list blocked this, and so did something Nyctr does not "
+                                    "recognise, so it cannot score it", "points": None}])
     if best is None:
         return Assessment(None, UNKNOWN, [{
             "label": cannot_tell or "Nyctr does not recognise the reason this was blocked, so it cannot score it",
