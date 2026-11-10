@@ -22,6 +22,7 @@ from . import risk
 from .collection import SECRET_REF
 from .config import Settings
 from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
+from .integrations import registry
 from .models import AccessRequest, DeviceLink, Integration, Lease, Observation, Resource, User, utc, utcnow
 from .policy import AccessRule, GuestRule, get_list, get_rule, put_list, put_rule
 from .security import audit
@@ -53,33 +54,53 @@ def _scope(integration: Integration | None) -> str:
     return f"Everyone using {integration.name}"
 
 
+def _opener(integration: Integration | None):
+    """Return the source's integration contract if it can open a blocked address, else None."""
+    provider = registry.find(integration.provider) if integration else None
+    return provider if provider and "dns.exceptions" in provider.provides else None
+
+
+def feature_mode(db: Session, settings: Settings, capability: str) -> str:
+    """Say how a feature would act right now across the connected sources that offer it.
+
+    `none` means no connected source offers the capability at all, which is a
+    different answer from a source that offers it but may not be changed.
+    """
+    modes = {settings.write_mode(row.provider) for row in db.scalars(select(Integration))
+             if registry.provides(row.provider, capability)}
+    return next((mode for mode in ("simulated", "enabled", "disabled") if mode in modes), "none")
+
+
 async def open_lease(db: Session, settings: Settings, *, integration: Integration | None, domain: str,
                      device_name: str, requester_id: str | None, request_id: str | None,
                      minutes: int | None, decided_by: str, risk_score: int | None) -> Lease:
     """Create a lease and carry it out according to the provider's write mode.
 
-    Demo simulates. With writes enabled the allowlist entry is added and
-    verified first; a provider failure raises and no lease is stored. With
-    writes disabled the lease is stored as not applied, so the administrator
-    sees exactly what still has to be done by hand.
+    The source of the block decides what is possible: only an integration that
+    declares it can open addresses is ever asked to. Demo simulates. With
+    changes allowed the exception is added and verified first; a provider
+    failure raises and no lease is stored. Otherwise the lease is stored as not
+    applied, so the administrator sees exactly what still has to be done by hand.
     """
     from .integrations import IntegrationError
-    from .integrations.actions import nextdns_allow
 
-    provider = integration.provider if integration else ""
-    mode = settings.write_mode(provider) if provider == "nextdns" else (
-        "simulated" if settings.mode == "demo" else "disabled")
+    opener = _opener(integration)
+    if integration is None:
+        mode = "simulated" if settings.mode == "demo" else "disabled"
+    else:
+        mode = settings.write_mode(integration.provider) if opener else "disabled"
     execution, owned = "not_applied", False
     if mode == "simulated":
         execution, owned = "simulated", True
     elif mode == "enabled":
         key = _secret(integration)
         if not key:
-            raise IntegrationError("The NextDNS secret is not configured on the server.", category="secret")
+            raise IntegrationError(f"The secret for {integration.name} is not configured on the server.",
+                                   category="secret")
         shared = db.scalar(select(Lease.id).where(
             Lease.status == "active", Lease.domain == domain, Lease.integration_id == integration.id,
             Lease.execution == "applied", Lease.owned.is_(True)).limit(1))
-        result = await nextdns_allow(integration.config, key, domain, allowed=True)
+        result = await opener.allow_domain(integration.config, key, domain, allowed=True)
         execution, owned = "applied", bool(result["owned"] or shared)
     now = utcnow()
     lease = Lease(request_id=request_id, integration_id=integration.id if integration else None, domain=domain,
@@ -101,7 +122,6 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
     provider could not be changed, so it is retried instead of silently left open.
     """
     from .integrations import IntegrationError
-    from .integrations.actions import nextdns_disallow
 
     if lease.status != "active":
         return True
@@ -112,11 +132,12 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         if not others:
             integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
             key = _secret(integration) if integration else None
+            opener = _opener(integration)
             try:
-                if not integration or not key:
-                    raise IntegrationError("The NextDNS secret is not configured on the server.")
-                await nextdns_disallow(integration.config, key, lease.domain,
-                                       allowed=settings.write_mode("nextdns") == "enabled")
+                if not integration or not key or not opener:
+                    raise IntegrationError("The source's secret is not configured on the server.")
+                await opener.disallow_domain(integration.config, key, lease.domain,
+                                             allowed=settings.write_mode(integration.provider) == "enabled")
             except IntegrationError as error:
                 lease.last_error = str(error)
                 audit(db, actor, "access.close_failed", lease.id, domain=lease.domain)
@@ -147,13 +168,14 @@ def _auto_opens_today(db: Session, user_id: str) -> int:
 async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation) -> None:
     """Assess a new request, store the assessment, and open access only if the written rule allows.
 
-    Fails closed: an unknown score, a security or household block, a domain an
-    administrator denied before, a missing DNS source or a disabled write path
-    all leave the request waiting for a person, with the reason recorded.
+    Fails closed: an unknown score, a security or content-rule block, a domain
+    an administrator denied before, a source whose integration cannot open
+    addresses or a disabled write path all leave the request waiting for a
+    person, with the reason recorded.
     """
     from .integrations import IntegrationError
 
-    assessment = risk.assess(observation.domain, observation.reason, observation.reason_codes)
+    assessment = risk.assess(observation.domain, observation.reason, observation.reason_codes, observation.source)
     row.risk_score, row.risk_category, row.risk_factors = assessment.score, assessment.category, assessment.factors
     row.integration_id = observation.integration_id
     rule: AccessRule = get_rule(db, "access_rule")
@@ -164,13 +186,15 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     elif assessment.score is None:
         why = "Nyctr could not score this address, so a person decides."
     elif assessment.category != risk.PRIVACY:
-        why = "This was blocked for safety or by a household rule, so a person decides."
+        why = "This was blocked for safety or by an administrator's rule, so a person decides."
     elif assessment.score > rule.max_score:
         why = f"The score is above the automatic limit of {rule.max_score}, so a person decides."
-    elif not integration or integration.provider != "nextdns":
-        why = "This block did not come from a DNS source Nyctr can open, so a person decides."
-    elif settings.write_mode("nextdns") == "disabled":
-        why = "Nyctr is not allowed to change NextDNS, so a person decides."
+    elif not integration:
+        why = "This block did not come from a connected source, so a person decides."
+    elif not _opener(integration):
+        why = f"Nyctr cannot open addresses at {integration.name}, so a person decides."
+    elif settings.write_mode(integration.provider) == "disabled":
+        why = f"Nyctr is not allowed to change {integration.name}, so a person decides."
     elif db.scalar(select(AccessRequest.id).where(AccessRequest.domain == observation.domain,
                                                   AccessRequest.status == "denied").limit(1)):
         why = "An administrator said no to this address before, so a person decides."
@@ -186,7 +210,7 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             row.decision_note = f"Opened for {minutes} minutes by the access rule."
             return
         except IntegrationError:
-            why = "Nyctr could not change NextDNS just now, so a person decides."
+            why = f"Nyctr could not change {integration.name} just now, so a person decides."
     row.decision_note = why
 
 
@@ -293,11 +317,25 @@ async def act_on_suggestion(body: SuggestionInput, request: Request, user=Depend
 
 @router.get("/rules")
 def rules(request: Request, _user=Depends(admin), db: Session = Depends(get_db)):
-    """Return both written rules and how Nyctr may act on each provider."""
+    """Return both written rules and how Nyctr may act for each feature that changes a source.
+
+    `writes` is keyed by feature, never by vendor: `access` is opening blocked
+    addresses and `guests` is letting guest devices on or off. `sources` lists
+    every connected source with what it adds and how Nyctr may change it.
+    """
     settings: Settings = request.app.state.settings
+    sources = []
+    for row in db.scalars(select(Integration).order_by(Integration.name)):
+        provider = registry.find(row.provider)
+        sources.append({"id": row.id, "name": row.name, "provider": row.provider,
+                        "provider_name": provider.name if provider else row.provider,
+                        "changes": provider.changes if provider else [],
+                        "write_mode": settings.write_mode(row.provider) if provider and provider.changes
+                        else "none"})
     return {"access": get_rule(db, "access_rule").model_dump(), "guest": get_rule(db, "guest_rule").model_dump(),
-            "writes": {"nextdns": settings.write_mode("nextdns"),
-                       "unifi_network": settings.write_mode("unifi_network")},
+            "writes": {"access": feature_mode(db, settings, "dns.exceptions"),
+                       "guests": feature_mode(db, settings, "guest.control")},
+            "sources": sources,
             "collect_interval_seconds": settings.collect_interval_seconds}
 
 
@@ -325,6 +363,16 @@ class LinkInput(InputModel):
     device_id: str | None = Field(default=None, max_length=255)
 
 
+def _is_label(row: Resource) -> bool:
+    """A client reported by a source that sees DNS lookups but holds no device inventory.
+
+    Such a client is only a name the DNS source attached to a lookup. It becomes
+    useful once an administrator links it to a device from an inventory source.
+    """
+    return row.kind == "client" and registry.provides(row.provider, "dns.blocks") \
+        and not registry.provides(row.provider, "inventory")
+
+
 @router.get("/device-links")
 def device_links(_user=Depends(admin), db: Session = Depends(get_db)):
     """List device labels reported by DNS sources with their link and a same-name suggestion.
@@ -333,9 +381,9 @@ def device_links(_user=Depends(admin), db: Session = Depends(get_db)):
     """
     clients = list(db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name)))
     links = {link.source_id: link for link in db.scalars(select(DeviceLink))}
-    inventory = [c for c in clients if c.provider != "nextdns"]
+    inventory = [c for c in clients if not _is_label(c)]
     result = []
-    for label in (c for c in clients if c.provider == "nextdns"):
+    for label in (c for c in clients if _is_label(c)):
         simple = "".join(ch for ch in label.name.casefold() if ch.isalnum())
         same = [c for c in inventory if "".join(ch for ch in c.name.casefold() if ch.isalnum()) == simple]
         link = links.get(label.id)
@@ -350,7 +398,7 @@ def device_links(_user=Depends(admin), db: Session = Depends(get_db)):
 def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(get_db)):
     """Create, replace or clear a link. A link applies only to lookups observed after it is made."""
     label = db.get(Resource, body.source_id)
-    if not label or label.kind != "client" or label.provider != "nextdns":
+    if not label or not _is_label(label):
         raise HTTPException(404, "DNS device label not found")
     existing = db.get(DeviceLink, body.source_id)
     if existing:
@@ -358,7 +406,7 @@ def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(
         db.flush()
     if body.device_id:
         device = db.get(Resource, body.device_id)
-        if not device or device.kind != "client" or device.provider == "nextdns":
+        if not device or device.kind != "client" or _is_label(device):
             raise HTTPException(422, "Choose a device from your network inventory")
         db.add(DeviceLink(source_id=body.source_id, device_id=device.id, created_by=user.id))
     audit(db, user.id, "device.link_changed", body.source_id, device_id=body.device_id)
@@ -378,8 +426,7 @@ def this_device(request: Request, auth=Depends(identity), db: Session = Depends(
     address = request.client.host if request.client else ""
     rows = [r for r in db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name))
             if device_permitted(db, r, user)]
-    match = next((r for r in rows if address and address in (r.attributes.get("ipAddress"),
-                                                             r.attributes.get("ip"))), None)
+    match = next((r for r in rows if address and address == r.attributes.get("ip")), None)
     simulated = False
     if match is None and settings.mode == "demo":
         # Demo has no real network. Pretend the browser is on the member's own device.

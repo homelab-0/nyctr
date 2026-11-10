@@ -123,7 +123,7 @@ def test_insights_are_validated_cached_and_regenerated_when_evidence_changes(tmp
 
 def test_sample_insight_uses_the_findings_own_evidence(client, admin_headers):
     """Without a model the demo insight restates stored evidence and is labelled a sample."""
-    body = client.post("/api/findings/auto:pve-firewall:workload-indexer/insight", headers=admin_headers).json()
+    body = client.post("/api/findings/auto:workload-firewall:workload-indexer/insight", headers=admin_headers).json()
     assert body["provider"] == "sample" and body["confidence"] in {"medium", "high"}
     assert body["reasoning"][0].startswith("Configured in Proxmox") and "Proxmox" in body["next_steps"][0]
 

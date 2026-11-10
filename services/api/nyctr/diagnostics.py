@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from . import integrations
+from .integrations import registry
 from .integrations.core import IntegrationError, ProbeEvidence, capture_probe, utc_now
 
 DIAGNOSTICS_TIMEOUT_SECONDS = 90
@@ -119,26 +120,6 @@ _FAILURES = {
     ),
 }
 
-_CAPABILITY_LABELS = {
-    "sites:read": "Site discovery",
-    "devices:read": "Network device inventory",
-    "clients:read": "Connected client inventory",
-    "networks:read": "Network configuration",
-    "firewall_policies:read": "Configured firewall policies",
-    "profile:read": "DNS profile configuration",
-    "dns_policies:read": "DNS policy sections",
-    "blocked_dns_logs:read": "Recent blocked DNS queries",
-    "guest_access:read": "Guest Wi-Fi access state",
-    "hotspot_vouchers:read": "Guest passes (hotspot vouchers)",
-    "wifi_broadcasts:read": "Wi-Fi names and which use the captive portal",
-    "nodes:read": "Cluster nodes",
-    "bridges:read": "Virtual bridges",
-    "guests:read": "Virtual machines and containers",
-    "guest_network:read": "Guest network cards, VLAN tags and firewall flags",
-    "firewall_options:read": "Firewall switches",
-}
-
-
 def _set_check(checks, id_, status, category, summary, guidance=None):
     """Replace one fixed report stage with sanitized application-owned diagnostic text."""
     checks[id_] = DiagnosticCheck(id=id_, label=_CHECK_LABELS[id_], status=status,
@@ -152,9 +133,14 @@ def _failed_check(checks, id_, category):
 
 
 def _capabilities(provider: str, evidence: ProbeEvidence) -> list[DiagnosticCapability]:
-    """List supported reads separately from runtime verification and unavailable product features."""
+    """List supported reads separately from runtime verification and unavailable product features.
+
+    The reads, their labels and the features a source cannot support all come
+    from the integration's own declaration.
+    """
+    definition = registry.find(provider)
     result = []
-    for capability in integrations.capabilities_for(provider):
+    for capability, label in (definition.reads if definition else ()):
         verification = "unknown"
         summary = "Implemented by the adapter; not verified by this diagnostic."
         if capability in evidence.unavailable_capabilities:
@@ -163,17 +149,11 @@ def _capabilities(provider: str, evidence: ProbeEvidence) -> list[DiagnosticCapa
         elif capability in evidence.verified_capabilities:
             verification = "verified"
             summary = "The corresponding source data passed the implemented parser within the checked scope."
-        result.append(DiagnosticCapability(id=capability, label=_CAPABILITY_LABELS[capability],
-                      implementation="implemented", verification=verification, summary=summary))
+        result.append(DiagnosticCapability(id=capability, label=label, implementation="implemented",
+                                           verification=verification, summary=summary))
     limitations = [("device_identity:verify", "Automatic user attribution",
                     "Source device labels and addresses do not establish event-time user ownership.")]
-    if provider == "unifi_network":
-        limitations.extend([
-            ("firewall_events:read", "Observed firewall events",
-             "This adapter reads configured policies; a UniFi firewall-event receiver is not implemented."),
-            ("reachability:verify", "End-to-end reachability",
-             "Inventory and configured policy relationships do not prove a successful network path."),
-        ])
+    limitations.extend(definition.limitations if definition else ())
     for capability, label, summary in limitations:
         result.append(DiagnosticCapability(id=capability, label=label, implementation="not_implemented",
                                           verification="unavailable", summary=summary))
@@ -181,15 +161,14 @@ def _capabilities(provider: str, evidence: ProbeEvidence) -> list[DiagnosticCapa
 
 
 def _gaps(provider: str, evidence: ProbeEvidence, counts: SnapshotCounts | None) -> list[EvidenceGap]:
-    """Keep identity, event coverage, and incomplete source fields explicit even after successful reads."""
-    entries = []
-    if provider == "nextdns":
-        entries.extend([
-            ("upstream_identity", "Upstream DNS is not user identity",
-             "A shared DNS profile or provider device label cannot identify the person who made a query. Blocks remain unassigned until trusted attribution exists."),
-            ("dns_scope", "DNS decisions cover one enforcement layer",
-             "A DNS block does not establish a firewall decision, HTTPS result, or destination risk. Unknown risk remains unknown."),
-        ])
+    """Keep identity, event coverage, and incomplete source fields explicit even after successful reads.
+
+    Standing gaps and the text for recorded gap codes belong to the integration.
+    The log-coverage gaps apply to any source that reports blocked lookups.
+    """
+    definition = registry.find(provider)
+    entries = list(definition.gaps) if definition else []
+    if definition and "dns.blocks" in definition.provides:
         if "blocked_dns_logs:read" in evidence.unavailable_capabilities:
             entries.append(("logging_disabled", "DNS logging is disabled at the source",
                             "The profile reports logging disabled. Zero returned observations must not be interpreted as an absence of blocks."))
@@ -199,69 +178,10 @@ def _gaps(provider: str, evidence: ProbeEvidence, counts: SnapshotCounts | None)
         elif counts is not None and counts.observations == 0:
             entries.append(("no_recent_events", "No recent blocks were returned",
                             "The bounded log query returned no normalized block events. This does not prove that no connection was blocked."))
-    elif provider == "unifi_network":
-        entries.extend([
-            ("firewall_events", "Firewall-event coverage is not implemented",
-             "The current UniFi adapter reads inventory and configured policies. It does not collect observed firewall blocks."),
-            ("reachability", "A configured relationship is not a traffic result",
-             "Rule associations and device attachment do not prove end-to-end reachability or effective firewall posture."),
-            ("user_attribution", "Device inventory does not establish user ownership",
-             "Members still require explicit device assignment and reliable event-time attribution before observations can appear in their inbox."),
-        ])
-    elif provider == "proxmox":
-        entries.extend([
-            ("experimental", "This adapter has not been run against a real cluster",
-             "It follows the documented Proxmox VE API. Treat its first results as unverified and report differences."),
-            ("reachability", "A network card on a bridge is not a traffic result",
-             "Bridge and VLAN settings are configuration. They do not prove a guest can reach anything."),
-            ("firewall_rules", "Firewall rules are not read yet",
-             "Only the on/off switches at cluster, guest and card level are collected."),
-        ])
-    additional = {
-        "unifi_vouchers_unavailable": (
-            "Guest passes could not be read",
-            "The hotspot voucher list was not available to this key or site. Guest pass tracking is incomplete.",
-        ),
-        "unifi_wifi_unavailable": (
-            "Wi-Fi names could not be read",
-            "Nyctr cannot show which Wi-Fi names sit behind UniFi's captive portal.",
-        ),
-        "unifi_guest_details_unavailable": (
-            "Guest authorisation details were not returned",
-            "Some guest devices are listed without their authorisation time, expiry or usage.",
-        ),
-        "unifi_guest_detail_limit": (
-            "More guests than one collection reads in detail",
-            "Only the first 40 guest devices carry authorisation details in each collection.",
-        ),
-        "proxmox_no_visible_nodes": (
-            "No nodes were visible to the token",
-            "The cluster resource list was empty. Guest and bridge reads were not exercised.",
-        ),
-        "proxmox_guest_limit": (
-            "More guests than one collection reads",
-            "Only the first 48 virtual machines and containers were read. The rest are missing from the map.",
-        ),
-        "proxmox_firewall_options_unavailable": (
-            "Some firewall switches could not be read",
-            "A firewall option read failed. Affected guests show their firewall state as unknown, not as off.",
-        ),
-        "nextdns_policy_fields_missing": (
-            "Some DNS policy sections were absent",
-            "The profile did not expose every policy section supported by this adapter. DNS policy coverage remains unverified.",
-        ),
-        "nextdns_log_settings_unknown": (
-            "The source logging setting is unknown",
-            "The profile did not explicitly report whether logging is enabled. Any successful log read describes only the requested window.",
-        ),
-        "unifi_no_visible_sites": (
-            "No sites were visible to the credential",
-            "Site discovery returned an empty list. Device, network, client, and policy reads were not exercised.",
-        ),
-    }
+    notes = definition.gap_notes if definition else {}
     for gap in sorted(evidence.gaps):
-        if gap in additional:
-            title, summary = additional[gap]
+        if gap in notes:
+            title, summary = notes[gap]
             entries.append((gap, title, summary))
     return [EvidenceGap(id=id_, title=title, summary=summary) for id_, title, summary in entries]
 

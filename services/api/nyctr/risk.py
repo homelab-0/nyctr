@@ -1,7 +1,7 @@
 """Explainable, rule-based risk assessment of a blocked domain.
 
-The score is computed only from evidence Nyctr holds: the provider's reason for
-the block and the shape of the name. It is not a reputation lookup. When the
+The score is computed only from evidence Nyctr holds: the reason the source gave
+for the block, explained by that source's integration, and the shape of the name. It is not a reputation lookup. When the
 reason is missing or unrecognised the score is None, which callers must treat as
 "unknown" and never as low risk.
 """
@@ -16,23 +16,30 @@ from dataclasses import dataclass, field
 LOW_MAX = 30
 MEDIUM_MAX = 60
 
-# (category, base score, plain-language factor). Matched against provider reason
-# identifiers and names in order; the first match per reason wins.
+# Generic reasons, used only for a source that does not explain its own. Each integration
+# that knows its provider's reasons classifies them itself (see integrations/registry.py).
+# (pattern, category, base score, plain-language factor); the first match per reason wins.
 _REASONS: tuple[tuple[re.Pattern[str], str, int, str], ...] = tuple(
     (re.compile(pattern, re.I), category, score, text) for pattern, category, score, text in (
-        (r"threat|safe.?browsing|malware|phish|cryptojack|rebind|homograph|typosquat|\bdga\b|csam",
-         "security", 92, "A security feed lists this address as a threat"),
-        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently"),
-        (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites"),
-        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it"),
+        (r"threat|malware|phish|cryptojack|botnet|ransomware", "security", 92,
+         "A security feed lists this address as a threat"),
+        (r"newly.registered", "security", 72, "The address was registered very recently"),
         (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name"),
-        (r"parental|category|service:|safe.?search|bypass", "policy", 60, "A household rule blocks this kind of site"),
-        (r"disguised", "privacy_list", 24, "It is a tracker hidden behind another site's name"),
-        (r"^native|native.tracking", "privacy_list", 14, "It is device telemetry blocked by a tracking list"),
-        (r"^blocklist:|blocklist|privacy list|ad.?block|tracker|tracking", "privacy_list", 16,
+        (r"parental|category|safe.?search", "policy", 60,
+         "A content rule set by an administrator blocks this kind of site"),
+        (r"ad.?block|advert|tracker|tracking|privacy list", "privacy_list", 16,
          "A privacy and ad-blocking list covers it, not a security feed"),
     )
 )
+
+
+def _generic(text: str) -> tuple[str, int, str] | None:
+    """Explain a reason from a source that has no classifier of its own."""
+    for pattern, category, score, label in _REASONS:
+        if pattern.search(text):
+            return category, score, label
+    return None
+
 
 SECURITY = "security"
 PRIVACY = "privacy_list"
@@ -85,25 +92,37 @@ def _name_factors(domain: str) -> list[dict]:
     return factors
 
 
-def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None) -> Assessment:
+def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
+           source: str | None = None) -> Assessment:
     """Score a blocked domain from its block reason and name.
 
-    Each provider reason is matched by identifier and by name. The highest
-    matching base score sets the category; name-shape factors add to it. No
-    recognised reason returns an unknown assessment with an explanatory factor.
+    `source` is the kind of integration that reported the block. Its own
+    classifier explains each reason, by identifier and by name; a source
+    without one falls back to a short generic table. The highest base score
+    sets the category and name-shape factors add to it. No recognised reason,
+    or a source that says it cannot tell, returns an unknown assessment.
     """
+    from .integrations import registry
+
+    provider = registry.find(source)
+    explain = provider.classify if provider and provider.classify else _generic
     texts = [code for code in (reason_codes or []) if isinstance(code, str)]
     texts += [part.strip() for part in reason.split(";") if part.strip()]
     best: tuple[int, str, str] | None = None
+    cannot_tell: str | None = None
     for text in texts:
-        for pattern, category, score, label in _REASONS:
-            if pattern.search(text):
-                if best is None or score > best[0]:
-                    best = (score, category, label)
-                break
+        found = explain(text)
+        if found is None:
+            continue
+        category, score, label = found
+        if score is None:
+            cannot_tell = cannot_tell or label
+        elif best is None or score > best[0]:
+            best = (score, category, label)
     if best is None:
         return Assessment(None, UNKNOWN, [{
-            "label": "Nyctr does not recognise the reason this was blocked, so it cannot score it", "points": None}])
+            "label": cannot_tell or "Nyctr does not recognise the reason this was blocked, so it cannot score it",
+            "points": None}])
     score, category, label = best
     factors = [{"label": label, "points": score}] + _name_factors(domain)
     total = max(0, min(100, sum(f["points"] for f in factors)))
@@ -113,6 +132,6 @@ def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None)
 def member_summary(assessment: Assessment) -> str:
     """One calm sentence a non-technical person can read about why this was blocked."""
     if assessment.score is None:
-        return "Nyctr could not tell why this was blocked, so a person will look at it."
+        return "Nyctr could not tell how risky this is, so a person will look at it."
     lead = assessment.factors[0]["label"]
     return lead[0].upper() + lead[1:] + "."

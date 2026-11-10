@@ -20,9 +20,9 @@ def test_inventory_filters_and_nested_links(client, admin_headers):
     """Typed filters, attribute filters and one-hop traversal return stored evidence."""
     data = run(client, admin_headers, """{
       workloads(firewall: false) { name attr(key: "vmid") network { name } }
-      networks { name attr(key: "vlanId") }
+      networks { name attr(key: "vlan") }
       guests: devices(search: "pixel") { name evidence blocks(first: 10) { domain riskBand } }
-      tagged: resources(kind: ["network"], where: [{key: "vlanId", eq: "80"}]) { name neighbors(kind: "client") { name } }
+      tagged: resources(kind: ["network"], where: [{key: "vlan", eq: "80"}]) { name neighbors(kind: "client") { name } }
     }""")["data"]
     assert data["workloads"] == [{"name": "Media indexer", "attr": "204", "network": {"name": "Servers"}}]
     assert {"name": "Guest network", "attr": "80"} in data["networks"]

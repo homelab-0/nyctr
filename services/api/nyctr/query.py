@@ -52,7 +52,7 @@ type Resource {
   name: String!
   "site, gateway, switch, access_point, network, client, host, bridge, workload, dns_profile, domain or policy."
   kind: String!
-  "unifi_network, nextdns, proxmox or demo."
+  "The kind of integration that reported it (see the Sources page), or demo."
   provider: String!
   "observed, configured or inferred."
   evidence: String!
@@ -223,10 +223,20 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
 
 
+def _attribute(attrs: dict, key: str):
+    """Read an attribute, following dots into nested records (`guest.authorized`). Bounded depth."""
+    value = attrs
+    for part in key.split(".")[:4]:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
 def _matches(resource: dict, filters: list[dict] | None) -> bool:
     """Apply attribute filters to one resource."""
     for item in filters or []:
-        value = resource["_attrs"].get(item["key"])
+        value = _attribute(resource["_attrs"], item["key"])
         if item.get("exists") is not None and (value is not None) != item["exists"]:
             return False
         text = _text(value) or ""
@@ -239,7 +249,7 @@ def _matches(resource: dict, filters: list[dict] | None) -> bool:
 
 def _block(row: Observation) -> dict[str, Any]:
     """Shape one blocked lookup, scored by the same rules the rest of the product uses."""
-    assessment = risk.assess(row.domain, row.reason, row.reason_codes)
+    assessment = risk.assess(row.domain, row.reason, row.reason_codes, row.source)
     return {"id": row.id, "domain": row.domain, "reason": row.reason,
             "observedAt": utc(row.observed_at).isoformat(), "deviceName": row.device_name,
             "attribution": row.attribution, "riskScore": assessment.score, "riskBand": assessment.band,
@@ -378,7 +388,7 @@ def _make_schema():
                  and (not evidence or x["evidence"] == evidence)], first),
         },
         "Resource": {
-            "attr": lambda r, _info, key: _text(r["_attrs"].get(key)),
+            "attr": lambda r, _info, key: _text(_attribute(r["_attrs"], key)),
             "attributes": lambda r, _info: json.dumps(r["_attrs"], sort_keys=True, default=str),
             "network": _r_network, "neighbors": _r_neighbors,
             "links": lambda r, info, kind=None, direction="BOTH", first=50: info.context.take(

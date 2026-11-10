@@ -272,7 +272,7 @@ class DeviceLink(Base):
 
 
 class GuestPass(Base):
-    """A guest Wi-Fi pass (UniFi hotspot voucher) known to Nyctr. Codes are administrator-only."""
+    """A guest Wi-Fi pass known to Nyctr. `voucher_id` is the pass's identifier at its source. Codes are administrator-only."""
     __tablename__ = "guest_passes"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
     integration_id: Mapped[str] = mapped_column(String(128), index=True)

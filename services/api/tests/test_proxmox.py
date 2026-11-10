@@ -107,23 +107,23 @@ def test_cross_source_links_need_a_unique_match():
         return {"id": id_, "provider": provider, "kind": kind, "attributes": attrs, "observed_at": "2026-11-10T00:00:00+00:00"}
 
     vm = row("vm", "proxmox", "workload", nics=[{"mac": "BC:24:11:00:00:01", "vlan": 66}])
-    client = row("c1", "unifi_network", "client", macAddress="bc:24:11:00:00:01")
-    lan = row("n66", "unifi_network", "network", vlanId=66)
+    client = row("c1", "unifi_network", "client", mac="bc:24:11:00:00:01")
+    lan = row("n66", "unifi_network", "network", vlan=66)
     links = derived_links([vm, client, lan])
     assert {(e["source"], e["target"], e["kind"], e["evidence_kind"]) for e in links} == {
         ("vm", "c1", "same_device", "inferred"), ("vm", "n66", "member_of", "inferred")}
-    twin = row("c2", "unifi_network", "client", macAddress="bc:24:11:00:00:01")
-    other = row("n66b", "unifi_network", "network", vlanId=66)
+    twin = row("c2", "unifi_network", "client", mac="bc:24:11:00:00:01")
+    other = row("n66b", "unifi_network", "network", vlan=66)
     assert derived_links([vm, client, twin, lan, other]) == []
 
 
 def test_firewall_finding_opens_from_evidence_and_resolves_when_fixed(app, client, admin_headers):
     """The rule-based finding follows the stored configuration in both directions."""
-    assert "auto:pve-firewall:workload-indexer" in {x["id"] for x in client.get("/api/findings").json()}
+    assert "auto:workload-firewall:workload-indexer" in {x["id"] for x in client.get("/api/findings").json()}
     with app.state.session_factory() as db:
         row = db.get(Resource, "workload-indexer")
         row.attributes = {**row.attributes, "firewall_enabled": True,
                           "nics": [{**row.attributes["nics"][0], "firewall": True}]}
         refresh_findings(db)
         db.commit()
-        assert db.get(Finding, "auto:pve-firewall:workload-indexer").status == "resolved"
+        assert db.get(Finding, "auto:workload-firewall:workload-indexer").status == "resolved"

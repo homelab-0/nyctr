@@ -8,9 +8,10 @@ Guest access state and hotspot vouchers are read here; changing them lives in
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from . import core
+from . import actions, core
 from .core import (
     IntegrationError,
     ReadClient,
@@ -21,22 +22,61 @@ from .core import (
     selected,
     source_id,
 )
+from .registry import ConfigField, Provider
 
-PROVIDER = "unifi_network"
+ID = "unifi_network"
 MAX_GUEST_DETAILS = 40
+READS = (
+    ("sites:read", "Site discovery"),
+    ("devices:read", "Network device inventory"),
+    ("clients:read", "Connected client inventory"),
+    ("networks:read", "Network configuration"),
+    ("firewall_policies:read", "Configured firewall policies"),
+    ("guest_access:read", "Guest Wi-Fi access state"),
+    ("hotspot_vouchers:read", "Guest passes (hotspot vouchers)"),
+    ("wifi_broadcasts:read", "Wi-Fi names and which use the captive portal"),
+)
+
+
+_METHODS = {"VOUCHER": "pass", "API": "console"}
 
 
 def _guest_authorization(detail: dict[str, Any]) -> dict[str, Any] | None:
-    """Keep the documented guest-authorization fields: method, times and usage counters."""
+    """Translate the documented guest authorisation into neutral fields: method, times and usage."""
     access = detail.get("access")
     grant = access.get("authorization") if isinstance(access, dict) else None
     if not isinstance(grant, dict):
         return None
-    kept = selected(grant, ("authorizationMethod", "authorizedAt", "expiresAt", "dataUsageLimitMBytes"))
-    usage = grant.get("usage")
-    if isinstance(usage, dict):
-        kept["usage"] = selected(usage, ("bytes", "rxBytes", "txBytes", "durationSec"))
-    return kept
+    method = grant.get("authorizationMethod")
+    usage = grant.get("usage") if isinstance(grant.get("usage"), dict) else {}
+    return {"method": _METHODS.get(method, "other") if isinstance(method, str) else None,
+            "authorized_at": grant.get("authorizedAt"), "expires_at": grant.get("expiresAt"),
+            "data_limit_mb": grant.get("dataUsageLimitMBytes"),
+            "bytes": usage.get("bytes"), "seconds": usage.get("durationSec")}
+
+
+def _renamed(row: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
+    """Copy documented fields under the neutral names the core reads."""
+    return {neutral: row[field] for field, neutral in names.items() if field in row}
+
+
+def validate(config: dict[str, Any]) -> dict[str, Any]:
+    """Accept the documented base path on an allowed host and an optional site."""
+    if set(config) - {"base_url", "site_id"}:
+        raise IntegrationError("UniFi supports base_url and optional site_id configuration only.")
+    parsed, host = core.validated_host(config.get("base_url"), "UniFi")
+    path = parsed.path.rstrip("/")
+    local = path == "/proxy/network/integration"
+    cloud = bool(re.fullmatch(r"/v1/connector/consoles/[A-Za-z0-9:_-]+/proxy/network/integration", path))
+    if not local and not (host == "api.ui.com" and cloud):
+        raise IntegrationError("Use the documented UniFi Network integration base path.")
+    clean = {"base_url": config["base_url"].rstrip("/")}
+    if config.get("site_id"):
+        site = config["site_id"]
+        if not isinstance(site, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", site):
+            raise IntegrationError("Invalid UniFi site identifier.")
+        clean["site_id"] = site
+    return clean
 
 
 async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
@@ -46,9 +86,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
     from addresses. Policy associations never create observed firewall blocks
     or claim a successful end-to-end path.
     """
-    from . import capabilities_for
-
-    snapshot = Snapshot(capabilities=capabilities_for(PROVIDER))
+    snapshot = Snapshot(capabilities=[read for read, _label in READS], passes=[])
     now = core.iso(core.utc_now())
     async with core.make_http_client(api_key) as client:
         reader = ReadClient(client, config["base_url"])
@@ -67,7 +105,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
             core.record_gap("unifi_no_visible_sites")
         for site in sites:
             sid = source_id(site.get("id"))
-            site_resource = resource(integration_id, PROVIDER, "site", sid, site.get("name", sid), now)
+            site_resource = resource(integration_id, ID, "site", sid, site.get("name", sid), now)
             site_resource["site_id"] = site_resource["id"]
             snapshot.resources.append(site_resource)
             base = f"/v1/sites/{sid}"
@@ -87,35 +125,38 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                     raise IntegrationError("UniFi returned a device with an unsupported capability classification.")
                 kind = "gateway" if "gateway" in features else "access_point" if "accessPoint" in features else "switch"
                 node = resource(
-                    integration_id, PROVIDER, kind, remote_id, row.get("name", remote_id), now,
+                    integration_id, ID, kind, remote_id, row.get("name", remote_id), now,
                     site_id=site_resource["id"], evidence_kind="observed",
-                    attributes=selected(row, ("model", "state", "ipAddress", "macAddress", "firmwareVersion", "firmwareUpdatable", "features")),
+                    attributes={**selected(row, ("model", "state", "firmwareVersion", "firmwareUpdatable", "features")),
+                                **_renamed(row, {"ipAddress": "ip", "macAddress": "mac"})},
                 )
                 device_map[remote_id] = node["id"]
                 snapshot.resources.append(node)
             for row in networks:
                 remote_id = source_id(row.get("id"))
                 node = resource(
-                    integration_id, PROVIDER, "network", remote_id, row.get("name", remote_id), now,
+                    integration_id, ID, "network", remote_id, row.get("name", remote_id), now,
                     site_id=site_resource["id"],
-                    attributes=selected(row, ("vlanId", "enabled", "management", "default", "zoneId", "deviceId", "metadata")),
+                    attributes={**selected(row, ("enabled", "management", "default", "zoneId", "deviceId", "metadata")),
+                                **_renamed(row, {"vlanId": "vlan"})},
                 )
                 network_map[remote_id] = node["id"]
                 snapshot.resources.append(node)
                 managing_device = device_map.get(row.get("deviceId"))
                 if managing_device:
                     snapshot.relationships.append(relationship(
-                        integration_id, PROVIDER, node["id"], managing_device, "managed_by", now,
+                        integration_id, ID, node["id"], managing_device, "managed_by", now,
                         attributes={"source_field": "network.deviceId"},
                     ))
             guest_details = 0
             for row in clients:
                 remote_id = source_id(row.get("id"))
-                attributes = selected(row, ("type", "ipAddress", "macAddress", "connectedAt", "uplinkDeviceId"))
+                attributes = {**selected(row, ("type",)), **_renamed(row, {
+                    "ipAddress": "ip", "macAddress": "mac", "connectedAt": "connected_at",
+                    "uplinkDeviceId": "uplink"})}
                 access = row.get("access")
                 if isinstance(access, dict) and access.get("type") == "GUEST":
-                    attributes["access_type"] = "GUEST"
-                    attributes["guest_authorized"] = access.get("authorized") is True
+                    attributes["guest"] = {"authorized": access.get("authorized") is True}
                     if guest_details < MAX_GUEST_DETAILS:
                         guest_details += 1
                         try:
@@ -126,25 +167,25 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                             grant = None
                             core.record_gap("unifi_guest_details_unavailable")
                         if grant:
-                            attributes["guest_authorization"] = grant
+                            attributes["guest"].update(grant)
                     else:
                         core.record_gap("unifi_guest_detail_limit")
                 node = resource(
-                    integration_id, PROVIDER, "client", remote_id, row.get("name", remote_id), now,
+                    integration_id, ID, "client", remote_id, row.get("name", remote_id), now,
                     site_id=site_resource["id"], evidence_kind="observed", attributes=attributes,
                 )
                 snapshot.resources.append(node)
                 uplink = device_map.get(row.get("uplinkDeviceId"))
                 if uplink:
                     snapshot.relationships.append(relationship(
-                        integration_id, PROVIDER, node["id"], uplink, "connects_to", now,
+                        integration_id, ID, node["id"], uplink, "connects_to", now,
                         evidence_kind="observed",
                         attributes={"source_field": "client.uplinkDeviceId", "meaning": "Attachment; not proof of end-to-end reachability."},
                     ))
             for row in policies:
                 remote_id = source_id(row.get("id"))
                 node = resource(
-                    integration_id, PROVIDER, "policy", remote_id, row.get("name", remote_id), now,
+                    integration_id, ID, "policy", remote_id, row.get("name", remote_id), now,
                     site_id=site_resource["id"],
                     attributes=selected(row, ("enabled", "index", "action", "source", "destination", "ipProtocolScope", "loggingEnabled", "metadata")),
                 )
@@ -157,20 +198,21 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                     for network in networks:
                         if zone and network.get("zoneId") == zone:
                             snapshot.relationships.append(relationship(
-                                integration_id, PROVIDER, network_map[network["id"]], node["id"],
+                                integration_id, ID, network_map[network["id"]], node["id"],
                                 f"{side}_zone_policy", now,
                                 attributes={"source_field": f"policy.{side}.zoneId", "meaning": "Configured zone association; full traffic filters and rule order still apply."},
                             ))
             try:
-                from .actions import unifi_list_vouchers
-
-                for voucher in await unifi_list_vouchers(reader, sid):
-                    snapshot.vouchers.append({**voucher, "site": sid})
+                vouchers = await actions.unifi_list_vouchers(reader, sid)
+                if snapshot.passes is not None:
+                    snapshot.passes.extend(vouchers)
                 core.record_capability("hotspot_vouchers:read")
             except IntegrationError as error:
                 if error.category in {"tls", "transport", "timeout"}:
                     raise
                 core.record_gap("unifi_vouchers_unavailable")
+                # Not read for one site means the list is incomplete: leave stored passes alone.
+                snapshot.passes = None
                 snapshot.capabilities = [x for x in snapshot.capabilities if x != "hotspot_vouchers:read"]
             try:
                 # Which Wi-Fi names exist and which sit behind UniFi's captive portal. Nyctr
@@ -195,7 +237,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
             for node in snapshot.resources:
                 if node["id"] != site_resource["id"] and node["site_id"] == site_resource["id"]:
                     snapshot.relationships.append(relationship(
-                        integration_id, PROVIDER, site_resource["id"], node["id"], "contains", now,
+                        integration_id, ID, site_resource["id"], node["id"], "contains", now,
                         attributes={"meaning": "Managed in this site."},
                     ))
     snapshot.resources = list({node["id"]: node for node in snapshot.resources}.values())
@@ -205,3 +247,52 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                            "guest_access:read"):
             core.record_capability(capability)
     return snapshot
+
+
+PROVIDER = Provider(
+    id=ID, name="UniFi Network", letter="U", tone="blue",
+    summary="Gateways, switches, access points, clients, networks, firewall rules and guest Wi-Fi.",
+    secret_hint="A UniFi Network API key. Read access is enough unless you allow changes.",
+    fields=(
+        ConfigField("base_url", "Console address", "The integration path on your console, over HTTPS.",
+                    "https://unifi.example.net/proxy/network/integration", "url"),
+        ConfigField("site_id", "Site", "Leave empty to read every site the key can see (up to 16).",
+                    "", "text", False),
+    ),
+    reads=READS,
+    provides=frozenset({"inventory", "guest.devices", "guest.passes", "guest.control"}),
+    limitations=(
+        ("firewall_events:read", "Observed firewall events",
+         "This adapter reads configured policies; a UniFi firewall-event receiver is not implemented."),
+        ("reachability:verify", "End-to-end reachability",
+         "Inventory and configured policy relationships do not prove a successful network path."),
+    ),
+    gaps=(
+        ("firewall_events", "Firewall-event coverage is not implemented",
+         "The current UniFi adapter reads inventory and configured policies. It does not collect observed firewall blocks."),
+        ("reachability", "A configured relationship is not a traffic result",
+         "Rule associations and device attachment do not prove end-to-end reachability or effective firewall posture."),
+        ("user_attribution", "Device inventory does not establish user ownership",
+         "Members still require explicit device assignment and reliable event-time attribution before observations can appear in their inbox."),
+    ),
+    gap_notes={
+        "unifi_vouchers_unavailable": (
+            "Guest passes could not be read",
+            "The hotspot voucher list was not available to this key or site. Guest pass tracking is incomplete."),
+        "unifi_wifi_unavailable": (
+            "Wi-Fi names could not be read",
+            "Nyctr cannot show which Wi-Fi names sit behind UniFi's captive portal."),
+        "unifi_guest_details_unavailable": (
+            "Guest authorisation details were not returned",
+            "Some guest devices are listed without their authorisation time, expiry or usage."),
+        "unifi_guest_detail_limit": (
+            "More guests than one collection reads in detail",
+            "Only the first 40 guest devices carry authorisation details in each collection."),
+        "unifi_no_visible_sites": (
+            "No sites were visible to the credential",
+            "Site discovery returned an empty list. Device, network, client, and policy reads were not exercised."),
+    },
+    validate=validate, collect=collect_unifi, scope=lambda config: config.get("site_id"),
+    issue_pass=actions.unifi_create_voucher, end_pass=actions.unifi_delete_voucher,
+    guest_access=actions.unifi_set_guest_access,
+)
