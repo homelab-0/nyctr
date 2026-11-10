@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     ai_base_url: str = ""
     ai_api_key: str = ""
     ai_model: str = ""
+    # Optional shared secret that lets the UniFi console ask Nyctr to collect now (Alarm Manager webhook).
+    nudge_token: str = ""
 
     @model_validator(mode="after")
     def validate_settings(self):
@@ -73,6 +75,8 @@ class Settings(BaseSettings):
             raise ValueError("NYCTR_PROVIDER_WRITES accepts only nextdns and unifi_network")
         if self.collect_interval_seconds and not 60 <= self.collect_interval_seconds <= 86400:
             raise ValueError("Automatic collection interval must be 0 or between 60 and 86400 seconds")
+        if self.nudge_token and len(self.nudge_token) < 32:
+            raise ValueError("The collection nudge token must be at least 32 characters")
         if bool(self.ai_base_url) != bool(self.ai_model):
             raise ValueError("Assistant base URL and model must be configured together")
         if self.ai_base_url:

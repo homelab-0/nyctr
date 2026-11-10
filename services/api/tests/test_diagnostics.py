@@ -336,8 +336,9 @@ def test_unifi_verifies_only_exercised_reads_and_never_claims_firewall_events(sa
     assert "firewall_events" in {gap["id"] for gap in report["evidence_gaps"]}
     assert report["snapshot_counts"]["observations"] == 0
     assert items["hotspot_vouchers:read"]["verification"] == ("verified" if has_site else "unknown")
-    # Sites, devices, networks, clients, firewall policies and the hotspot voucher list.
-    assert len(calls) == (6 if has_site else 1)
+    assert items["wifi_broadcasts:read"]["verification"] == ("verified" if has_site else "unknown")
+    # Sites, devices, networks, clients, firewall policies, hotspot vouchers and Wi-Fi names.
+    assert len(calls) == (7 if has_site else 1)
 
 
 @pytest.mark.parametrize("known", [True, False])

@@ -101,11 +101,18 @@ created_at,expires_at,ended_at,last_error}`. `decided_by` is `rule` or a user ID
 - `POST /api/guests/passes` with `{name,minutes 30–10080,guest_limit 1–20}`.
   409 when UniFi writes are disabled.
 - `POST /api/guests/passes/{id}/end`.
-- `POST /api/guests/actions` with `{device_id,action:"cut"|"restore"|"lock",reason?}`.
+- `POST /api/guests/actions` with
+  `{device_id,action:"cut"|"restore"|"lock"|"admit",reason?,minutes?}`. `admit`
+  authorises a device in state `waiting` for 30 to 10080 minutes.
+- `GET|POST /api/hooks/collect` (Bearer token) or `/api/hooks/collect/{token}`:
+  starts a read-only collection. 404 unless `NYCTR_NUDGE_TOKEN` is set and matches.
 - `POST /api/demo/guest-activity` exists only in demo mode.
 
 A guest device's `state` is derived from actions that were applied or simulated:
 online, waiting, cut, locked or offline. `pass.evidence` is always `inferred`.
+`joined_by` is `pass`, `administrator` or null. `portal` is
+`{served_by:"unifi",nyctr_in_guest_path:false,wifi:[{name,enabled,captive_portal,
+network}],notice,nudge}`. Nyctr has no guest-facing route.
 
 ## Queries and assistant
 

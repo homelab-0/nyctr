@@ -18,6 +18,16 @@ const admin: User = {
 const overview = (writes: GuestOverview['writes']): GuestOverview => ({
   writes,
   rule: { enabled: true, hits: 3, minutes: 5 },
+  portal: {
+    served_by: 'unifi',
+    nyctr_in_guest_path: false,
+    wifi: [
+      { name: 'Home', enabled: true, captive_portal: false, network: 'LAN' },
+      { name: 'Home Guest', enabled: true, captive_portal: true, network: 'Guest' },
+    ],
+    notice: 'This guest Wi-Fi is monitored for security.',
+    nudge: false,
+  },
   sources: [{ id: 'unifi', name: 'UniFi' }],
   passes: [],
   not_collected: ['Connection attempts and port scans'],
@@ -35,6 +45,7 @@ const overview = (writes: GuestOverview['writes']): GuestOverview => ({
       state: 'online',
       observed_at: new Date().toISOString(),
       pass: null,
+      joined_by: null,
       risk: {
         score: null,
         band: 'unknown',
@@ -84,6 +95,42 @@ describe('guests', () => {
     expect(screen.getAllByText('No score').length).toBeGreaterThan(0);
     expect(screen.getByText('Connection attempts and port scans')).toBeDefined();
     expect(screen.queryByText(/Demo: make this device/)).toBeNull();
+  });
+
+  it('says UniFi serves the sign-in page and lets a waiting device on for a chosen time', async () => {
+    const waiting = overview('enabled');
+    waiting.devices[0] = { ...waiting.devices[0], state: 'waiting', authorized: false };
+    const calls = mockApi({
+      'GET /auth/me': admin,
+      'GET /guests': waiting,
+      'POST /guests/actions': {
+        ...waiting.devices[0],
+        state: 'online',
+        authorized: true,
+        joined_by: 'administrator',
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <AuthProvider>
+        <Guests params={new URLSearchParams('id=g1')} onChange={() => {}} />
+      </AuthProvider>,
+    );
+    expect(
+      await screen.findByText('UniFi shows the sign-in page. Nyctr never does.'),
+    ).toBeDefined();
+    expect(screen.getByText('Guests never need to reach Nyctr.')).toBeDefined();
+    expect(screen.getByText('Sign-in page on')).toBeDefined();
+    expect(screen.getByText('No sign-in page')).toBeDefined();
+    expect(screen.getByText('This guest Wi-Fi is monitored for security.')).toBeDefined();
+    expect(screen.getByText('Nothing yet. It is on the sign-in page.')).toBeDefined();
+    await user.selectOptions(screen.getByLabelText('Let it on for'), '60');
+    await user.click(screen.getByRole('button', { name: /Let it on/ }));
+    expect(calls.find((call) => call.path === '/guests/actions')?.body).toEqual({
+      device_id: 'g1',
+      action: 'admit',
+      minutes: 60,
+    });
   });
 
   it('sends a cut-off as an explicit administrator action and the rule as the written values', async () => {

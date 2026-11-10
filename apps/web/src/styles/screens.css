@@ -193,6 +193,72 @@ button.row.on {
   overflow-wrap: anywhere;
 }
 
+.flow {
+  display: grid;
+  gap: 10px;
+  counter-reset: flow;
+  font-size: 13.5px;
+  color: var(--fg2);
+}
+.flow li {
+  position: relative;
+  padding-left: 34px;
+  min-height: 22px;
+  counter-increment: flow;
+}
+.flow li::before {
+  content: counter(flow);
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--raise);
+  box-shadow: 0 0 0 1px var(--line2);
+  font: 600 11.5px var(--mono);
+  color: var(--fg);
+}
+.flow b {
+  color: var(--fg);
+  font-weight: 600;
+}
+.wifi {
+  display: grid;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.wifi li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  font-size: 13.5px;
+}
+.wifi li + li {
+  border-top: 1px solid var(--line);
+}
+.wifi .t {
+  font-weight: 550;
+}
+.wifi .d {
+  color: var(--fg3);
+  font-size: 12.5px;
+}
+.quote {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--line2);
+  background: var(--well);
+  border-radius: 0 8px 8px 0;
+  font-size: 13px;
+  color: var(--fg2);
+}
+
 /* queries */
 .gql {
   display: grid;

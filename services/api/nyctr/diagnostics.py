@@ -130,6 +130,7 @@ _CAPABILITY_LABELS = {
     "blocked_dns_logs:read": "Recent blocked DNS queries",
     "guest_access:read": "Guest Wi-Fi access state",
     "hotspot_vouchers:read": "Guest passes (hotspot vouchers)",
+    "wifi_broadcasts:read": "Wi-Fi names and which use the captive portal",
     "nodes:read": "Cluster nodes",
     "bridges:read": "Virtual bridges",
     "guests:read": "Virtual machines and containers",
@@ -220,6 +221,10 @@ def _gaps(provider: str, evidence: ProbeEvidence, counts: SnapshotCounts | None)
         "unifi_vouchers_unavailable": (
             "Guest passes could not be read",
             "The hotspot voucher list was not available to this key or site. Guest pass tracking is incomplete.",
+        ),
+        "unifi_wifi_unavailable": (
+            "Wi-Fi names could not be read",
+            "Nyctr cannot show which Wi-Fi names sit behind UniFi's captive portal.",
         ),
         "unifi_guest_details_unavailable": (
             "Guest authorisation details were not returned",

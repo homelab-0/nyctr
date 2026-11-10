@@ -67,6 +67,11 @@ will be separate channels under the UniFi Network integration.
 Client display names and IPs do not create user assignments. Imported clients
 start unassigned. Configured rules do not prove which rule matched a real packet.
 
+Guests sign in on UniFi's own captive portal; Nyctr is never the portal. The
+reasons and the UniFi setup steps are in [guest-wifi.md](guest-wifi.md). The
+adapter also reads each site's Wi-Fi names and whether a captive portal gates
+them, so the console can show that the guest Wi-Fi really is behind one.
+
 The API lists only connected clients, has no event or flow feed, and does not say
 which voucher a guest used. Nyctr therefore keeps its own record of which access
 point each guest was on at each collection, shows the pass a guest most likely

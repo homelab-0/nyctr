@@ -221,3 +221,119 @@ def test_only_plain_domain_names_can_be_allowed(monkeypatch, domain):
     monkeypatch.setattr(core, "make_http_client", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
     with pytest.raises(IntegrationError):
         asyncio.run(actions.nextdns_allow({"profile_id": "abc123"}, "k", domain, allowed=True))
+
+
+def test_guests_sign_in_through_unifi_and_nyctr_only_describes_it(client, admin_headers):
+    """The overview states that UniFi serves the portal and lists which Wi-Fi names are behind it."""
+    portal = client.get("/api/guests").json()["portal"]
+    assert portal["served_by"] == "unifi" and portal["nyctr_in_guest_path"] is False
+    assert {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network": "Guest network"} in portal["wifi"]
+    assert [w["captive_portal"] for w in portal["wifi"] if w["name"] == "Milkyway"] == [False]
+    assert "monitored for security" in portal["notice"] and portal["nudge"] is False
+
+
+def test_an_administrator_can_let_a_waiting_device_on_without_a_code(client, admin_headers):
+    """Letting a device on from the console ties the grant to that exact device; no pass is guessed."""
+    assert guest(client, "Galaxy-S24")["state"] == "waiting"
+    done = client.post("/api/guests/actions", headers=admin_headers,
+                       json={"device_id": "guest-galaxy", "action": "admit", "minutes": 120})
+    body = done.json()
+    assert done.status_code == 200 and body["state"] == "online" and body["joined_by"] == "administrator"
+    assert body["pass"] is None and body["authorization"]["authorizationMethod"] == "API"
+    assert body["timeline"][0]["text"] == "An administrator let this device on (simulated)"
+    # Only a waiting device can be admitted; one that is on, cut or locked uses the other actions.
+    for device in ("guest-galaxy", "guest-pixel"):
+        assert client.post("/api/guests/actions", headers=admin_headers,
+                           json={"device_id": device, "action": "admit"}).status_code == 409
+    assert client.post("/api/guests/actions", headers=admin_headers,
+                       json={"device_id": "guest-galaxy", "action": "admit", "minutes": 5}).status_code == 422
+    assert guest(client, "Priya's iPhone")["joined_by"] == "pass"
+
+
+def test_live_admit_uses_the_documented_authorise_action(tmp_path, monkeypatch):
+    """With permission, letting a device on sends AUTHORIZE_GUEST_ACCESS with the chosen time limit."""
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path.removeprefix("/proxy/network/integration"), body))
+        if request.method == "POST":
+            return httpx.Response(200, json={"action": body["action"]})
+        return httpx.Response(200, json={"id": "g1", "access": {"type": "GUEST", "authorized": True}})
+
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", "unifi-secret")
+    monkeypatch.setattr(core, "make_http_client", lambda key, **_: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), headers={"X-Api-Key": key}, follow_redirects=False))
+    app = live_app(tmp_path, provider_writes="unifi_network")
+    with TestClient(app) as client:
+        live_guest(app, lookups=0)
+        with app.state.session_factory() as db:
+            device = db.get(Resource, "unifi:client:g1")
+            device.attributes = {**device.attributes, "guest_authorized": False}
+            db.commit()
+        headers = live_signin(client)
+        done = client.post("/api/guests/actions", headers=headers,
+                           json={"device_id": "unifi:client:g1", "action": "admit", "minutes": 90})
+        assert done.status_code == 200 and done.json()["state"] == "online"
+        assert calls[0] == ("POST", "/v1/sites/s1/clients/g1/actions",
+                            {"action": "AUTHORIZE_GUEST_ACCESS", "timeLimitMinutes": 90})
+
+
+def test_collection_nudge_needs_the_shared_secret_and_reads_nothing_from_the_caller(tmp_path, monkeypatch):
+    """The UniFi console can ask for a collection; the request body is ignored and calls are spaced out."""
+    from nyctr import worker
+
+    ran = []
+
+    async def fake_collect(factory, settings, actor=None):
+        ran.append(actor)
+
+    monkeypatch.setattr(worker, "collect_all", fake_collect)
+    token = "n" * 40
+    app = live_app(tmp_path, nudge_token=token)
+    with TestClient(app) as client:
+        assert client.post("/api/hooks/collect").status_code == 404
+        assert client.post("/api/hooks/collect/" + "x" * 40).status_code == 404
+        assert client.get("/api/hooks/collect", headers={"Authorization": "Bearer wrong"}).status_code == 404
+        first = client.post("/api/hooks/collect/" + token, content=b"<script>ignored</script>")
+        assert first.status_code == 202 and first.json() == {"queued": True}
+        second = client.get("/api/hooks/collect", headers={"Authorization": "Bearer " + token})
+        assert second.status_code == 202 and second.json() == {"queued": False}
+        assert ran == [None]
+        headers = live_signin(client)
+        event = next(x for x in client.get("/api/audit").json() if x["action"] == "integration.nudged")
+        assert event["details"] == {} and headers
+    (tmp_path / "off").mkdir()
+    with TestClient(live_app(tmp_path / "off")) as off:
+        assert off.post("/api/hooks/collect/" + token).status_code == 404
+
+
+def test_demo_mode_has_no_collection_nudge(client):
+    """Demo never collects, so the nudge does not exist there even with a token."""
+    assert client.post("/api/hooks/collect/" + "n" * 40).status_code == 404
+
+
+def test_nothing_is_served_to_a_device_that_has_not_signed_in(app, client):
+    """Nyctr is not a captive portal: without a session every API route refuses, except sign-in itself.
+
+    This guards the guest Wi-Fi design. A new unauthenticated route must be added
+    to the allowlist here on purpose, with a reason.
+    """
+    # Health and the API description carry no network data; the hooks need their own secret.
+    open_routes = {"/api/health", "/api/openapi.json", "/api/docs", "/api/hooks/collect",
+                   "/api/hooks/collect/{token}"}
+    checked = 0
+    # The generated API description lists every route, including those added by feature routers.
+    for path, operations in app.openapi()["paths"].items():
+        signing_in = path.startswith("/api/auth/") and path != "/api/auth/me"
+        if not path.startswith("/api/") or path in open_routes or signing_in or path == "/api/{path}":
+            continue
+        url = path
+        for name in ("integration_id", "request_id", "device_id", "lease_id", "pass_id", "finding_id", "token"):
+            url = url.replace("{" + name + "}", "x")
+        assert "{" not in url, f"Add a placeholder for {path}"
+        for method in operations:
+            response = client.request(method.upper(), url, json={})
+            assert response.status_code in {401, 403}, f"{method} {path} answered {response.status_code} without a session"
+            checked += 1
+    assert checked > 30

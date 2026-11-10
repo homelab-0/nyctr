@@ -50,6 +50,8 @@ until switched on:
 | Temporary exception survives restart | Leases are database rows; a background task and every lease read close what has expired, and a failed removal stays open, visible and retried |
 | Expiry removes a rule Nyctr did not create | A pre-existing allowlist entry is recorded as not owned and never removed; overlapping leases keep the entry until the last one ends |
 | A guest is cut off on a guessed identity | DNS lookups are tied to a guest only by an administrator link or a unique name match, which is labelled inferred and shown in the guest's timeline |
+| A guest device attacks the system that polices it | Nyctr is never the captive portal and nothing on the guest network needs to reach it; a guard test fails if any API route answers without a session ([guest Wi-Fi design](guest-wifi.md)) |
+| Someone forges the collection nudge | It needs a shared secret, reads nothing from the request, only starts a read-only collection, and runs at most once every 30 seconds |
 | Model is told to act by text in a log or request | The model has no tools or credentials; evidence is passed as data in a bounded pack with addresses, emails, codes and identifiers removed |
 | Model cites something it was not shown | Citations are resolved against the pack on the server and dropped when they do not match |
 | Graph query exhausts the server | Administrator-only, query-only, with length, depth and returned-object limits |

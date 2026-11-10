@@ -10,7 +10,7 @@ from .core import IntegrationError, Snapshot, validate_proxmox_url, validate_uni
 
 _CAPABILITIES = {
     "unifi_network": ["sites:read", "devices:read", "clients:read", "networks:read", "firewall_policies:read",
-                      "guest_access:read", "hotspot_vouchers:read"],
+                      "guest_access:read", "hotspot_vouchers:read", "wifi_broadcasts:read"],
     "nextdns": ["profile:read", "dns_policies:read", "blocked_dns_logs:read"],
     "proxmox": ["nodes:read", "bridges:read", "guests:read", "guest_network:read", "firewall_options:read"],
 }

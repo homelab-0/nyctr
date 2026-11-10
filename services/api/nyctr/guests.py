@@ -7,6 +7,11 @@ this module never pretends otherwise.
 
 The automatic cut-off is a counted, administrator-written rule. No model score
 can trigger it.
+
+Design boundary (docs/guest-wifi.md): UniFi serves the Wi-Fi sign-in page. Nyctr
+never serves a page to a guest device and nothing on the guest network needs to
+reach Nyctr. Nyctr works from the management side only: it issues passes, lets a
+waiting device on, and reads who is connected through the UniFi API.
 """
 
 from __future__ import annotations
@@ -31,6 +36,13 @@ from .security import audit
 
 router = APIRouter(prefix="/api")
 EFFECTIVE = ("applied", "simulated")
+
+# Suggested wording for the terms box of UniFi's own sign-in page. Nyctr cannot set
+# it through the API, so the console offers it for the administrator to paste.
+NOTICE = ("This guest Wi-Fi is monitored for security. The network owner can see which device "
+          "you connect with, which access point you use, how much data you use and which "
+          "addresses were blocked. A device that repeatedly looks up addresses on a threat list "
+          "may be disconnected automatically.")
 
 
 def guest_devices(db: Session) -> list[Resource]:
@@ -125,7 +137,9 @@ def guest_json(db: Session, device: Resource, passes: list[GuestPass]) -> dict:
     used = _pass_for(device, passes)
     timeline = []
     grant = attrs.get("guest_authorization") or {}
-    if grant.get("authorizedAt"):
+    method = grant.get("authorizationMethod")
+    joined_by = "pass" if method == "VOUCHER" else "administrator" if method == "API" else None
+    if grant.get("authorizedAt") and joined_by != "administrator":
         timeline.append({"at": grant["authorizedAt"], "kind": "joined",
                          "text": f"Joined with {'pass ' + used.name if used else 'a pass'}",
                          "evidence": "observed"})
@@ -144,7 +158,7 @@ def guest_json(db: Session, device: Resource, passes: list[GuestPass]) -> dict:
     for action in actions:
         who = "The cut-off rule" if action.actor == "rule" else "An administrator"
         verb = {"cut": "cut this device off", "lock": "locked this device out",
-                "restore": "let this device back on"}[action.action]
+                "restore": "let this device back on", "admit": "let this device on"}[action.action]
         outcome = {"applied": "", "simulated": " (simulated)", "not_applied": " but Nyctr may not change UniFi",
                    "failed": " but UniFi refused"}[action.execution]
         timeline.append({"at": utc(action.created_at).isoformat(), "kind": action.action, "evidence": "observed",
@@ -157,6 +171,8 @@ def guest_json(db: Session, device: Resource, passes: list[GuestPass]) -> dict:
         "authorized": bool(attrs.get("guest_authorized")), "authorization": grant or None,
         "state": state_of(device, actions), "observed_at": utc(device.observed_at),
         "pass": {"id": used.id, "name": used.name, "evidence": "inferred"} if used else None,
+        # How the device got on: a pass typed into UniFi's sign-in page, or let on from here.
+        "joined_by": joined_by,
         "risk": device_risk(lookups),
         "lookups": {"blocked": len(lookups), "threat": sum(_is_threat(a) for _, a in lookups)},
         "timeline": timeline[:60],
@@ -182,17 +198,30 @@ def _site_and_key(db: Session, device_or_integration) -> tuple[Integration, str,
 
 
 async def apply_action(db: Session, settings: Settings, device: Resource, action: str, actor: str,
-                       reason: str) -> GuestAction:
-    """Carry out one guest action in the current write mode and record exactly what happened."""
+                       reason: str, minutes: int | None = None) -> GuestAction:
+    """Carry out one guest action in the current write mode and record exactly what happened.
+
+    `admit` authorises a waiting device for a stated time through the API, which
+    ties the grant to that exact device without any page being served to it.
+    """
     from .integrations import IntegrationError
     from .integrations.actions import unifi_guest_action
 
     mode = settings.write_mode("unifi_network")
     record = GuestAction(device_id=device.id, action=action, actor=actor, reason=reason[:500])
-    allow = action == "restore"
+    allow = action in {"restore", "admit"}
+
+    def granted(length: int | None) -> dict:
+        """Describe the authorisation Nyctr just made, until the next collection reads the real one."""
+        now = utcnow()
+        return {"authorizationMethod": "API", "authorizedAt": now.isoformat(),
+                "expiresAt": (now + timedelta(minutes=length or 60)).isoformat()}
+
     if mode == "simulated":
         record.execution = "simulated"
         device.attributes = {**device.attributes, "guest_authorized": allow}
+        if action == "admit":
+            device.attributes = {**device.attributes, "guest_authorization": granted(minutes)}
     elif mode == "enabled" and not allow and device.attributes.get("guest_authorized") is False:
         # Already without access at the last collection: nothing to send, and UniFi
         # would reject unauthorising a guest that holds no authorisation.
@@ -202,8 +231,7 @@ async def apply_action(db: Session, settings: Settings, device: Resource, action
             integration, site, key = _site_and_key(db, device)
             if not key:
                 raise IntegrationError("The UniFi secret is not configured on the server.")
-            minutes = None
-            if allow:
+            if action == "restore":
                 grant = device.attributes.get("guest_authorization") or {}
                 try:
                     left = (parsed_date(grant["expiresAt"]) - utcnow()).total_seconds() / 60
@@ -215,6 +243,8 @@ async def apply_action(db: Session, settings: Settings, device: Resource, action
                                      minutes=minutes, allowed=True)
             record.execution = "applied"
             device.attributes = {**device.attributes, "guest_authorized": allow}
+            if action == "admit":
+                device.attributes = {**device.attributes, "guest_authorization": granted(minutes)}
         except (IntegrationError, HTTPException) as error:
             record.execution = "failed"
             record.error = str(error.detail if isinstance(error, HTTPException) else error)[:300]
@@ -288,13 +318,33 @@ class PassInput(InputModel):
 class ActionInput(InputModel):
     """An administrator's action on one guest device."""
     device_id: str = Field(min_length=1, max_length=255)
-    action: Literal["cut", "restore", "lock"]
+    action: Literal["cut", "restore", "lock", "admit"]
     reason: str = Field(default="", max_length=500)
+    minutes: int | None = Field(default=None, ge=30, le=10080)
 
 
 class DeviceInput(InputModel):
     """Identify one guest device."""
     device_id: str = Field(min_length=1, max_length=255)
+
+
+def portal(db: Session, settings: Settings) -> dict:
+    """Describe how guests sign in: always through UniFi's own portal, never through Nyctr.
+
+    Lists each Wi-Fi name UniFi reported with whether it sits behind the captive
+    portal, so an administrator can see that the guest network really is gated.
+    """
+    networks = {r.source_id: r.name for r in db.scalars(select(Resource).where(Resource.kind == "network"))}
+    wifi = []
+    for site in db.scalars(select(Resource).where(Resource.kind == "site",
+                                                  Resource.provider == "unifi_network")):
+        for row in site.attributes.get("wifi") or []:
+            if isinstance(row, dict):
+                wifi.append({"name": row.get("name"), "enabled": bool(row.get("enabled")),
+                             "captive_portal": bool(row.get("captive_portal")),
+                             "network": networks.get(row.get("network_id") or "")})
+    return {"served_by": "unifi", "nyctr_in_guest_path": False, "wifi": wifi, "notice": NOTICE,
+            "nudge": bool(settings.nudge_token) and settings.mode == "live"}
 
 
 def overview(db: Session, settings: Settings) -> dict:
@@ -305,6 +355,7 @@ def overview(db: Session, settings: Settings) -> dict:
         select(Integration).where(Integration.provider == "unifi_network").order_by(Integration.name))]
     return {
         "writes": settings.write_mode("unifi_network"), "rule": get_rule(db, "guest_rule").model_dump(),
+        "portal": portal(db, settings),
         "sources": sources, "passes": [pass_json(p, names) for p in passes],
         "devices": [guest_json(db, d, passes) for d in guest_devices(db)],
         "not_collected": ["Connection attempts and port scans (UniFi's API has no flow or event feed)",
@@ -396,7 +447,10 @@ async def act(body: ActionInput, request: Request, user=Depends(admin), db: Sess
         raise HTTPException(404, "Guest device not found")
     if settings.write_mode("unifi_network") == "disabled":
         raise HTTPException(409, "Nyctr is read-only for UniFi. An operator must allow changes to UniFi first.")
-    record = await apply_action(db, settings, device, body.action, user.id, body.reason)
+    if body.action == "admit" and state_of(device, _actions(db, device.id)) != "waiting":
+        raise HTTPException(409, "Only a device that is connected and waiting can be let on from here.")
+    record = await apply_action(db, settings, device, body.action, user.id, body.reason,
+                                body.minutes or 240 if body.action == "admit" else None)
     from .analysis import refresh_findings
 
     refresh_findings(db)

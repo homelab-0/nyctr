@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Ban, Copy, Lock, RotateCcw, Ticket } from 'lucide-react';
+import { Ban, Check, Copy, Lock, RotateCcw, Ticket } from 'lucide-react';
 import { post, put, useApi } from '../api';
 import {
   Empty,
@@ -19,7 +19,7 @@ import type { GuestDevice, GuestOverview, GuestPass, GuestRule } from '../types'
 
 const STATE: Record<GuestDevice['state'], { text: string; tone: string }> = {
   online: { text: 'Online', tone: 'green' },
-  waiting: { text: 'Connected, no pass', tone: '' },
+  waiting: { text: 'On the sign-in page', tone: 'yellow' },
   cut: { text: 'Cut off', tone: 'red' },
   locked: { text: 'Locked out', tone: 'red' },
   offline: { text: 'Gone', tone: '' },
@@ -48,6 +48,93 @@ function CopyCode({ code }: { code: string }) {
 }
 
 /**
+ * States the sign-in design where the administrator works: UniFi serves the page, Nyctr is
+ * not reachable from the guest network, and data comes back by Nyctr reading UniFi.
+ */
+function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
+  const [copied, setCopied] = useState(false);
+  const gated = portal.wifi.filter((item) => item.captive_portal);
+  return (
+    <Panel title="How guests get on" hint="UniFi shows the sign-in page. Nyctr never does.">
+      <div className="stack">
+        <ol className="flow">
+          <li>
+            <b>The guest joins the guest Wi-Fi.</b> UniFi holds the device and shows its own sign-in
+            page.
+          </li>
+          <li>
+            <b>They type a pass code</b> you issued here, or you let the waiting device on from this
+            screen.
+          </li>
+          <li>
+            <b>Nyctr reads UniFi</b> to see who is on, where, and what was blocked.{' '}
+            {portal.nudge
+              ? 'UniFi also tells Nyctr to look straight away.'
+              : 'It looks at each collection.'}
+          </li>
+        </ol>
+        <div className="note green">
+          <div>
+            <b>Guests never need to reach Nyctr.</b>
+            <p>
+              Nothing on the guest network talks to this console, so block it from there in your
+              firewall. The key that can cut devices off never sits behind a page guests can open.
+            </p>
+          </div>
+        </div>
+        <div>
+          <h3>Wi-Fi names UniFi reported</h3>
+          {portal.wifi.length === 0 ? (
+            <p className="aside">Not collected yet. Collect from UniFi to check.</p>
+          ) : (
+            <ul className="wifi">
+              {portal.wifi.map((item) => (
+                <li key={item.name}>
+                  <span>
+                    <span className="t">{item.name}</span>
+                    {item.network && <span className="d"> on {item.network}</span>}
+                  </span>
+                  <span className={`tag ${item.captive_portal ? 'green' : ''}`}>
+                    {item.captive_portal ? 'Sign-in page on' : 'No sign-in page'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {portal.wifi.length > 0 && gated.length === 0 && (
+            <p className="aside">
+              No Wi-Fi name uses UniFi's sign-in page, so passes and the cut-off have nothing to act
+              on. Turn on Hotspot with vouchers for your guest Wi-Fi in UniFi.
+            </p>
+          )}
+        </div>
+        <div>
+          <div className="bar">
+            <h3>Notice for the sign-in page</h3>
+            <button
+              className="button quiet small"
+              onClick={() => {
+                void navigator.clipboard?.writeText(portal.notice).then(
+                  () => setCopied(true),
+                  () => setCopied(false),
+                );
+              }}
+            >
+              <Copy size={14} /> {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <p className="aside">
+            Nyctr cannot edit UniFi's page. Paste this into its terms box so guests know what is
+            recorded.
+          </p>
+          <blockquote className="quote">{portal.notice}</blockquote>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/**
  * Guest Wi-Fi: issue passes, see who is on and what Nyctr can tell about them, and cut a device
  * off. The automatic cut-off is a counted rule written here; no model score can trigger it.
  */
@@ -66,6 +153,7 @@ export default function Guests({
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ name: '', minutes: 240, guest_limit: 1 });
   const [issued, setIssued] = useState<GuestPass | null>(null);
+  const [admitFor, setAdmitFor] = useState(240);
   const now = useNow();
   useEffect(() => {
     if (guests.data) setData(guests.data);
@@ -103,8 +191,15 @@ export default function Guests({
     });
   };
   const saveRule = (rule: GuestRule) => void run(() => put('/rules/guest', rule));
-  const act = (action: 'cut' | 'restore' | 'lock') =>
-    device && void run(() => post('/guests/actions', { device_id: device.id, action }));
+  const act = (action: 'cut' | 'restore' | 'lock' | 'admit') =>
+    device &&
+    void run(() =>
+      post('/guests/actions', {
+        device_id: device.id,
+        action,
+        ...(action === 'admit' ? { minutes: admitFor } : {}),
+      }),
+    );
   const live = data.passes.filter((pass) => pass.state !== 'ended');
   return (
     <div className="page">
@@ -115,7 +210,8 @@ export default function Guests({
             {data.devices.length
               ? `${plural(data.devices.length, 'guest device')} seen, ${plural(live.length, 'pass', 'passes')} live.`
               : 'No guest devices are connected.'}{' '}
-            Nyctr sees a guest's access point, data use and blocked lookups.
+            Guests sign in on the page your UniFi console shows. Nyctr stays out of their path and
+            reads who is on from UniFi.
           </p>
         </div>
       </header>
@@ -315,6 +411,29 @@ export default function Guests({
                 <div className="bar">
                   <Score value={device.risk.score} big />
                   <div className="button-row">
+                    {device.state === 'waiting' && (
+                      <>
+                        <select
+                          className="os"
+                          aria-label="Let it on for"
+                          value={admitFor}
+                          onChange={(e) => setAdmitFor(Number(e.target.value))}
+                        >
+                          {LENGTHS.map((value) => (
+                            <option key={value} value={value}>
+                              {span(value)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="button primary small"
+                          disabled={busy || readOnly}
+                          onClick={() => act('admit')}
+                        >
+                          <Check size={15} /> Let it on
+                        </button>
+                      </>
+                    )}
                     {device.state === 'online' || device.state === 'waiting' ? (
                       <button
                         className="button danger small"
@@ -347,7 +466,16 @@ export default function Guests({
                 <KV
                   items={[
                     ['Access point', device.access_point?.name || 'Unknown'],
-                    ['Pass', device.pass ? `${device.pass.name} (matched by time)` : 'Not known'],
+                    [
+                      'Got on with',
+                      device.joined_by === 'administrator'
+                        ? 'Let on from this console'
+                        : device.pass
+                          ? `${device.pass.name} (matched by time)`
+                          : device.state === 'waiting'
+                            ? 'Nothing yet. It is on the sign-in page.'
+                            : 'A pass, which one is not known',
+                    ],
                     ['Data used', bytes(device.authorization?.usage?.bytes)],
                     [
                       'Pass ends',
@@ -404,6 +532,7 @@ export default function Guests({
               <Empty title="Pick a device" text="Its timeline, risk and controls open here." />
             )
           )}
+          <HowGuestsGetOn portal={data.portal} />
           <Panel title="New guest pass">
             <form className="form-stack" onSubmit={issue}>
               <label className="field">
@@ -457,7 +586,8 @@ export default function Guests({
                   <div>
                     <b>Pass for {issued.name}</b>
                     <p>
-                      Code <CopyCode code={issued.code} />.{' '}
+                      Give them this code: <CopyCode code={issued.code} />. They join the guest
+                      Wi-Fi and type it into the sign-in page that appears.{' '}
                       {issued.execution === 'simulated'
                         ? 'Simulated: demo mode does not create it in UniFi.'
                         : 'Created in UniFi.'}{' '}

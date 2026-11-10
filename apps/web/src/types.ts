@@ -228,13 +228,24 @@ export interface GuestDevice {
   state: 'online' | 'waiting' | 'cut' | 'locked' | 'offline';
   observed_at: string;
   pass: { id: string; name: string; evidence: string } | null;
+  /** How the device got on: a pass typed into UniFi's sign-in page, or let on from the console. */
+  joined_by: 'pass' | 'administrator' | null;
   risk: { score: number | null; band: RiskBand; factors: RiskFactor[] };
   lookups: { blocked: number; threat: number };
   timeline: TimelineItem[];
 }
+/** How guests sign in. UniFi always serves the page; Nyctr is never in the guest's path. */
+export interface GuestPortal {
+  served_by: 'unifi';
+  nyctr_in_guest_path: false;
+  wifi: { name: string; enabled: boolean; captive_portal: boolean; network: string | null }[];
+  notice: string;
+  nudge: boolean;
+}
 export interface GuestOverview {
   writes: WriteMode;
   rule: GuestRule;
+  portal: GuestPortal;
   sources: { id: string; name: string }[];
   passes: GuestPass[];
   devices: GuestDevice[];

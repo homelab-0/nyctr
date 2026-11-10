@@ -61,7 +61,8 @@ UniFi console, NextDNS profile and Proxmox node, with differences fixed.
 - Device identity reconciliation, temporal assignments and attribution confidence.
   **(first version: administrator links from DNS labels to devices)**
 - Guest Wi-Fi history beyond connected clients, and a UniFi-side block for
-  locked-out devices.
+  locked-out devices. Guests keep signing in on UniFi's portal
+  ([design](guest-wifi.md)); Nyctr does not become an external portal.
 - Historical drift, exposure findings and explicit evidence gaps.
 
 Exit gate: real test environments validate each claimed capability; failures and

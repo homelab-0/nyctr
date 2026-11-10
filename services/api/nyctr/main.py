@@ -2,6 +2,8 @@
 
 import asyncio
 import contextlib
+import hmac
+import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -502,6 +504,32 @@ def create_app(settings: Settings | None = None):
         db.commit()
         db.refresh(row)
         return request_json(row)
+
+    @app.api_route("/api/hooks/collect", methods=["GET", "POST"], status_code=202)
+    @app.api_route("/api/hooks/collect/{token}", methods=["GET", "POST"], status_code=202)
+    async def nudge(request: Request, token: str = ""):
+        """Let the UniFi console ask for a collection now, for example from an Alarm Manager webhook.
+
+        The caller proves a shared secret (Authorization: Bearer, or the path form
+        for senders that cannot set headers). Nothing in the request is read or
+        stored: it only starts the same read-only collection an administrator can
+        start, at most once every 30 seconds. Disabled unless a token is configured.
+        """
+        supplied = token or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        expected = settings.nudge_token
+        if settings.mode != "live" or not expected or not supplied \
+                or not hmac.compare_digest(supplied.encode(), expected.encode()):
+            raise HTTPException(404, "API endpoint not found")
+        now = time.monotonic()
+        if now - getattr(app.state, "last_nudge", float("-inf")) < 30:
+            return {"queued": False}
+        app.state.last_nudge = now
+        # Keep a reference so the task is not collected before it finishes.
+        app.state.nudge_task = asyncio.create_task(worker.collect_all(factory, settings))
+        with factory() as db:
+            audit(db, None, "integration.nudged", None)
+            db.commit()
+        return {"queued": True}
 
     @app.get("/api/users")
     def users(_user=Depends(admin), db: Session = Depends(get_db)):

@@ -27,7 +27,8 @@ def test_inventory_filters_and_nested_links(client, admin_headers):
     assert data["workloads"] == [{"name": "Media indexer", "attr": "204", "network": {"name": "Servers"}}]
     assert {"name": "Guest network", "attr": "80"} in data["networks"]
     assert {b["riskBand"] for b in data["guests"][0]["blocks"]} == {"high", "low"}
-    assert {n["name"] for n in data["tagged"][0]["neighbors"]} == {"Priya's iPhone", "HVAC-Laptop", "Pixel 8"}
+    assert {n["name"] for n in data["tagged"][0]["neighbors"]} == {"Priya's iPhone", "HVAC-Laptop", "Pixel 8",
+                                                                "Galaxy-S24"}
 
 
 def test_inferred_links_are_labelled_and_secrets_are_not_in_the_schema(client, admin_headers):

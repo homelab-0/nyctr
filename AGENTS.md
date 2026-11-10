@@ -48,6 +48,10 @@ interface text in plain words a non-technical member can read.
 - Temporary access uses owned durable leases, explicit scope, verification and
   reconciliation after failure or restart. Ending a lease must never remove a
   provider entry Nyctr did not create.
+- Guests sign in on UniFi's own captive portal. Nyctr never serves a page to a
+  device that has not signed in and must not be made an external portal server;
+  see docs/guest-wifi.md. Do not add an unauthenticated API route without
+  changing the guard test on purpose.
 - Links between sources (same hardware address, VLAN tag or address) are computed
   at read time and always labelled inferred. Never store them as provider fact.
 - Never describe Site Manager or the Carrier/ISP Fabric API as full coverage of

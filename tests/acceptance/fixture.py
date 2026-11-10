@@ -67,6 +67,9 @@ UNIFI_ROWS = {
     ],
     # The 11.0.97 contract serves hotspot vouchers per site; this site has issued none.
     f"{UNIFI_PREFIX}/sites/site-one/hotspot/vouchers": [],
+    f"{UNIFI_PREFIX}/sites/site-one/wifi/broadcasts": [
+        {"id": "wifi-one", "name": "Synthetic Wi-Fi", "enabled": True, "network": {"type": "NATIVE"}},
+    ],
 }
 
 

@@ -25,7 +25,7 @@ def test_sample_answers_are_labelled_and_cite_real_items(client, admin_headers):
                          json={"question": "Who is on the guest Wi-Fi?"}).json()
     assert result["provider"] == "sample" and result["model"] == ""
     assert "Pixel 8 is cut" in result["answer"] and "connection attempts are not collected" in result["answer"]
-    assert {r["id"] for r in result["references"]} == {"guest-priya", "guest-hvac", "guest-pixel"}
+    assert {r["id"] for r in result["references"]} == {"guest-priya", "guest-hvac", "guest-pixel", "guest-galaxy"}
     assert all(f"[[{r['ref']}]]" in result["answer"] for r in result["references"])
 
 

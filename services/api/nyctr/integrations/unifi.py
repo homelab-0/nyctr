@@ -172,6 +172,25 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                     raise
                 core.record_gap("unifi_vouchers_unavailable")
                 snapshot.capabilities = [x for x in snapshot.capabilities if x != "hotspot_vouchers:read"]
+            try:
+                # Which Wi-Fi names exist and which sit behind UniFi's captive portal. Nyctr
+                # reads this to show how guests get on; it never serves that portal itself.
+                wifi = []
+                for row in await offset_pages(reader, f"{base}/wifi/broadcasts"):
+                    hotspot = row.get("hotspotConfiguration")
+                    network = row.get("network")
+                    wifi.append({
+                        "name": str(row.get("name") or "")[:64], "enabled": row.get("enabled") is True,
+                        "captive_portal": isinstance(hotspot, dict) and hotspot.get("type") == "CAPTIVE_PORTAL",
+                        "network_id": network.get("networkId") if isinstance(network, dict)
+                        and isinstance(network.get("networkId"), str) else None})
+                site_resource["attributes"] = {**site_resource["attributes"], "wifi": wifi[:64]}
+                core.record_capability("wifi_broadcasts:read")
+            except IntegrationError as error:
+                if error.category in {"tls", "transport", "timeout"}:
+                    raise
+                core.record_gap("unifi_wifi_unavailable")
+                snapshot.capabilities = [x for x in snapshot.capabilities if x != "wifi_broadcasts:read"]
             # Site containment is a collection boundary, not a forwarding path.
             for node in snapshot.resources:
                 if node["id"] != site_resource["id"] and node["site_id"] == site_resource["id"]:

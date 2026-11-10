@@ -252,6 +252,11 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
         "/v1/sites/site-one/clients": [{"id": "client-one", "name": "Laptop", "uplinkDeviceId": "gw-one", "ipAddress": "10.20.66.10", "type": "WIRED"}],
         "/v1/sites/site-one/firewall/policies": [{"id": "rule-one", "name": "Block management", "action": {"type": "BLOCK"}, "source": {"zoneId": "internal"}, "destination": {"zoneId": "external"}, "index": 10}],
         "/v1/sites/site-one/hotspot/vouchers": [],
+        "/v1/sites/site-one/wifi/broadcasts": [
+            {"id": "w1", "name": "Home", "enabled": True, "network": {"type": "NATIVE"}},
+            {"id": "w2", "name": "Home Guest", "enabled": True, "hotspotConfiguration": {"type": "CAPTIVE_PORTAL"},
+             "network": {"type": "SPECIFIC", "networkId": "network-one"}},
+        ],
     }
     def handler(request):
         """Route source-contract fixtures only through the approved UniFi integration path."""
@@ -271,6 +276,11 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
     assert any(edge["kind"] == "source_zone_policy" for edge in snapshot.relationships)
     assert all(node["owner_id"] is None for node in snapshot.resources)
     assert all(edge["kind"] not in {"allows", "denies", "reachable"} for edge in snapshot.relationships)
+    # Wi-Fi names are kept on the site with whether UniFi's captive portal gates them.
+    site = next(node for node in snapshot.resources if node["kind"] == "site")
+    assert site["attributes"]["wifi"] == [
+        {"name": "Home", "enabled": True, "captive_portal": False, "network_id": None},
+        {"name": "Home Guest", "enabled": True, "captive_portal": True, "network_id": "network-one"}]
 
 
 def test_repeated_offset_page_is_rejected(monkeypatch):

@@ -79,7 +79,7 @@ These screenshots show the running application with synthetic demonstration data
 | Risk score | Rule-based score from the stored block reason and the shape of the name; unknown stays unknown | Implemented. It is not a reputation lookup | Background investigation with source links |
 | Access rule and leases | Administrator-written rule may open a low-risk privacy-list block; durable leases; expiry and restart reconciliation; suggestions for permanent exceptions | Implemented; simulated in demo; real NextDNS writes untested | Exact-plan approval binding, drift checks |
 | Member portal | Blocks on the device in hand, score and factors, one request form, reconnect steps per device type | Implemented. Device recognition needs the member's LAN address to reach Nyctr | Push or email when a person decides |
-| Guest Wi-Fi | Passes, who is on, access point history, data use, blocked lookups, cut off, restore, lock out, counted cut-off rule | Implemented; simulated in demo; real UniFi writes untested | Firewall log receiver, UniFi-side block rule |
+| Guest Wi-Fi | Guests sign in on UniFi's own portal; Nyctr issues passes, lets a waiting device on, shows who is on, access point history, data use and blocked lookups, and can cut off, restore or lock out, by hand or under a counted rule ([design](docs/guest-wifi.md)) | Implemented; simulated in demo; real UniFi writes untested | Firewall log receiver, UniFi-side block rule |
 | UniFi Network | Read-only inventory, policies, guest access state and vouchers; diagnostics | Implemented against the 11.0.97 contract | Ports, event receiver, policy analysis |
 | NextDNS | Read-only profile and blocked lookups with reason codes; administrator device-label links | Implemented | Incremental collection |
 | Proxmox VE | Read-only nodes, bridges, guests, network cards and firewall switches | Experimental; never run against a cluster | Firewall rules, SDN |
@@ -156,6 +156,7 @@ to run unless the provider is named in `NYCTR_PROVIDER_WRITES`:
 | `NYCTR_PROVIDER_WRITES=nextdns` | The access rule and approvals may add and later remove a NextDNS allowlist entry. An exception applies to the whole profile, and the console says so before approval. |
 | `NYCTR_PROVIDER_WRITES=unifi_network` | Administrators may issue and end guest passes and cut off, restore or lock out a guest device; the cut-off rule may unauthorise a guest. |
 | `NYCTR_COLLECT_INTERVAL_SECONDS=300` | Collect every five minutes. Without it, collection happens only when an administrator presses Collect, so the cut-off rule only runs then. |
+| `NYCTR_NUDGE_TOKEN=<32+ characters>` | Lets the UniFi console call `/api/hooks/collect/<token>` (for example from an Alarm Manager webhook) so Nyctr collects straight away when a client connects. |
 | `NYCTR_AI_BASE_URL`, `NYCTR_AI_MODEL`, `NYCTR_AI_API_KEY` | An OpenAI-compatible chat endpoint for the assistant, such as a LiteLLM proxy. The model receives a bounded, redacted evidence pack and no credentials. |
 
 Leave `NYCTR_PROVIDER_WRITES` empty to keep every source read only; requests are

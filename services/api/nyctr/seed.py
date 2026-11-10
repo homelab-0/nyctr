@@ -86,7 +86,10 @@ def seed_demo(db):
                            config={"demo": True}, capabilities=caps, secret_ref=""))
     db.flush()
     resources = [
-        ("site-home", "Milkyway", "site", "demo-unifi", "infrastructure", None, {"location": "Home lab"}),
+        ("site-home", "Milkyway", "site", "demo-unifi", "infrastructure", None, {"location": "Home lab", "wifi": [
+            {"name": "Milkyway", "enabled": True, "captive_portal": False, "network_id": "example-network-lan"},
+            {"name": "Milkyway IoT", "enabled": True, "captive_portal": False, "network_id": "example-network-iot"},
+            {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network_id": "example-network-guest"}]}),
         ("gateway", "Milkyway gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "UDM SE", "ipAddress": "10.20.65.1"}),
         ("switch-core", "Core aggregation", "switch", "demo-unifi", "infrastructure", None, {"model": "Aggregation switch", "ports": 8}),
         ("ap-basement", "Basement access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
@@ -122,6 +125,9 @@ def seed_demo(db):
             "guest_authorized": False, "uplinkDeviceId": "example-ap-basement", "connectedAt": _iso(now, 27),
             "guest_authorization": {"authorizationMethod": "VOUCHER", "authorizedAt": _iso(now, 26),
                                     "expiresAt": _iso(now, -94), "usage": {"bytes": 9_400_000, "durationSec": 1200}}}),
+        ("guest-galaxy", "Galaxy-S24", "client", "demo-unifi", "unassigned", None, {
+            "ipAddress": "10.20.80.52", "macAddress": "de:ad:10:20:80:52", "type": "WIRELESS", "access_type": "GUEST",
+            "guest_authorized": False, "uplinkDeviceId": "example-ap-upstairs", "connectedAt": _iso(now, 3)}),
         ("bridge-vmbr0", "vmbr0 on compute-01", "bridge", "demo-compute", "infrastructure", None, {"iface": "vmbr0", "node": "compute-01", "active": True, "vlan_aware": True, "ports": "enp3s0", "cidr": "10.20.66.3/24"}),
         ("workload-indexer", "Media indexer", "workload", "demo-compute", "infrastructure", None, {"vmid": "204", "type": "container", "node": "compute-01", "status": "running", "firewall_enabled": False, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:44", "vlan": 66, "firewall": False}]}),
         ("dns-label-jamie", "Jamies-MacBook-Pro", "client", "demo-nextdns", "unassigned", None, {"model": "MacBook Pro", "identity_verified": False}),
@@ -149,6 +155,7 @@ def seed_demo(db):
         ("ap-upstairs", "guest-priya", "connects_to"), ("ap-basement", "guest-hvac", "connects_to"),
         ("ap-basement", "guest-pixel", "connects_to"), ("guest-priya", "network-guest", "member_of"),
         ("guest-hvac", "network-guest", "member_of"), ("guest-pixel", "network-guest", "member_of"),
+        ("ap-upstairs", "guest-galaxy", "connects_to"), ("guest-galaxy", "network-guest", "member_of"),
         ("workstation", "network-lan", "member_of"), ("old-laptop", "network-lan", "member_of"),
         ("bridge-vmbr0", "host-compute", "hosted_by"), ("workload-photos", "bridge-vmbr0", "connects_to"),
         ("workload-management", "bridge-vmbr0", "connects_to"), ("workload-indexer", "bridge-vmbr0", "connects_to"),
@@ -254,6 +261,7 @@ def _seed_access_and_guests(db, now):
     for device, uplink, first, last in [
         ("guest-priya", "example-ap-basement", 94, 61), ("guest-priya", "example-ap-upstairs", 60, 0),
         ("guest-hvac", "example-ap-basement", 40, 0), ("guest-pixel", "example-ap-basement", 26, 7),
+        ("guest-galaxy", "example-ap-upstairs", 3, 0),
     ]:
         db.add(Sighting(device_id=device, uplink_id=uplink, first_seen=now - timedelta(minutes=first),
                         last_seen=now - timedelta(minutes=last)))
