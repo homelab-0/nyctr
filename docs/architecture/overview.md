@@ -89,7 +89,8 @@ authorization → execution → verification. Each step has an explicit owner.
 - Authorization: an administrator's decision, or a rule in `nyctr/policy.py`.
 - Execution: `nyctr/integrations/actions.py`, gated by `NYCTR_PROVIDER_WRITES`,
   called from `nyctr/access.py` (leases) and `nyctr/guests.py`.
-- Verification: each action reads back the provider state; `nyctr/worker.py`
+- Verification: DNS exceptions and guest authorisation read back the provider
+  state (voucher create and delete are confirmed at the next collection); `nyctr/worker.py`
   and every lease read reconcile expired leases.
 - Explanation: `nyctr/assistant.py` and the read-only `nyctr/query.py`.
 

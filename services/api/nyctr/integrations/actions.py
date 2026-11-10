@@ -1,9 +1,11 @@
 """The only code path that changes a provider. Off unless an operator enables it.
 
 Every function here performs one narrowly scoped, documented provider call and
-then reads back enough to say what actually happened. Callers decide whether an
-action is allowed; this module refuses to run unless the caller passes the
-operator's explicit write permission for the provider.
+then reads back enough to say what actually happened. Two functions do not yet
+read back: creating a voucher trusts the voucher the provider returns, and
+deleting one trusts the accepted request; collection mirrors the list afterwards.
+Callers decide whether an action is allowed; this module refuses to run unless
+the caller passes the operator's explicit write permission for the provider.
 
 Contracts:
 - UniFi Network integration API 11.0.97: hotspot vouchers and the two guest
