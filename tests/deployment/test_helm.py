@@ -25,6 +25,9 @@ def test_chart_app_version_matches_api_runtime_and_web_release():
                 and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)]
     assert len(versions) == 1 and isinstance(versions[0], str), "API version must be one static string"
     assert chart["appVersion"] == web["version"] == versions[0]
+    # The release workflow publishes the chart under the release version, so the
+    # checkout must not claim a different one.
+    assert chart["version"] == chart["appVersion"]
 
 
 @pytest.fixture(scope="session")

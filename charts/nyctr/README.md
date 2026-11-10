@@ -267,19 +267,43 @@ as part of a coordinated trust rotation to avoid inconsistent in-flight requests
 
 ## Helm and Flux usage
 
-From a repository checkout, render your nonsecret values for review first:
+From `v0.1.0-alpha.2` each release publishes this chart to
+`oci://ghcr.io/homelab-0/charts/nyctr` under the release version. The chart never
+chooses an image: set `image.digest` to the digest recorded by the same release.
+Render your nonsecret values for review first:
+
+```sh
+helm template nyctr oci://ghcr.io/homelab-0/charts/nyctr --version 0.1.0-alpha.2 \
+  -n nyctr -f nyctr-values.yaml
+helm upgrade --install nyctr oci://ghcr.io/homelab-0/charts/nyctr --version 0.1.0-alpha.2 \
+  -n nyctr --create-namespace -f nyctr-values.yaml --wait --timeout 5m
+```
+
+From a repository checkout, use the chart path instead:
 
 ```sh
 helm lint ./charts/nyctr -f nyctr-values.yaml --strict
 helm template nyctr ./charts/nyctr -n nyctr -f nyctr-values.yaml
-helm upgrade --install nyctr ./charts/nyctr -n nyctr --create-namespace \
-  -f nyctr-values.yaml --wait --timeout 5m
 ```
 
-For Flux, reference the chart path in an existing Git source and put the same
+For Flux, point an `OCIRepository` at the published chart and put the same
 nonsecret values in the HelmRelease. An outline is:
 
 ```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: nyctr
+  namespace: nyctr
+spec:
+  interval: 15m
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  ref:
+    tag: 0.1.0-alpha.2
+  url: oci://ghcr.io/homelab-0/charts/nyctr
+---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -287,18 +311,13 @@ metadata:
   namespace: nyctr
 spec:
   interval: 10m
-  chart:
-    spec:
-      chart: ./charts/nyctr
-      reconcileStrategy: Revision
-      sourceRef:
-        kind: GitRepository
-        name: nyctr
-        namespace: flux-system
+  chartRef:
+    kind: OCIRepository
+    name: nyctr
   values:
     # Insert the complete reviewed nonsecret configuration from above.
     image:
-      tag: sha-REPLACE_WITH_PUBLISHED_COMMIT
+      digest: sha256:REPLACE_WITH_THE_RELEASE_DIGEST
 ```
 
 This outline is intentionally incomplete until actual dependencies and values

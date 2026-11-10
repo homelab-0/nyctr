@@ -1,4 +1,4 @@
-name: Publish release image
+name: Publish release image and chart
 
 on:
   release:
@@ -81,9 +81,31 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.22.1
+      # After the image, so a chart version never exists without its image.
+      # The chart and application versions are both set from the validated tag,
+      # whatever Chart.yaml says, and the chart is pushed under its own
+      # namespace so it can never collide with an image tag.
+      - name: Package and publish the Helm chart
+        env:
+          CHART_VERSION: ${{ steps.metadata.outputs.version }}
+          CHART_REGISTRY: ${{ steps.metadata.outputs.chart_registry }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package charts/nyctr --version "$CHART_VERSION" --app-version "$CHART_VERSION" \
+            --destination "$RUNNER_TEMP/chart"
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          helm push "$RUNNER_TEMP/chart/nyctr-$CHART_VERSION.tgz" "$CHART_REGISTRY"
+          helm registry logout ghcr.io
       - name: Record immutable deployment reference
         env:
           RELEASE_IMAGE: ${{ steps.metadata.outputs.image }}
           RELEASE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_VERSION: ${{ steps.metadata.outputs.version }}
+          CHART_REGISTRY: ${{ steps.metadata.outputs.chart_registry }}
         run: |
           printf '## Published image\n\n`%s@%s`\n' "$RELEASE_IMAGE" "$RELEASE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf '\n## Published chart\n\n`%s/nyctr` version `%s`\n' "$CHART_REGISTRY" "$CHART_VERSION" >> "$GITHUB_STEP_SUMMARY"
