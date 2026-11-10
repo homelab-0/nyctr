@@ -78,8 +78,8 @@ class LoginInput(InputModel):
 
 
 class IntegrationInput(InputModel):
-    """Accept supported read-only providers and constrained server-side secret references."""
-    provider: Literal["unifi_network", "nextdns", "proxmox"]
+    """Accept any registered integration and a constrained server-side secret reference."""
+    provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]+$")
     name: str = Field(min_length=1, max_length=160)
     config: dict
     secret_ref: str = Field(pattern=r"^NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}$")
@@ -267,6 +267,19 @@ def create_app(settings: Settings | None = None):
         """List administrator connector metadata while excluding resolved secrets."""
         return [integration_json(i) for i in db.scalars(select(Integration).order_by(Integration.name))]
 
+    @app.get("/api/integrations/catalog")
+    def integration_catalog(_user=Depends(admin)):
+        """List every integration this release ships, with what each adds to Nyctr.
+
+        The console builds its source list, connection form and capability table
+        from this, so adding an integration needs no change to the web app.
+        """
+        from .integrations import registry
+        return {"capabilities": [{"id": key, "name": name, "changes_provider": key in registry.WRITES}
+                                 for key, name in registry.CAPABILITIES.items()],
+                "providers": [provider.describe(settings.write_mode(provider.id))
+                              for provider in registry.providers().values()]}
+
     @app.post("/api/integrations", status_code=201)
     def add_integration(body: IntegrationInput, user=Depends(admin), db: Session = Depends(get_db)):
         """Persist a validated read-only connector and audit its creation for a live administrator.
@@ -276,7 +289,9 @@ def create_app(settings: Settings | None = None):
         """
         if settings.mode == "demo":
             raise HTTPException(409, "Live integration setup is disabled in demo mode")
-        from .integrations import IntegrationError, capabilities_for, validate_config
+        from .integrations import IntegrationError, capabilities_for, registry, validate_config
+        if registry.find(body.provider) is None:
+            raise HTTPException(422, "This release has no integration with that name")
         try:
             config = validate_config(body.provider, body.config)
         except (IntegrationError, ValueError):
@@ -515,7 +530,7 @@ def create_app(settings: Settings | None = None):
     @app.api_route("/api/hooks/collect", methods=["GET", "POST"], status_code=202)
     @app.api_route("/api/hooks/collect/{token}", methods=["GET", "POST"], status_code=202)
     async def nudge(request: Request, token: str = ""):
-        """Let the UniFi console ask for a collection now, for example from an Alarm Manager webhook.
+        """Let a network console ask for a collection now, for example from its own alert webhook.
 
         The caller proves a shared secret (Authorization: Bearer, or the path form
         for senders that cannot set headers). Nothing in the request is read or

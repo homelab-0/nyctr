@@ -36,8 +36,21 @@ def finding_json(row):
 
 
 def integration_json(row):
-    """Expose connector configuration and secret-variable name, never the resolved credential."""
-    return columns(row, "id provider name status last_sync last_error config secret_ref capabilities")
+    """Expose connector configuration and secret-variable name, never the resolved credential.
+
+    `provider_name`, `status_note` and `provides` come from the integration's
+    declared contract so the console never has to know a vendor by name.
+    """
+    from .integrations import registry
+
+    data = columns(row, "id provider name status last_sync last_error config secret_ref capabilities")
+    provider = registry.find(row.provider)
+    data["provider_name"] = provider.name if provider else row.provider
+    data["letter"] = provider.letter if provider else row.provider[:1].upper()
+    data["tone"] = provider.tone if provider else "grey"
+    data["maturity"] = provider.status if provider else "unknown"
+    data["provides"] = [c for c in registry.CAPABILITIES if provider and c in provider.provides]
+    return data
 
 
 def observation_json(row):
@@ -50,7 +63,7 @@ def observation_json(row):
 
     data = columns(row, "id device_id device_name domain source reason observed_at expires_at evidence_kind "
                         "attribution reason_codes")
-    assessment = risk.assess(row.domain, row.reason, row.reason_codes)
+    assessment = risk.assess(row.domain, row.reason, row.reason_codes, row.source)
     data.update(risk_score=assessment.score, risk_band=assessment.band, risk_category=assessment.category,
                 risk_factors=assessment.factors, risk_explanation=risk.member_summary(assessment))
     return data
@@ -59,7 +72,7 @@ def observation_json(row):
 def request_json(row):
     """Serialize the retained event snapshot, assessment and decision of an authorized access request."""
     return columns(row, "id block_id domain device_name requester_id reason duration_minutes status created_at "
-                        "review_note risk_score risk_category risk_factors decided_by decision_note")
+                        "review_note risk_score risk_category risk_factors decided_by decision_note integration_id")
 
 
 def get_db(request: Request):

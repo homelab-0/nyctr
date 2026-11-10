@@ -98,7 +98,7 @@ def test_a_cut_stops_describing_a_device_the_network_let_back_on(client, app, ad
     with app.state.session_factory() as db:
         device = db.get(Resource, "guest-hvac")
         # An older observation that still says "authorised" is not evidence of anything new.
-        device.attributes = {**device.attributes, "guest_authorized": True}
+        device.attributes = {**device.attributes, "guest": {**device.attributes["guest"], "authorized": True}}
         db.commit()
     assert guest(client, "HVAC-Laptop")["state"] == "cut"
     with app.state.session_factory() as db:
@@ -118,7 +118,7 @@ def test_a_lock_out_is_not_undone_by_the_network_letting_the_device_on(client, a
     client.post("/api/guests/actions", headers=admin_headers, json={"device_id": "guest-hvac", "action": "lock"})
     with app.state.session_factory() as db:
         device = db.get(Resource, "guest-hvac")
-        device.attributes = {**device.attributes, "guest_authorized": True}
+        device.attributes = {**device.attributes, "guest": {**device.attributes["guest"], "authorized": True}}
         device.observed_at = utcnow() + timedelta(seconds=5)
         db.commit()
     assert guest(client, "HVAC-Laptop")["state"] == "locked"
@@ -149,7 +149,7 @@ def live_guest(app, *, lookups=3):
         db.flush()
         for id_, kind, source, attrs in [
             ("unifi:site:s1", "site", "s1", {}),
-            ("unifi:client:g1", "client", "g1", {"access_type": "GUEST", "guest_authorized": True}),
+            ("unifi:client:g1", "client", "g1", {"guest": {"authorized": True}}),
         ]:
             db.add(Resource(id=id_, integration_id="unifi", name="Visitor phone" if kind == "client" else "Home",
                             kind=kind, provider="unifi_network", source_id=source, site_id="unifi:site:s1",
@@ -264,7 +264,7 @@ def test_only_plain_domain_names_can_be_allowed(monkeypatch, domain):
 def test_guests_sign_in_through_unifi_and_nyctr_only_describes_it(client, admin_headers):
     """The overview states that UniFi serves the portal and lists which Wi-Fi names are behind it."""
     portal = client.get("/api/guests").json()["portal"]
-    assert portal["served_by"] == "unifi" and portal["nyctr_in_guest_path"] is False
+    assert portal["served_by"] == ["UniFi Network"] and portal["nyctr_in_guest_path"] is False
     assert {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network": "Guest network"} in portal["wifi"]
     assert [w["captive_portal"] for w in portal["wifi"] if w["name"] == "Milkyway"] == [False]
     assert "monitored for security" in portal["notice"] and portal["nudge"] is False
@@ -277,7 +277,7 @@ def test_an_administrator_can_let_a_waiting_device_on_without_a_code(client, adm
                        json={"device_id": "guest-galaxy", "action": "admit", "minutes": 120})
     body = done.json()
     assert done.status_code == 200 and body["state"] == "online" and body["joined_by"] == "administrator"
-    assert body["pass"] is None and body["authorization"]["authorizationMethod"] == "API"
+    assert body["pass"] is None and body["authorization"]["method"] == "console"
     assert body["timeline"][0]["text"] == "An administrator let this device on (simulated)"
     # Only a waiting device can be admitted; one that is on, cut or locked uses the other actions.
     for device in ("guest-galaxy", "guest-pixel"):
@@ -307,7 +307,7 @@ def test_live_admit_uses_the_documented_authorise_action(tmp_path, monkeypatch):
         live_guest(app, lookups=0)
         with app.state.session_factory() as db:
             device = db.get(Resource, "unifi:client:g1")
-            device.attributes = {**device.attributes, "guest_authorized": False}
+            device.attributes = {**device.attributes, "guest": {"authorized": False}}
             db.commit()
         headers = live_signin(client)
         done = client.post("/api/guests/actions", headers=headers,

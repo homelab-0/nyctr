@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     oidc_admin_groups: str = ""
     oidc_allowed_groups: str = ""
     oidc_groups_claim: str = "groups"
-    # Providers Nyctr may change, e.g. "nextdns,unifi_network". Empty keeps every connector read-only.
+    # Comma-separated integration ids Nyctr may change. Empty keeps every connector read-only.
     provider_writes: str = ""
     # Seconds between automatic collections in live mode; 0 collects only when an admin asks.
     collect_interval_seconds: int = 0
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     ai_base_url: str = ""
     ai_api_key: str = ""
     ai_model: str = ""
-    # Optional shared secret that lets the UniFi console ask Nyctr to collect now (Alarm Manager webhook).
+    # Optional shared secret that lets a network console ask Nyctr to collect now (a webhook).
     nudge_token: str = ""
 
     @model_validator(mode="after")
@@ -70,9 +70,11 @@ class Settings(BaseSettings):
                 raise ValueError("OIDC issuer must use HTTPS")
             if issuer.query or issuer.fragment:
                 raise ValueError("OIDC issuer cannot contain query or fragment")
-        unknown = self.writable_providers - {"nextdns", "unifi_network"}
-        if unknown:
-            raise ValueError("NYCTR_PROVIDER_WRITES accepts only nextdns and unifi_network")
+        from .integrations import registry
+
+        if self.writable_providers - registry.writable():
+            raise ValueError("NYCTR_PROVIDER_WRITES accepts only integrations that can change their source: "
+                             + ", ".join(sorted(registry.writable())))
         if self.collect_interval_seconds and not 60 <= self.collect_interval_seconds <= 86400:
             raise ValueError("Automatic collection interval must be 0 or between 60 and 86400 seconds")
         if self.nudge_token and len(self.nudge_token) < 32:

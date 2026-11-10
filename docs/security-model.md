@@ -8,7 +8,10 @@ Provider credentials are server environment secrets referenced by a restricted
 name; arbitrary environment variables are not available as credential sources.
 The web client receives evidence and sanitized configuration, not credentials.
 
-Collectors send GET only. There are no firewall mutations and no AI tool calls.
+Collectors only read. They send GET requests, with one stated exception: a source
+that offers only session sign-in (Pi-hole) is sent one sign-in and one sign-out
+request for the collection's own session. There are no firewall mutations and no
+AI tool calls.
 
 Nyctr can change a provider in three narrow ways, all in
 `nyctr/integrations/actions.py`: add or remove one NextDNS allowlist entry,
@@ -35,7 +38,7 @@ until switched on:
 - The access rule may open a request when the score is at or below the written
   limit (which the code caps at 60), the block came from a privacy list, the
   member is under the daily cap, and no administrator denied that address before.
-  An unknown score, a security or household block, a missing DNS source, disabled
+  An unknown score, a security or content-rule block, a source whose integration cannot open addresses, a missing DNS source, disabled
   writes or a provider failure all leave the request waiting for a person.
 - The guest cut-off rule unauthorises a guest device after a written number of
   threat-list lookups within a written number of minutes. It counts stored

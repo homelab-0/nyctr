@@ -74,7 +74,7 @@ def apply_snapshot(db, integration, snapshot, settings):
     links = {link.source_id: link for link in db.scalars(select(DeviceLink))}
     guests_by_name: dict[str, list[str]] = {}
     for row in db.scalars(select(Resource).where(Resource.kind == "client")):
-        if row.attributes.get("access_type") == "GUEST":
+        if isinstance(row.attributes.get("guest"), dict):
             guests_by_name.setdefault(row.name.casefold(), []).append(row.id)
     for data in snapshot.blocks:
         when = parsed_date(data["observed_at"])
@@ -100,7 +100,7 @@ def apply_snapshot(db, integration, snapshot, settings):
             if len(matches) == 1:
                 values.update(device_id=matches[0], attribution="inferred")
         db.add(Observation(integration_id=integration.id, observed_at=when, expires_at=expires, **values))
-    _store_vouchers(db, integration, snapshot, now)
+    _store_passes(db, integration, snapshot, now)
     _record_sightings(db, integration, snapshot, now)
     integration.status = "connected"
     integration.last_sync = now
@@ -109,42 +109,44 @@ def apply_snapshot(db, integration, snapshot, settings):
     integration.capabilities = snapshot.capabilities
 
 
-def _store_vouchers(db, integration, snapshot, now):
-    """Mirror the provider's voucher list into guest passes, ending passes that disappeared."""
-    if integration.provider != "unifi_network" or "hotspot_vouchers:read" not in snapshot.capabilities:
+def _store_passes(db, integration, snapshot, now):
+    """Mirror the source's guest passes, ending passes that disappeared.
+
+    A snapshot without a pass list (`None`) says the source did not report
+    passes this time, so nothing stored is touched.
+    """
+    if snapshot.passes is None:
         return
     seen = set()
     known = {row.voucher_id: row for row in db.scalars(
         select(GuestPass).where(GuestPass.integration_id == integration.id)) if row.voucher_id}
-    for data in snapshot.vouchers:
+    for data in snapshot.passes:
         seen.add(data["id"])
         row = known.get(data["id"])
         if row is None:
             row = GuestPass(integration_id=integration.id, voucher_id=data["id"], code=str(data["code"])[:64],
                             name=str(data.get("name") or "Guest pass")[:160],
-                            minutes=int(data.get("timeLimitMinutes") or 0), execution="applied",
-                            created_at=parsed_date(data["createdAt"]) if data.get("createdAt") else now)
+                            minutes=int(data.get("minutes") or 0), execution="applied",
+                            created_at=parsed_date(data["created_at"]) if data.get("created_at") else now)
             db.add(row)
-        row.guest_limit = data.get("authorizedGuestLimit")
-        row.data_limit_mb = data.get("dataUsageLimitMBytes")
-        row.guest_count = int(data.get("authorizedGuestCount") or 0)
-        row.activated_at = parsed_date(data["activatedAt"]) if data.get("activatedAt") else None
-        row.expires_at = parsed_date(data["expiresAt"]) if data.get("expiresAt") else None
+        row.guest_limit = data.get("guest_limit")
+        row.data_limit_mb = data.get("data_limit_mb")
+        row.guest_count = int(data.get("guest_count") or 0)
+        row.activated_at = parsed_date(data["activated_at"]) if data.get("activated_at") else None
+        row.expires_at = parsed_date(data["expires_at"]) if data.get("expires_at") else None
         if data.get("expired") and row.ended_at is None:
             row.ended_at = row.expires_at or now
-    for voucher_id, row in known.items():
-        if voucher_id not in seen and row.ended_at is None:
+    for pass_id, row in known.items():
+        if pass_id not in seen and row.ended_at is None:
             row.ended_at = now
 
 
 def _record_sightings(db, integration, snapshot, now):
-    """Extend or start each client's attachment record so movement between access points is kept."""
-    if integration.provider != "unifi_network":
-        return
+    """Extend or start each guest client's attachment record so movement between access points is kept."""
     for data in snapshot.resources:
-        if data["kind"] != "client" or data["attributes"].get("access_type") != "GUEST":
+        if data["kind"] != "client" or not isinstance(data["attributes"].get("guest"), dict):
             continue
-        uplink = data["attributes"].get("uplinkDeviceId")
+        uplink = data["attributes"].get("uplink")
         last = db.scalar(select(Sighting).where(Sighting.device_id == data["id"])
                          .order_by(Sighting.last_seen.desc()).limit(1))
         if last and last.uplink_id == uplink and now - utc(last.last_seen) < timedelta(hours=6):

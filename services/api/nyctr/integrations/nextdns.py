@@ -8,14 +8,61 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from . import core
+from . import actions, core
 from .core import IntegrationError, ReadClient, Snapshot, cursor_pages, relationship, resource, source_id
+from .registry import ConfigField, Provider
 
-PROVIDER = "nextdns"
+ID = "nextdns"
 API_BASE = "https://api.nextdns.io"
+READS = (
+    ("profile:read", "DNS profile configuration"),
+    ("dns_policies:read", "DNS policy sections"),
+    ("blocked_dns_logs:read", "Recent blocked DNS queries"),
+)
+
+# NextDNS block reasons, matched against reason identifiers and names in order:
+# (pattern, category, base score, plain explanation). The core adds name-shape factors.
+_REASONS: tuple[tuple[re.Pattern[str], str, int, str], ...] = tuple(
+    (re.compile(pattern, re.I), category, score, text) for pattern, category, score, text in (
+        (r"threat|safe.?browsing|malware|phish|cryptojack|rebind|homograph|typosquat|\bdga\b|csam",
+         "security", 92, "A security feed lists this address as a threat"),
+        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently"),
+        (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites"),
+        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it"),
+        (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name"),
+        (r"parental|category|service:|safe.?search|bypass", "policy", 60,
+         "A content rule set by an administrator blocks this kind of site"),
+        (r"disguised", "privacy_list", 24, "It is a tracker hidden behind another site's name"),
+        (r"^native|native.tracking", "privacy_list", 14, "It is device telemetry blocked by a tracking list"),
+        (r"^blocklist:|blocklist|privacy list|ad.?block|tracker|tracking", "privacy_list", 16,
+         "A privacy and ad-blocking list covers it, not a security feed"),
+    )
+)
+
+
+def classify(text: str) -> tuple[str, int, str] | None:
+    """Explain one NextDNS block reason. Unrecognised reasons return None and stay unknown."""
+    for pattern, category, score, label in _REASONS:
+        if pattern.search(text):
+            return category, score, label
+    return None
+
+
+def validate(config: dict[str, Any]) -> dict[str, Any]:
+    """Accept one profile and a bounded log lookback. The destination is fixed."""
+    if set(config) - {"profile_id", "lookback_hours"}:
+        raise IntegrationError("NextDNS supports profile_id and optional lookback_hours configuration only.")
+    profile = config.get("profile_id")
+    if not isinstance(profile, str) or not re.fullmatch(r"[a-fA-F0-9]{6}", profile):
+        raise IntegrationError("NextDNS profile_id must contain six hexadecimal characters.")
+    hours = config.get("lookback_hours", 24)
+    if type(hours) is not int or not 1 <= hours <= 72:
+        raise IntegrationError("NextDNS lookback_hours must be an integer between 1 and 72.")
+    return {"profile_id": profile.lower(), "lookback_hours": hours}
 
 
 def _timestamp(value: Any) -> datetime:
@@ -53,9 +100,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
     and keep reported device labels unverified. Every imported block remains
     without a trusted device ID until a separate attribution layer establishes it.
     """
-    from . import capabilities_for
-
-    snapshot = Snapshot(capabilities=capabilities_for(PROVIDER))
+    snapshot = Snapshot(capabilities=[read for read, _label in READS])
     now = core.utc_now()
     collected_at = core.iso(now)
     cutoff = now - timedelta(hours=config["lookback_hours"])
@@ -72,7 +117,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             raise IntegrationError("NextDNS returned invalid log settings.")
         log_settings = settings.get("logs", {})
         profile_node = resource(
-            integration_id, PROVIDER, "dns_profile", profile_id,
+            integration_id, ID, "dns_profile", profile_id,
             profile.get("name", f"NextDNS {profile_id}"), collected_at,
             attributes={"scope": "entire_profile", "logs_enabled": log_settings.get("enabled"), "logs_retention_seconds": log_settings.get("retention")},
         )
@@ -96,12 +141,12 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
                     raise IntegrationError("NextDNS returned invalid domain list configuration.")
                 value = [core.selected(x, ("id", "active")) for x in value]
             node = resource(
-                integration_id, PROVIDER, "policy", f"{profile_id}.{section}",
+                integration_id, ID, "policy", f"{profile_id}.{section}",
                 f"{profile_node['name']} · {section}", collected_at,
                 attributes={"scope": "entire_profile", "section": section, "configuration": value},
             )
             snapshot.resources.append(node)
-            snapshot.relationships.append(relationship(integration_id, PROVIDER, profile_node["id"], node["id"], "governed_by", collected_at))
+            snapshot.relationships.append(relationship(integration_id, ID, profile_node["id"], node["id"], "governed_by", collected_at))
         if all(section in profile for section in ("security", "privacy", "parentalControl", "allowlist", "denylist")):
             core.record_capability("dns_policies:read")
         else:
@@ -135,13 +180,13 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             if device and device.get("id") and device["id"] != "__UNIDENTIFIED__":
                 remote_device_id = source_id(device["id"])
                 device_node = resource(
-                    integration_id, PROVIDER, "client", remote_device_id,
+                    integration_id, ID, "client", remote_device_id,
                     device.get("name", remote_device_id), core.iso(observed), evidence_kind="observed",
                     attributes={"provider_device_id": remote_device_id, "model": device.get("model"), "identity_verified": False},
                 )
                 snapshot.resources.append(device_node)
                 snapshot.relationships.append(relationship(
-                    integration_id, PROVIDER, device_node["id"], profile_node["id"], "uses_dns_profile", core.iso(observed),
+                    integration_id, ID, device_node["id"], profile_node["id"], "uses_dns_profile", core.iso(observed),
                     evidence_kind="observed", attributes={"meaning": "Provider-reported device label; no user ownership established."},
                 ))
             reasons = row.get("reasons", [])
@@ -166,7 +211,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
                 "reason_codes": [str(x["id"])[:120] for x in reasons[:20] if isinstance(x.get("id"), str)],
                 "device_name": device_node["name"] if device_node else "Unattributed DNS client",
                 "domain": domain,
-                "source": PROVIDER,
+                "source": ID,
                 "reason": reason,
                 "observed_at": core.iso(observed),
                 "expires_at": core.iso(observed + timedelta(hours=24)),
@@ -175,10 +220,10 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
                 "risk_score": None,
                 "risk_explanation": "The source reports a DNS block. Reputation, user intent, and device ownership have not been independently verified.",
             })
-            domain_node = resource(integration_id, PROVIDER, "domain", domain, domain, core.iso(observed), evidence_kind="observed")
+            domain_node = resource(integration_id, ID, "domain", domain, domain, core.iso(observed), evidence_kind="observed")
             snapshot.resources.append(domain_node)
             snapshot.relationships.append(relationship(
-                integration_id, PROVIDER, profile_node["id"], domain_node["id"], "blocked_dns_query", core.iso(observed),
+                integration_id, ID, profile_node["id"], domain_node["id"], "blocked_dns_query", core.iso(observed),
                 evidence_kind="observed", attributes={"reason": reason, "meaning": "Observed DNS decision; not a firewall or HTTP result."},
             ))
     # Logs arrive newest-first. Keep the newest evidence for repeated resources.
@@ -187,3 +232,33 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
     snapshot.blocks = list({event["id"]: event for event in snapshot.blocks}.values())
     core.record_capability("blocked_dns_logs:read")
     return snapshot
+
+
+PROVIDER = Provider(
+    id=ID, name="NextDNS", letter="N", tone="teal",
+    summary="One DNS profile: its filtering settings and the lookups it blocked recently.",
+    secret_hint="A NextDNS API key from your account page.",
+    fields=(
+        ConfigField("profile_id", "Profile", "The six-character identifier of the profile.", "abc123"),
+        ConfigField("lookback_hours", "Hours of blocked lookups to read", "Between 1 and 72.", "24", "number",
+                    False),
+    ),
+    reads=READS,
+    provides=frozenset({"dns.blocks", "dns.exceptions"}),
+    gaps=(
+        ("upstream_identity", "Upstream DNS is not user identity",
+         "A shared DNS profile or provider device label cannot identify the person who made a query. Blocks remain unassigned until trusted attribution exists."),
+        ("dns_scope", "DNS decisions cover one enforcement layer",
+         "A DNS block does not establish a firewall decision, HTTPS result, or destination risk. Unknown risk remains unknown."),
+    ),
+    gap_notes={
+        "nextdns_policy_fields_missing": (
+            "Some DNS policy sections were absent",
+            "The profile did not expose every policy section supported by this adapter. DNS policy coverage remains unverified."),
+        "nextdns_log_settings_unknown": (
+            "The source logging setting is unknown",
+            "The profile did not explicitly report whether logging is enabled. Any successful log read describes only the requested window."),
+    },
+    validate=validate, collect=collect_nextdns, classify=classify,
+    allow_domain=actions.nextdns_allow, disallow_domain=actions.nextdns_disallow,
+)

@@ -8,7 +8,8 @@ import type { EvidenceKind, Graph, Relationship, Resource } from '../types';
  * including ones it marked inferred.
  */
 
-export type MapView = 'all' | 'unifi_network' | 'proxmox' | 'nextdns';
+/** `all`, or the id of one kind of source to narrow the map to. */
+export type MapView = string;
 
 export const BANDS = [
   { id: 'dns', name: 'DNS', kinds: ['dns_profile'] },
@@ -81,7 +82,7 @@ export interface MapLayout {
 }
 
 const vlanOf = (network: Resource) => {
-  const value = network.attributes.vlanId ?? network.attributes.vlan;
+  const value = network.attributes.vlan;
   return typeof value === 'number' ? value : null;
 };
 

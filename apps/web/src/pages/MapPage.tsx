@@ -2,20 +2,29 @@ import { useEffect, useMemo, useState } from 'react';
 import { Minus, Plus, X } from 'lucide-react';
 import { label, useApi } from '../api';
 import NetworkMap from '../components/NetworkMap';
-import { Empty, ErrorState, Evidence, KV, Loading, Seg, SourceTag } from '../components/ui';
+import {
+  Empty,
+  ErrorState,
+  Evidence,
+  KV,
+  Loading,
+  Seg,
+  SourceTag,
+  sourceOf,
+} from '../components/ui';
 import type { MapView } from '../lib/map-layout';
 import type { Finding, Graph, Resource } from '../types';
 
 /** Attributes worth showing in the inspector, with plain names. Everything else stays in Queries. */
 const FACTS: [string, string][] = [
-  ['ipAddress', 'Address'],
-  ['macAddress', 'Hardware address'],
-  ['vlanId', 'VLAN'],
+  ['ip', 'Address'],
+  ['mac', 'Hardware address'],
+  ['vlan', 'VLAN'],
   ['subnet', 'Subnet'],
   ['model', 'Model'],
   ['type', 'Type'],
   ['status', 'Status'],
-  ['vmid', 'ID in Proxmox'],
+  ['vmid', 'Workload ID'],
   ['node', 'Runs on'],
   ['cidr', 'Address'],
   ['action', 'Action'],
@@ -44,14 +53,16 @@ function facts(resource: Resource): [string, string][] {
         )
         .join('; '),
     ]);
-  if (a.access_type === 'GUEST')
-    rows.push(['Guest Wi-Fi', a.guest_authorized ? 'Has access' : 'No access']);
+  const guest = a.guest as { authorized?: boolean } | undefined;
+  if (guest && typeof guest === 'object')
+    rows.push(['Guest Wi-Fi', guest.authorized ? 'Has access' : 'No access']);
   return rows;
 }
 
 /**
- * The map and its inspector. Views narrow the map to one source so an administrator can
- * start on the UniFi side, pick a host, and follow it into Proxmox.
+ * The map and its inspector. Views narrow the map to one kind of source, built from whatever
+ * sources reported something, so an administrator can start on the network side, pick a host,
+ * and follow it into the source that runs it.
  */
 export default function MapPage({ params }: { params: URLSearchParams }) {
   const graph = useApi<Graph>('/graph');
@@ -93,8 +104,14 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
       )
     : [];
   const twin = links.find((edge) => edge.kind === 'same_device');
+  const twinProvider =
+    (twin && byId.get(twin.source === node?.id ? twin.target : twin.source)?.provider) || '';
   const count = (provider: string) =>
     data.nodes.filter((item) => item.provider === provider).length;
+  // One view per kind of source that reported something, in a stable order.
+  const kinds = [...new Set(data.nodes.map((item) => item.provider))]
+    .filter((kind) => kind && kind !== 'demo')
+    .sort((a, b) => sourceOf(a).name.localeCompare(sourceOf(b).name));
   return (
     <div className="page map-page">
       <div className="bar">
@@ -104,9 +121,7 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
           onChange={setView}
           options={[
             { id: 'all', name: 'Everything' },
-            { id: 'unifi_network', name: 'UniFi side', count: count('unifi_network') },
-            { id: 'proxmox', name: 'Proxmox side', count: count('proxmox') },
-            { id: 'nextdns', name: 'DNS side', count: count('nextdns') },
+            ...kinds.map((kind) => ({ id: kind, name: sourceOf(kind).name, count: count(kind) })),
           ]}
         />
         <div className="legend">
@@ -191,13 +206,11 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
                   className="button secondary small"
                   onClick={() => {
                     const other = twin.source === node.id ? twin.target : twin.source;
-                    setView(byId.get(other)?.provider === 'proxmox' ? 'proxmox' : 'unifi_network');
+                    setView(byId.get(other)?.provider || 'all');
                     setSelected(other);
                   }}
                 >
-                  {node.provider === 'proxmox'
-                    ? 'Show it on the UniFi side'
-                    : 'Follow it into Proxmox'}
+                  Show it in {sourceOf(twinProvider).name}
                 </button>
               )}
               {links.length > 0 && (

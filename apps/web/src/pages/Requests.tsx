@@ -87,7 +87,8 @@ export default function Requests({
   };
   if (requests.loading) return <Loading text="Loading requests…" />;
   if (requests.error) return <ErrorState message={requests.error} retry={requests.reload} />;
-  const writes = rules.data?.writes.nextdns;
+  // The connected source this request's block came from, with whether Nyctr may open addresses there.
+  const source = rules.data?.sources.find((item) => item.id === row?.integration_id);
   return (
     <div className="page">
       <header className="page-head">
@@ -176,16 +177,23 @@ export default function Requests({
                     <div className="note yellow">
                       <div>
                         <b>This opens it for everyone on the DNS profile.</b>
-                        <p>NextDNS allows an address per profile, not per person or device.</p>
+                        <p>
+                          A DNS exception applies to everyone using{' '}
+                          {source?.name || 'the DNS source'}, not to one person or device.
+                        </p>
                       </div>
                     </div>
-                    {writes === 'disabled' && (
+                    {(source?.write_mode === 'disabled' || source?.write_mode === 'none') && (
                       <div className="note">
                         <div>
-                          <b>Nyctr is read-only for NextDNS.</b>
+                          <b>
+                            {source.write_mode === 'none'
+                              ? `Nyctr cannot open addresses at ${source.name}.`
+                              : `Nyctr is read-only for ${source.name}.`}
+                          </b>
                           <p>
-                            Approving records your decision and the time window. You add the address
-                            to the allowlist yourself.
+                            Approving records your decision and the time window. You open the
+                            address at the source yourself.
                           </p>
                         </div>
                       </div>

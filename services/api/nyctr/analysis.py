@@ -9,29 +9,31 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from .integrations import registry
 from .models import Finding, GuestAction, Lease, Resource, utc
 
 
-def _proxmox_firewall(resources: list[Resource]) -> list[dict]:
-    """A guest whose firewall is switched off at the guest or on every network card."""
+def _workload_firewall(resources: list[Resource]) -> list[dict]:
+    """A hosted workload whose firewall is switched off for the workload or on every network card."""
     found = []
     for row in resources:
-        if row.provider != "proxmox" or row.kind != "workload":
+        if row.kind != "workload":
             continue
         nics = [n for n in row.attributes.get("nics") or [] if isinstance(n, dict)]
         guest_off = row.attributes.get("firewall_enabled") is False
         nics_off = bool(nics) and all(n.get("firewall") is False for n in nics)
         if not (guest_off or nics_off):
             continue
-        where = "for the whole guest" if guest_off else "on its network card" + ("s" if len(nics) != 1 else "")
+        source = registry.name_of(row.provider, "The source")
+        where = "for the whole workload" if guest_off else "on its network card" + ("s" if len(nics) != 1 else "")
         found.append({
-            "id": f"auto:pve-firewall:{row.id}"[:128], "severity": "medium",
+            "id": f"auto:workload-firewall:{row.id}"[:128], "severity": "medium",
             "title": f"Firewall is off on {row.name}",
-            "summary": f"Proxmox reports the firewall switched off {where}. Anything that can reach this "
-                       "guest's network can reach every port it listens on. This is a configuration fact, "
+            "summary": f"{source} reports the firewall switched off {where}. Anything that can reach this "
+                       "workload's network can reach every port it listens on. This is a configuration fact, "
                        "not evidence that something connected.",
             "resource_ids": [row.id],
-            "evidence": [f"Configured in Proxmox: firewall off {where}.",
+            "evidence": [f"Configured in {source}: firewall off {where}.",
                          "Firewall rules and upstream filtering were not read."],
         })
     return found
@@ -44,7 +46,8 @@ def _dns_logging(resources: list[Resource]) -> list[dict]:
         "title": f"DNS logging is off for {row.name}",
         "summary": "With logging off Nyctr sees no blocked lookups from this profile. People will not find "
                    "their blocks here, and guest activity cannot be assessed.",
-        "resource_ids": [row.id], "evidence": ["Configured in NextDNS: logs disabled."],
+        "resource_ids": [row.id],
+        "evidence": [f"Configured in {registry.name_of(row.provider, 'the source')}: logs disabled."],
     } for row in resources if row.kind == "dns_profile" and row.attributes.get("logs_enabled") is False]
 
 
@@ -57,6 +60,7 @@ def _guest_events(db) -> list[dict]:
     for device_id, action in latest.items():
         device = db.get(Resource, device_id)
         name = device.name if device else "A guest device"
+        source = registry.name_of(device.provider if device else None, "the network source")
         when = utc(action.created_at).strftime("%H:%M UTC")
         if action.action in {"cut", "lock"} and action.execution in {"applied", "simulated"}:
             who = "the cut-off rule" if action.actor == "rule" else "an administrator"
@@ -74,8 +78,8 @@ def _guest_events(db) -> list[dict]:
                 "id": f"auto:guest-unenforced:{device_id}"[:128], "severity": "high",
                 "title": f"{name} matched the cut-off rule but is still online",
                 "summary": "The rule matched, but Nyctr " + (
-                    "is read-only for UniFi" if action.execution == "not_applied" else "was refused by UniFi")
-                           + ". Cut this device off in UniFi if you agree.",
+                    f"is read-only for {source}" if action.execution == "not_applied"
+                    else f"was refused by {source}") + f". Cut this device off in {source} if you agree.",
                 "resource_ids": [device_id], "evidence": [f"Observed: {action.reason}."],
             })
     return found
@@ -100,7 +104,7 @@ def refresh_findings(db) -> None:
     """
     resources = list(db.scalars(select(Resource)))
     current = {item["id"]: item for item in
-               _proxmox_firewall(resources) + _dns_logging(resources) + _guest_events(db) + _stuck_leases(db)}
+               _workload_firewall(resources) + _dns_logging(resources) + _guest_events(db) + _stuck_leases(db)}
     existing = {row.id: row for row in db.scalars(select(Finding).where(Finding.id.like("auto:%")))}
     for id_, item in current.items():
         row = existing.get(id_)

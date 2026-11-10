@@ -27,12 +27,18 @@
   --yellow-bg: rgba(242, 195, 85, 0.12);
   --green: #4ade9a;
   --green-bg: rgba(74, 222, 154, 0.11);
-  --s-unifi: #6aa5ff;
-  --s-unifi-bg: rgba(106, 165, 255, 0.14);
-  --s-pve: #f5a35a;
-  --s-pve-bg: rgba(245, 163, 90, 0.14);
-  --s-dns: #3dd6c4;
-  --s-dns-bg: rgba(61, 214, 196, 0.13);
+  --t-blue: #6aa5ff;
+  --t-blue-bg: rgba(106, 165, 255, 0.14);
+  --t-orange: #f5a35a;
+  --t-orange-bg: rgba(245, 163, 90, 0.14);
+  --t-teal: #3dd6c4;
+  --t-teal-bg: rgba(61, 214, 196, 0.13);
+  --t-rose: #f08aa6;
+  --t-rose-bg: rgba(240, 138, 166, 0.14);
+  --t-violet: #a99bff;
+  --t-violet-bg: rgba(169, 155, 255, 0.14);
+  --t-grey: #9aa3b5;
+  --t-grey-bg: rgba(154, 163, 181, 0.14);
   --hatch: rgba(255, 255, 255, 0.15);
   --focus: #8fb6ff;
   --hi: inset 0 1px 0 rgba(255, 255, 255, 0.045);
@@ -347,19 +353,31 @@ h3 {
   line-height: 1;
   flex: none;
 }
-.src.s-unifi {
-  background: var(--s-unifi-bg);
-  color: var(--s-unifi);
+.src.t-blue {
+  background: var(--t-blue-bg);
+  color: var(--t-blue);
 }
-.src.s-pve {
-  background: var(--s-pve-bg);
-  color: var(--s-pve);
+.src.t-orange {
+  background: var(--t-orange-bg);
+  color: var(--t-orange);
 }
-.src.s-dns {
-  background: var(--s-dns-bg);
-  color: var(--s-dns);
+.src.t-teal {
+  background: var(--t-teal-bg);
+  color: var(--t-teal);
 }
-.src.s-nyctr {
+.src.t-rose {
+  background: var(--t-rose-bg);
+  color: var(--t-rose);
+}
+.src.t-violet {
+  background: var(--t-violet-bg);
+  color: var(--t-violet);
+}
+.src.t-grey {
+  background: var(--t-grey-bg);
+  color: var(--t-grey);
+}
+.src.t-nyctr {
   background: var(--accent-bg);
   color: var(--link);
 }
@@ -744,6 +762,7 @@ input[type='email'],
 input[type='password'],
 input[type='number'],
 input[type='search'],
+input[type='url'],
 input:not([type]) {
   width: 100%;
   padding: 9px 12px;

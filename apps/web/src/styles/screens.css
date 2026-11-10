@@ -303,7 +303,7 @@ button.row.on {
   font-weight: 600;
 }
 .gql-field code span {
-  color: var(--s-dns);
+  color: var(--t-teal);
 }
 .gql-field p {
   margin-top: 2px;
@@ -417,14 +417,23 @@ textarea.gql-editor:focus {
 .map .node .stripe {
   fill: var(--fg3);
 }
-.map .node.s-unifi .stripe {
-  fill: var(--s-unifi);
+.map .node.t-blue .stripe {
+  fill: var(--t-blue);
 }
-.map .node.s-pve .stripe {
-  fill: var(--s-pve);
+.map .node.t-orange .stripe {
+  fill: var(--t-orange);
 }
-.map .node.s-dns .stripe {
-  fill: var(--s-dns);
+.map .node.t-teal .stripe {
+  fill: var(--t-teal);
+}
+.map .node.t-rose .stripe {
+  fill: var(--t-rose);
+}
+.map .node.t-violet .stripe {
+  fill: var(--t-violet);
+}
+.map .node.t-grey .stripe {
+  fill: var(--t-grey);
 }
 .map .node .name {
   fill: var(--fg);
@@ -638,9 +647,47 @@ button.text-link {
 .small-text {
   font-size: 12.5px;
 }
+.integration-footer .text-link {
+  flex: none;
+  white-space: nowrap;
+}
+/* What each integration adds: features down the side, integrations across the top. */
+.capability-table tbody th {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 500;
+  color: var(--fg);
+}
+.capability-table tbody th .d {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg3);
+}
+.capability-table thead th + th,
+.capability-table td {
+  width: 132px;
+  text-align: center;
+}
+.capability-table td.yes {
+  color: var(--green);
+}
+.capability-table td.no {
+  color: var(--fg4, var(--fg3));
+  opacity: 0.55;
+}
+.capability-table tbody tr:last-child th,
+.capability-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.capability-table .srcn {
+  justify-content: center;
+}
 .main > .content > .page-head,
 .content > .collection-banner,
 .content > .section-heading,
+.content > .capability-card,
 .content > .integration-grid,
 .content > .notice,
 .content > .inline-error,

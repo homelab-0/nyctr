@@ -48,18 +48,20 @@ function CopyCode({ code }: { code: string }) {
 }
 
 /**
- * States the sign-in design where the administrator works: UniFi serves the page, Nyctr is
- * not reachable from the guest network, and data comes back by Nyctr reading UniFi.
+ * States the sign-in design where the administrator works: the network source serves the
+ * page, Nyctr is not reachable from the guest network, and data comes back by Nyctr reading
+ * that source. The source is named from what is connected, never assumed.
  */
 function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
   const [copied, setCopied] = useState(false);
   const gated = portal.wifi.filter((item) => item.captive_portal);
+  const net = portal.served_by.join(' and ') || 'Your network system';
   return (
-    <Panel title="How guests get on" hint="UniFi shows the sign-in page. Nyctr never does.">
+    <Panel title="How guests get on" hint={`${net} shows the sign-in page. Nyctr never does.`}>
       <div className="stack">
         <ol className="flow">
           <li>
-            <b>The guest joins the guest Wi-Fi.</b> UniFi holds the device and shows its own sign-in
+            <b>The guest joins the guest Wi-Fi.</b> {net} holds the device and shows its own sign-in
             page.
           </li>
           <li>
@@ -67,9 +69,9 @@ function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
             screen.
           </li>
           <li>
-            <b>Nyctr reads UniFi</b> to see who is on, where, and what was blocked.{' '}
+            <b>Nyctr reads {net}</b> to see who is on, where, and what was blocked.{' '}
             {portal.nudge
-              ? 'UniFi also tells Nyctr to look straight away.'
+              ? 'The network also tells Nyctr to look straight away.'
               : 'It looks at each collection.'}
           </li>
         </ol>
@@ -83,9 +85,9 @@ function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
           </div>
         </div>
         <div>
-          <h3>Wi-Fi names UniFi reported</h3>
+          <h3>Wi-Fi names reported</h3>
           {portal.wifi.length === 0 ? (
-            <p className="aside">Not collected yet. Collect from UniFi to check.</p>
+            <p className="aside">Not collected yet. Collect from your network source to check.</p>
           ) : (
             <ul className="wifi">
               {portal.wifi.map((item) => (
@@ -103,8 +105,8 @@ function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
           )}
           {portal.wifi.length > 0 && gated.length === 0 && (
             <p className="aside">
-              No Wi-Fi name uses UniFi's sign-in page, so passes and the cut-off have nothing to act
-              on. Turn on Hotspot with vouchers for your guest Wi-Fi in UniFi.
+              No Wi-Fi name sits behind a sign-in page, so passes and the cut-off have nothing to
+              act on. Turn on the guest sign-in page with passes for your guest Wi-Fi at the source.
             </p>
           )}
         </div>
@@ -124,8 +126,8 @@ function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
             </button>
           </div>
           <p className="aside">
-            Nyctr cannot edit UniFi's page. Paste this into its terms box so guests know what is
-            recorded.
+            Nyctr does not edit the sign-in page. Paste this into its terms box so guests know what
+            is recorded.
           </p>
           <blockquote className="quote">{portal.notice}</blockquote>
         </div>
@@ -201,6 +203,7 @@ export default function Guests({
       }),
     );
   const live = data.passes.filter((pass) => pass.state !== 'ended');
+  const source = data.sources.map((item) => item.name).join(' and ') || 'your network source';
   return (
     <div className="page">
       <header className="page-head">
@@ -210,18 +213,18 @@ export default function Guests({
             {data.devices.length
               ? `${plural(data.devices.length, 'guest device')} seen, ${plural(live.length, 'pass', 'passes')} live.`
               : 'No guest devices are connected.'}{' '}
-            Guests sign in on the page your UniFi console shows. Nyctr stays out of their path and
-            reads who is on from UniFi.
+            Guests sign in on the page your network shows. Nyctr stays out of their path and reads
+            who is on from {source}.
           </p>
         </div>
       </header>
       {readOnly && (
         <div className="note yellow">
           <div>
-            <b>Nyctr is read-only for UniFi.</b>
+            <b>Nyctr is read-only for {source}.</b>
             <p>
               You can watch guests here. Issuing passes and cutting devices off needs an operator to
-              add unifi_network to NYCTR_PROVIDER_WRITES.
+              allow changes to it in NYCTR_PROVIDER_WRITES.
             </p>
           </div>
         </div>
@@ -476,11 +479,11 @@ export default function Guests({
                             ? 'Nothing yet. It is on the sign-in page.'
                             : 'A pass, which one is not known',
                     ],
-                    ['Data used', bytes(device.authorization?.usage?.bytes)],
+                    ['Data used', bytes(device.authorization?.bytes ?? undefined)],
                     [
                       'Pass ends',
-                      device.authorization?.expiresAt
-                        ? left(device.authorization.expiresAt, now) || 'Ended'
+                      device.authorization?.expires_at
+                        ? left(device.authorization.expires_at, now) || 'Ended'
                         : 'Not known',
                     ],
                     ['Hardware address', <span className="mono">{device.mac || 'Unknown'}</span>],
@@ -589,8 +592,8 @@ export default function Guests({
                       Give them this code: <CopyCode code={issued.code} />. They join the guest
                       Wi-Fi and type it into the sign-in page that appears.{' '}
                       {issued.execution === 'simulated'
-                        ? 'Simulated: demo mode does not create it in UniFi.'
-                        : 'Created in UniFi.'}{' '}
+                        ? 'Simulated: demo mode does not create it at the source.'
+                        : `Created in ${source}.`}{' '}
                       Issued {ago(issued.created_at, now)}.
                     </p>
                   </div>

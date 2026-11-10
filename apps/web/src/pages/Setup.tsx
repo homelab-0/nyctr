@@ -19,6 +19,7 @@ import type {
   Person,
   Resource,
   Rules,
+  WriteMode,
 } from '../types';
 
 type Tab = 'rule' | 'people' | 'system';
@@ -40,7 +41,8 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
       setRule(rules.access);
     }
   };
-  const writes = rules.writes.nextdns;
+  const writes = rules.writes.access;
+  const openers = rules.sources.filter((source) => source.changes.length > 0);
   return (
     <Panel
       title="Access rule"
@@ -91,25 +93,39 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             onChange={(enabled) => void save({ ...rule, enabled })}
           />
           <span className="aside">
-            Security blocks, household rules, addresses you said no to before and anything Nyctr
+            Security blocks, content rules, addresses you said no to before and anything Nyctr
             cannot score always wait for a person.
           </span>
         </div>
         <InlineError message={error} />
+        {writes === 'none' && (
+          <div className="note yellow">
+            <div>
+              <b>
+                No connected source can open a blocked address, so this rule has nothing to act on.
+              </b>
+              <p>
+                Requests are still scored and shown. Connect a DNS source whose integration offers
+                opening addresses; the Sources page lists what each one adds.
+              </p>
+            </div>
+          </div>
+        )}
         {writes === 'disabled' && (
           <div className="note yellow">
             <div>
-              <b>Nyctr is read-only for NextDNS, so this rule cannot open anything yet.</b>
+              <b>Nyctr is read-only for your DNS source, so this rule cannot open anything yet.</b>
               <p>
-                Requests are still scored and shown. To let the rule act, an operator adds nextdns
-                to NYCTR_PROVIDER_WRITES on the server.
+                Requests are still scored and shown. To let the rule act, an operator names the
+                source's integration ({openers.map((source) => source.provider).join(', ')}) in
+                NYCTR_PROVIDER_WRITES on the server.
               </p>
             </div>
           </div>
         )}
         {writes === 'simulated' && (
           <p className="aside">
-            Demo mode: the rule runs for real, and the NextDNS change is simulated.
+            Demo mode: the rule runs for real, and the change at the DNS source is simulated.
           </p>
         )}
       </div>
@@ -135,8 +151,10 @@ function PeoplePanel() {
   };
   if (devices.loading || people.loading) return <Loading text="Loading devices…" />;
   if (devices.error) return <ErrorState message={devices.error} retry={devices.reload} />;
+  // DNS labels are names a DNS source reported, not devices; guests are handled on their own page.
+  const labelIds = new Set((labels.data || []).map((item) => item.source_id));
   const inventory = (devices.data || []).filter(
-    (row) => row.provider !== 'nextdns' && row.attributes.access_type !== 'GUEST',
+    (row) => !labelIds.has(row.id) && !row.attributes.guest,
   );
   const members = (people.data || []).filter((person) => person.active);
   const value = (row: Resource) =>
@@ -178,7 +196,7 @@ function PeoplePanel() {
                         <Icon size={15} /> {row.name}
                       </span>
                     </th>
-                    <td className="muted mono">{String(row.attributes.ipAddress || '')}</td>
+                    <td className="muted mono">{String(row.attributes.ip || '')}</td>
                     <td>
                       <select
                         aria-label={`Who ${row.name} belongs to`}
@@ -204,7 +222,7 @@ function PeoplePanel() {
       </Panel>
       <Panel
         title="DNS device labels"
-        hint="NextDNS reports a device name it was told. Say which inventory device each one is. A link only applies to lookups made after you set it."
+        hint="A DNS source reports a device name it was told. Say which inventory device each one is. A link only applies to lookups made after you set it."
         flush
       >
         {(labels.data || []).length === 0 ? (
@@ -274,8 +292,13 @@ function SystemPanel({ rules }: { rules: Rules }) {
         .join(' and ') || 'Unknown',
       'NYCTR_OIDC_ISSUER, NYCTR_LOCAL_LOGIN_ENABLED',
     ],
-    ['Changes to NextDNS', writeText(rules.writes.nextdns), 'NYCTR_PROVIDER_WRITES'],
-    ['Changes to UniFi', writeText(rules.writes.unifi_network), 'NYCTR_PROVIDER_WRITES'],
+    ...rules.sources
+      .filter((source) => source.write_mode !== 'none')
+      .map((source): [string, string, string] => [
+        `Changes to ${source.name}`,
+        writeText(source.write_mode as WriteMode),
+        'NYCTR_PROVIDER_WRITES',
+      ]),
     [
       'Automatic collection',
       rules.collect_interval_seconds

@@ -80,7 +80,7 @@ def seed_live_member(app, *, reason="HaGeZi Multi PRO++", codes=("blocklist:hage
         db.add(Resource(id="unifi:client:laptop", integration_id="unifi", name="Sam's laptop", kind="client",
                         provider="unifi_network", source_id="laptop", site_id=None, observed_at=now,
                         evidence_kind="observed", classification="personal", owner_id="sam",
-                        attributes={"ipAddress": "10.0.0.9"}))
+                        attributes={"ip": "10.0.0.9"}))
         db.flush()
         db.add(DeviceGrant(device_id="unifi:client:laptop", user_id="sam", valid_from=now - timedelta(days=1)))
         db.add(Observation(id="dns:block:one", integration_id="dns", device_id="unifi:client:laptop",

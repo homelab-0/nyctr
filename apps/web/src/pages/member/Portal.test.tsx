@@ -160,7 +160,7 @@ describe('member portal', () => {
               },
             ],
             risk_explanation:
-              'Nyctr could not tell why this was blocked, so a person will look at it.',
+              'Nyctr could not tell how risky this is, so a person will look at it.',
           }),
         ],
       },
@@ -209,7 +209,7 @@ describe('member portal', () => {
             risk_score: 72,
             decided_by: null,
             decision_note:
-              'This was blocked for safety or by a household rule, so a person decides.',
+              "This was blocked for safety or by an administrator's rule, so a person decides.",
           }),
         ],
       },
@@ -218,7 +218,7 @@ describe('member portal', () => {
     expect(
       await screen.findByRole('heading', { name: 'A person needs to look at this.' }),
     ).toBeDefined();
-    expect(screen.getByText(/blocked for safety or by a household rule/)).toBeDefined();
+    expect(screen.getByText(/blocked for safety or by an administrator's rule/)).toBeDefined();
     expect(screen.getByText('72')).toBeDefined();
   });
 

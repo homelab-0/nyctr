@@ -7,6 +7,10 @@ deleting one trusts the accepted request; collection mirrors the list afterwards
 Callers decide whether an action is allowed; this module refuses to run unless
 the caller passes the operator's explicit write permission for the provider.
 
+The core never imports these by name. Each provider lists the actions it
+supports in its `PROVIDER` declaration (see `registry.py`), and a feature calls
+whatever the source of the evidence declares.
+
 Contracts:
 - UniFi Network integration API 11.0.97: hotspot vouchers and the two guest
   client actions, AUTHORIZE_GUEST_ACCESS and UNAUTHORIZE_GUEST_ACCESS.
@@ -107,12 +111,14 @@ async def nextdns_disallow(config: dict[str, Any], api_key: str, domain: str, *,
 
 
 def _voucher(row: dict[str, Any]) -> dict[str, Any]:
-    """Keep the documented voucher fields Nyctr uses and require the ones it depends on."""
+    """Turn one documented UniFi voucher into the neutral guest-pass shape the core stores."""
     if not isinstance(row.get("id"), str) or not isinstance(row.get("code"), str):
         raise IntegrationError("UniFi returned an invalid voucher.")
-    return core.selected(row, ("id", "code", "name", "createdAt", "activatedAt", "expiresAt", "expired",
-                               "timeLimitMinutes", "authorizedGuestLimit", "authorizedGuestCount",
-                               "dataUsageLimitMBytes"))
+    return {"id": row["id"], "code": row["code"], "name": row.get("name"),
+            "minutes": row.get("timeLimitMinutes"), "guest_limit": row.get("authorizedGuestLimit"),
+            "data_limit_mb": row.get("dataUsageLimitMBytes"), "guest_count": row.get("authorizedGuestCount"),
+            "created_at": row.get("createdAt"), "activated_at": row.get("activatedAt"),
+            "expires_at": row.get("expiresAt"), "expired": row.get("expired") is True}
 
 
 async def unifi_create_voucher(config: dict[str, Any], api_key: str, site: str, *, name: str, minutes: int,
@@ -173,3 +179,12 @@ async def unifi_guest_action(config: dict[str, Any], api_key: str, site: str, cl
         raise IntegrationError("UniFi accepted the request but the device's access did not change.")
     return {"authorized": authorized if isinstance(authorized, bool) else None,
             "verified": isinstance(authorized, bool)}
+
+
+
+async def unifi_set_guest_access(config: dict[str, Any], api_key: str, site: str, client_id: str, allow: bool, *,
+                                 minutes: int | None = None, allowed: bool) -> dict[str, Any]:
+    """Let one guest client on, or take its access away. The neutral form the core calls."""
+    return await unifi_guest_action(config, api_key, site, client_id,
+                                    "AUTHORIZE_GUEST_ACCESS" if allow else "UNAUTHORIZE_GUEST_ACCESS",
+                                    minutes=minutes, allowed=allowed)

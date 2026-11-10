@@ -75,7 +75,7 @@ def test_member_sees_only_current_and_event_time_authorized_devices(client, memb
     assert {x["id"] for x in client.get("/api/devices").json()} == {"laptop-jamie", "tablet-family"}
     blocks = client.get("/api/blocks").json()
     assert {x["id"] for x in blocks} == {"block-gallery", "block-tablet", "block-fonts", "block-verify",
-                                         "block-stream"}
+                                         "block-stream", "block-print"}
     assert {x["device_id"] for x in blocks} == {"laptop-jamie", "tablet-family"}
 
 

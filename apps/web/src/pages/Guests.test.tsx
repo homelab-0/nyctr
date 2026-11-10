@@ -19,7 +19,7 @@ const overview = (writes: GuestOverview['writes']): GuestOverview => ({
   writes,
   rule: { enabled: true, hits: 3, minutes: 5 },
   portal: {
-    served_by: 'unifi',
+    served_by: ['UniFi Network'],
     nyctr_in_guest_path: false,
     wifi: [
       { name: 'Home', enabled: true, captive_portal: false, network: 'LAN' },
@@ -28,7 +28,15 @@ const overview = (writes: GuestOverview['writes']): GuestOverview => ({
     notice: 'This guest Wi-Fi is monitored for security.',
     nudge: false,
   },
-  sources: [{ id: 'unifi', name: 'UniFi' }],
+  sources: [
+    {
+      id: 'unifi',
+      name: 'Office network',
+      provider_name: 'UniFi Network',
+      passes: writes,
+      control: writes,
+    },
+  ],
   passes: [],
   not_collected: ['Connection attempts and port scans'],
   devices: [
@@ -36,6 +44,7 @@ const overview = (writes: GuestOverview['writes']): GuestOverview => ({
       id: 'g1',
       name: 'Visitor phone',
       integration_id: 'unifi',
+      source: 'UniFi Network',
       mac: 'de:ad:00:00:00:01',
       ip: null,
       connected_at: null,
@@ -79,9 +88,9 @@ afterEach(() => {
 });
 
 describe('guests', () => {
-  it('shows guests but disables every change while Nyctr is read-only for UniFi', async () => {
+  it('shows guests but disables every change while Nyctr is read-only for the source', async () => {
     open('disabled');
-    expect(await screen.findByText('Nyctr is read-only for UniFi.')).toBeDefined();
+    expect(await screen.findByText('Nyctr is read-only for Office network.')).toBeDefined();
     expect((screen.getByRole('button', { name: /Cut off/ }) as HTMLButtonElement).disabled).toBe(
       true,
     );
@@ -97,7 +106,7 @@ describe('guests', () => {
     expect(screen.queryByText(/Demo: make this device/)).toBeNull();
   });
 
-  it('says UniFi serves the sign-in page and lets a waiting device on for a chosen time', async () => {
+  it('says the network source serves the sign-in page and lets a waiting device on for a chosen time', async () => {
     const waiting = overview('enabled');
     waiting.devices[0] = { ...waiting.devices[0], state: 'waiting', authorized: false };
     const calls = mockApi({
@@ -117,7 +126,7 @@ describe('guests', () => {
       </AuthProvider>,
     );
     expect(
-      await screen.findByText('UniFi shows the sign-in page. Nyctr never does.'),
+      await screen.findByText('UniFi Network shows the sign-in page. Nyctr never does.'),
     ).toBeDefined();
     expect(screen.getByText('Guests never need to reach Nyctr.')).toBeDefined();
     expect(screen.getByText('Sign-in page on')).toBeDefined();

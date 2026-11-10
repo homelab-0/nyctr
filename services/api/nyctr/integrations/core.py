@@ -97,7 +97,10 @@ class Snapshot:
     relationships: list[dict[str, Any]] = field(default_factory=list)
     blocks: list[dict[str, Any]] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)
-    vouchers: list[dict[str, Any]] = field(default_factory=list)
+    # Guest passes as {id, code, name, minutes, guest_limit, data_limit_mb, guest_count, created_at,
+    # activated_at, expires_at, expired}. None means the source did not report passes this time,
+    # so stored passes are left alone; a list is the complete current set.
+    passes: list[dict[str, Any]] | None = None
 
 
 def utc_now() -> datetime:
@@ -246,35 +249,22 @@ def _validated_host(value: Any, label: str):
     return parsed, host
 
 
-def validate_unifi_url(value: Any) -> str:
-    """Require a documented HTTPS base path and an explicitly allowed console host."""
-    parsed, host = _validated_host(value, "UniFi")
-    path = parsed.path.rstrip("/")
-    local = path == "/proxy/network/integration"
-    cloud = bool(re.fullmatch(r"/v1/connector/consoles/[A-Za-z0-9:_-]+/proxy/network/integration", path))
-    if not local and not (host == "api.ui.com" and cloud):
-        raise IntegrationError("Use the documented UniFi Network integration base path.")
-    return value.rstrip("/")
+def validated_host(value: Any, label: str):
+    """Public name for the destination check every adapter must pass before a credential is sent."""
+    return _validated_host(value, label)
 
 
-def validate_proxmox_url(value: Any) -> str:
-    """Require an allowed Proxmox VE host and normalise the URL to its documented API root."""
-    parsed, _host = _validated_host(value, "Proxmox")
-    if parsed.path.rstrip("/") not in ("", "/api2/json"):
-        raise IntegrationError("Use the Proxmox host address, optionally ending in /api2/json.")
-    return f"https://{parsed.netloc}/api2/json"
-
-
-def make_http_client(api_key: str, *, authorization_scheme: str = "") -> httpx.AsyncClient:
+def make_http_client(api_key: str, *, authorization_scheme: str = "", send_key: bool = True) -> httpx.AsyncClient:
     """Create a verified-TLS client that never redirects or inherits proxy settings.
 
     Providers that expect an Authorization header pass its scheme; the default
-    sends the key as X-Api-Key.
+    sends the key as X-Api-Key. A provider that signs in for a session passes
+    `send_key=False` and sets its own session header once it has one.
     """
     if not isinstance(api_key, str) or not api_key or any(c in api_key for c in "\r\n"):
         raise IntegrationError("The configured API key is missing or invalid.", category="secret")
-    credential = ({"Authorization": f"{authorization_scheme}={api_key}"} if authorization_scheme
-                  else {"X-Api-Key": api_key})
+    credential = ({} if not send_key else {"Authorization": f"{authorization_scheme}={api_key}"}
+                  if authorization_scheme else {"X-Api-Key": api_key})
     ca_bundle = os.getenv("NYCTR_CONNECTOR_CA_BUNDLE")
     try:
         verify = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else True

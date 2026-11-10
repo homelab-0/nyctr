@@ -252,12 +252,12 @@ def _sample_answer(question: str, pack: dict[str, Any]) -> str:
                  for r in waiting]
         return (f"{len(waiting)} request{'s are' if len(waiting) != 1 else ' is'} waiting. " + ". ".join(parts)
                 + ". Each one shows why the access rule did not open it.")
-    if any(w in q for w in ("firewall", "workload", "proxmox", "vm", "container")):
+    if any(w in q for w in ("firewall", "workload", "hypervisor", "vm", "container")):
         hits = [f for f in pack["findings"] if "firewall" in f["title"].lower()]
         if not hits:
             return "No workload is reported with its firewall off. Firewall rules themselves are not read yet."
         return (" ".join(f"{f['title']} {cite(f)}." for f in hits)
-                + " These are configuration facts from Proxmox. They do not show that anything connected.")
+                + " These are configuration facts from the source. They do not show that anything connected.")
     if any(w in q for w in ("open", "lease", "exception", "allow")):
         if not open_now:
             return "Nothing is open right now."
@@ -281,8 +281,11 @@ def _sample_answer(question: str, pack: dict[str, Any]) -> str:
 def _sample_insight(finding: Finding) -> dict[str, Any]:
     """Build a demo insight from the finding's own evidence with fixed templates. Not a model."""
     steps = ["Open the linked items on the map and check what else shares their network."]
-    if "pve-firewall" in finding.id or "firewall" in finding.title.lower():
-        steps = ["Turn the firewall on for this guest in Proxmox.", "Collect again to confirm it shows as on."]
+    if "workload-firewall" in finding.id or "firewall" in finding.title.lower():
+        # The finding's evidence names its source ("Configured in <source>: ..."); reuse that name.
+        named = re.match(r"Configured in ([^:]{1,60}):", finding.evidence[0] if finding.evidence else "")
+        where = f"in {named.group(1)}" if named else "at its source"
+        steps = [f"Turn the firewall on for this workload {where}.", "Collect again to confirm it shows as on."]
     elif "guest-cut" in finding.id:
         steps = ["Open the device's timeline and look at what it looked up.",
                  "Let it back on if you recognise it, or lock it out."]

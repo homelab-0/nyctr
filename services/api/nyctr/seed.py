@@ -77,10 +77,13 @@ def seed_demo(db):
     for id_, name, provider, caps in [
         ("demo-unifi", "Milkyway UniFi Network", "unifi_network",
          ["sites:read", "devices:read", "clients:read", "networks:read", "firewall_policies:read",
-          "guest_access:read", "hotspot_vouchers:read"]),
+          "guest_access:read", "hotspot_vouchers:read", "wifi_broadcasts:read"]),
         ("demo-nextdns", "Home DNS on NextDNS", "nextdns", ["profile:read", "dns_policies:read", "blocked_dns_logs:read"]),
         ("demo-compute", "Compute cluster on Proxmox", "proxmox",
          ["nodes:read", "bridges:read", "guests:read", "guest_network:read", "firewall_options:read"]),
+        # A second DNS source of a different kind. Its integration reports blocks but cannot open
+        # them, so the same request flow behaves differently here by declaration alone.
+        ("demo-pihole", "Annex Pi-hole", "pihole", ["session:read", "blocked_dns_logs:read"]),
     ]:
         db.add(Integration(id=id_, name=name, provider=provider, status="demo", last_sync=now,
                            config={"demo": True}, capabilities=caps, secret_ref=""))
@@ -90,50 +93,50 @@ def seed_demo(db):
             {"name": "Milkyway", "enabled": True, "captive_portal": False, "network_id": "example-network-lan"},
             {"name": "Milkyway IoT", "enabled": True, "captive_portal": False, "network_id": "example-network-iot"},
             {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network_id": "example-network-guest"}]}),
-        ("gateway", "Milkyway gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "UDM SE", "ipAddress": "10.20.65.1"}),
+        ("gateway", "Milkyway gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "UDM SE", "ip": "10.20.65.1"}),
         ("switch-core", "Core aggregation", "switch", "demo-unifi", "infrastructure", None, {"model": "Aggregation switch", "ports": 8}),
         ("ap-basement", "Basement access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
-        ("network-lan", "Trusted LAN", "network", "demo-unifi", "infrastructure", None, {"vlanId": 65, "subnet": "10.20.65.0/24"}),
-        ("network-guest", "Guest network", "network", "demo-unifi", "infrastructure", None, {"vlanId": 80, "subnet": "10.20.80.0/24", "purpose": "guest"}),
-        ("network-iot", "IoT network", "network", "demo-unifi", "infrastructure", None, {"vlanId": 67, "subnet": "10.20.67.0/24"}),
-        ("laptop-jamie", "Jamie's MacBook", "client", "demo-unifi", "personal", "user-jamie", {"ipAddress": "10.20.65.42", "macAddress": "a4:83:e7:10:20:42", "platform": "macOS", "type": "WIRELESS"}),
-        ("tablet-family", "Family tablet", "client", "demo-unifi", "shared", None, {"ipAddress": "10.20.65.51", "macAddress": "f0:18:98:10:20:51", "platform": "iPadOS", "type": "WIRELESS"}),
-        ("workstation", "Alex's workstation", "client", "demo-unifi", "personal", "user-admin", {"ipAddress": "10.20.65.28", "macAddress": "3c:7c:3f:10:20:28", "platform": "Linux", "type": "WIRED"}),
-        ("washer", "Laundry appliance", "client", "demo-unifi", "infrastructure", None, {"ipAddress": "10.20.67.80", "macAddress": "00:1d:c9:10:20:80", "category": "IoT", "type": "WIRELESS"}),
-        ("old-laptop", "Reassigned laptop", "client", "demo-unifi", "personal", "user-admin", {"ipAddress": "10.20.65.62", "macAddress": "8c:85:90:10:20:62", "type": "WIRELESS"}),
+        ("network-lan", "Trusted LAN", "network", "demo-unifi", "infrastructure", None, {"vlan": 65, "subnet": "10.20.65.0/24"}),
+        ("network-guest", "Guest network", "network", "demo-unifi", "infrastructure", None, {"vlan": 80, "subnet": "10.20.80.0/24", "purpose": "guest"}),
+        ("network-iot", "IoT network", "network", "demo-unifi", "infrastructure", None, {"vlan": 67, "subnet": "10.20.67.0/24"}),
+        ("laptop-jamie", "Jamie's MacBook", "client", "demo-unifi", "personal", "user-jamie", {"ip": "10.20.65.42", "mac": "a4:83:e7:10:20:42", "platform": "macOS", "type": "WIRELESS"}),
+        ("tablet-family", "Family tablet", "client", "demo-unifi", "shared", None, {"ip": "10.20.65.51", "mac": "f0:18:98:10:20:51", "platform": "iPadOS", "type": "WIRELESS"}),
+        ("workstation", "Alex's workstation", "client", "demo-unifi", "personal", "user-admin", {"ip": "10.20.65.28", "mac": "3c:7c:3f:10:20:28", "platform": "Linux", "type": "WIRED"}),
+        ("washer", "Laundry appliance", "client", "demo-unifi", "infrastructure", None, {"ip": "10.20.67.80", "mac": "00:1d:c9:10:20:80", "category": "IoT", "type": "WIRELESS"}),
+        ("old-laptop", "Reassigned laptop", "client", "demo-unifi", "personal", "user-admin", {"ip": "10.20.65.62", "mac": "8c:85:90:10:20:62", "type": "WIRELESS"}),
         ("host-compute", "Compute-01", "host", "demo-compute", "infrastructure", None, {"status": "online", "addresses": ["10.20.66.3"], "cluster_firewall_enabled": True}),
         ("workload-photos", "Photo service", "workload", "demo-compute", "infrastructure", None, {"vmid": "101", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:11", "vlan": 66, "firewall": True}], "port": 443}),
         ("workload-management", "Management console", "workload", "demo-compute", "infrastructure", None, {"vmid": "102", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:12", "vlan": 66, "firewall": True}], "port": 8006}),
         ("policy-guest", "Guest → services", "policy", "demo-unifi", "infrastructure", None, {"action": "allow", "port": 8006, "review": "source scope too broad"}),
         ("dns-home", "Home DNS profile", "dns_profile", "demo-nextdns", "infrastructure", None, {"scope": "All devices using this profile", "logs_enabled": True}),
         # Added with the console MVP: a servers VLAN, a second access point, guests and Proxmox networking.
-        ("network-servers", "Servers", "network", "demo-unifi", "infrastructure", None, {"vlanId": 66, "subnet": "10.20.66.0/24"}),
+        ("network-servers", "Servers", "network", "demo-unifi", "infrastructure", None, {"vlan": 66, "subnet": "10.20.66.0/24"}),
         ("ap-upstairs", "Upstairs access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
-        ("client-compute", "compute-01", "client", "demo-unifi", "infrastructure", None, {"ipAddress": "10.20.66.3", "macAddress": "58:47:ca:10:66:03", "type": "WIRED"}),
+        ("client-compute", "compute-01", "client", "demo-unifi", "infrastructure", None, {"ip": "10.20.66.3", "mac": "58:47:ca:10:66:03", "type": "WIRED"}),
         ("guest-priya", "Priya's iPhone", "client", "demo-unifi", "unassigned", None, {
-            "ipAddress": "10.20.80.21", "macAddress": "de:ad:10:20:80:21", "type": "WIRELESS", "access_type": "GUEST",
-            "guest_authorized": True, "uplinkDeviceId": "example-ap-upstairs", "connectedAt": _iso(now, 95),
-            "guest_authorization": {"authorizationMethod": "VOUCHER", "authorizedAt": _iso(now, 94),
-                                    "expiresAt": _iso(now, -386), "usage": {"bytes": 412_000_000, "durationSec": 5640}}}),
+            "ip": "10.20.80.21", "mac": "de:ad:10:20:80:21", "type": "WIRELESS", "uplink": "example-ap-upstairs", "connected_at": _iso(now, 95),
+            "guest": {"authorized": True, "method": "pass", "authorized_at": _iso(now, 94),
+                      "expires_at": _iso(now, -386), "bytes": 412_000_000, "seconds": 5640}}),
         ("guest-hvac", "HVAC-Laptop", "client", "demo-unifi", "unassigned", None, {
-            "ipAddress": "10.20.80.34", "macAddress": "de:ad:10:20:80:34", "type": "WIRELESS", "access_type": "GUEST",
-            "guest_authorized": True, "uplinkDeviceId": "example-ap-basement", "connectedAt": _iso(now, 41),
-            "guest_authorization": {"authorizationMethod": "VOUCHER", "authorizedAt": _iso(now, 40),
-                                    "expiresAt": _iso(now, -200), "usage": {"bytes": 38_000_000, "durationSec": 2400}}}),
+            "ip": "10.20.80.34", "mac": "de:ad:10:20:80:34", "type": "WIRELESS", "uplink": "example-ap-basement", "connected_at": _iso(now, 41),
+            "guest": {"authorized": True, "method": "pass", "authorized_at": _iso(now, 40),
+                      "expires_at": _iso(now, -200), "bytes": 38_000_000, "seconds": 2400}}),
         ("guest-pixel", "Pixel 8", "client", "demo-unifi", "unassigned", None, {
-            "ipAddress": "10.20.80.47", "macAddress": "de:ad:10:20:80:47", "type": "WIRELESS", "access_type": "GUEST",
-            "guest_authorized": False, "uplinkDeviceId": "example-ap-basement", "connectedAt": _iso(now, 27),
-            "guest_authorization": {"authorizationMethod": "VOUCHER", "authorizedAt": _iso(now, 26),
-                                    "expiresAt": _iso(now, -94), "usage": {"bytes": 9_400_000, "durationSec": 1200}}}),
+            "ip": "10.20.80.47", "mac": "de:ad:10:20:80:47", "type": "WIRELESS", "uplink": "example-ap-basement", "connected_at": _iso(now, 27),
+            "guest": {"authorized": False, "method": "pass", "authorized_at": _iso(now, 26),
+                      "expires_at": _iso(now, -94), "bytes": 9_400_000, "seconds": 1200}}),
         ("guest-galaxy", "Galaxy-S24", "client", "demo-unifi", "unassigned", None, {
-            "ipAddress": "10.20.80.52", "macAddress": "de:ad:10:20:80:52", "type": "WIRELESS", "access_type": "GUEST",
-            "guest_authorized": False, "uplinkDeviceId": "example-ap-upstairs", "connectedAt": _iso(now, 3)}),
+            "ip": "10.20.80.52", "mac": "de:ad:10:20:80:52", "type": "WIRELESS", "uplink": "example-ap-upstairs", "connected_at": _iso(now, 3),
+            "guest": {"authorized": False}}),
         ("bridge-vmbr0", "vmbr0 on compute-01", "bridge", "demo-compute", "infrastructure", None, {"iface": "vmbr0", "node": "compute-01", "active": True, "vlan_aware": True, "ports": "enp3s0", "cidr": "10.20.66.3/24"}),
         ("workload-indexer", "Media indexer", "workload", "demo-compute", "infrastructure", None, {"vmid": "204", "type": "container", "node": "compute-01", "status": "running", "firewall_enabled": False, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:44", "vlan": 66, "firewall": False}]}),
         ("dns-label-jamie", "Jamies-MacBook-Pro", "client", "demo-nextdns", "unassigned", None, {"model": "MacBook Pro", "identity_verified": False}),
+        ("dns-workshop", "Annex resolver", "dns_profile", "demo-pihole", "infrastructure", None, {"scope": "entire_resolver"}),
+        ("dns-label-bench", "bench-pc", "client", "demo-pihole", "unassigned", None, {"ip": "10.20.67.90", "identity_verified": False}),
     ]
     for id_, name, kind, integration, classification, owner, attrs in resources:
-        provider = "nextdns" if integration == "demo-nextdns" else "proxmox" if integration == "demo-compute" else "unifi_network"
+        provider = {"demo-nextdns": "nextdns", "demo-compute": "proxmox",
+                    "demo-pihole": "pihole"}.get(integration, "unifi_network")
         db.add(Resource(id=id_, integration_id=integration, name=name, kind=kind, provider=provider,
                         source_id="example-" + id_, site_id="site-home", observed_at=now,
                         evidence_kind="configured" if kind in {"network", "policy", "dns_profile"} else "observed",
@@ -191,12 +194,16 @@ def seed_demo(db):
         ("block-pixel-3", "guest-pixel", "Pixel 8", "beacon.update-check.example", "Threat Intelligence Feeds", threat, 10),
         ("block-pixel-4", "guest-pixel", "Pixel 8", "ads.mobile-sdk.example", "HaGeZi Multi PRO++", privacy, 21),
         ("block-priya-1", "guest-priya", "Priya's iPhone", "metrics.social-app.example", "HaGeZi Multi PRO++", privacy, 44),
+        ("block-print", "laptop-jamie", "Jamie's MacBook", "cdn.printshop.example", "On a subscribed blocklist", ["gravity"], 15),
     ]
+    # Which source reported each block. Everything not listed came from the first DNS source.
+    reported_by = {"block-print": ("demo-pihole", "pihole")}
     for id_, device, name, domain, reason, codes, age in events:
         when = now - timedelta(minutes=age)
         guest = bool(device and device.startswith("guest-"))
-        db.add(Observation(id=id_, integration_id="demo-nextdns", device_id=device, device_name=name,
-                           domain=domain, source="nextdns", reason=reason, reason_codes=codes, observed_at=when,
+        integration, source = reported_by.get(id_, ("demo-nextdns", "nextdns"))
+        db.add(Observation(id=id_, integration_id=integration, device_id=device, device_name=name,
+                           domain=domain, source=source, reason=reason, reason_codes=codes, observed_at=when,
                            expires_at=when + timedelta(hours=24), evidence_kind="observed",
                            attribution="inferred" if guest else "assigned" if device else "unattributed",
                            risk_score=None,
@@ -232,8 +239,8 @@ def _seed_access_and_guests(db, now):
         requester_id="user-jamie", reason="Movie night, the kids want to watch the new series.",
         duration_minutes=120, status="pending", created_at=now - timedelta(minutes=47), risk_score=60,
         risk_category="policy", integration_id="demo-nextdns",
-        risk_factors=[{"label": "A household rule blocks this kind of site", "points": 60}],
-        decision_note="This was blocked for safety or by a household rule, so a person decides."))
+        risk_factors=[{"label": "A content rule set by an administrator blocks this kind of site", "points": 60}],
+        decision_note="This was blocked for safety or by an administrator's rule, so a person decides."))
     scope = "Everyone using Home DNS on NextDNS"
     for id_, domain, started, minutes, ended in [
         ("lease-news-1", "img.newsletter-cdn.example", 3 * 24 * 60, 60, True),

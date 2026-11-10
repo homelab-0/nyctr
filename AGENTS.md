@@ -3,7 +3,7 @@
 Read README.md, docs/architecture/overview.md, docs/security-model.md and
 docs/roadmap.md before changing architectural behavior. Preserve the Nyctr console
 design: near-black ground, layered panels, one blue accent, Geist type. Colour
-names the source (UniFi blue, Proxmox orange, NextDNS teal). Line style names the
+names the source (each integration declares its tone). Line style names the
 evidence (solid observed, dashed configured, dotted inferred). Hatching means
 unknown or not collected. Tokens live in `apps/web/src/styles/base.css`. Write
 interface text in plain words a non-technical member can read.
@@ -23,7 +23,15 @@ interface text in plain words a non-technical member can read.
 
 ## Product boundaries
 
-- Connector collection is GET-only. Provider changes exist only in
+- Nyctr is vendor neutral. Core modules (`services/api/nyctr/*.py`) and the web
+  app never name a vendor or branch on a provider id: a feature asks the registry
+  whether a source offers a capability and calls what that integration declared.
+  Vendor knowledge lives in `nyctr/integrations/<name>.py` (and the demo seed).
+  `tests/test_registry.py` fails if a vendor name appears elsewhere. Read
+  docs/integration-contract.md before adding or changing an integration, and
+  write adapters to the neutral attribute names listed there.
+- Connector collection is read only: GET requests, plus signing in and out of
+  its own session where a source offers nothing else (Pi-hole). Provider changes exist only in
   `nyctr/integrations/actions.py`, refuse to run unless the provider is named in
   `NYCTR_PROVIDER_WRITES`, and read back what they changed (voucher create and
   delete do not yet; say so wherever verification is claimed). Do not add a provider
@@ -49,7 +57,7 @@ interface text in plain words a non-technical member can read.
 - Temporary access uses owned durable leases, explicit scope, verification and
   reconciliation after failure or restart. Ending a lease must never remove a
   provider entry Nyctr did not create.
-- Guests sign in on UniFi's own captive portal. Nyctr never serves a page to a
+- Guests sign in on the network source's own captive portal. Nyctr never serves a page to a
   device that has not signed in and must not be made an external portal server;
   see docs/guest-wifi.md. Do not add an unauthenticated API route without
   changing the guard test on purpose.

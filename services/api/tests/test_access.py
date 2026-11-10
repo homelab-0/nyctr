@@ -216,12 +216,12 @@ def test_live_without_write_permission_never_claims_access(tmp_path):
         seed_live_member(app)
         admin_headers = live_signin(client)
         put_rule(client, admin_headers)
-        assert client.get("/api/rules").json()["writes"] == {"nextdns": "disabled", "unifi_network": "disabled"}
+        assert client.get("/api/rules").json()["writes"] == {"access": "disabled", "guests": "disabled"}
         member = live_signin(client, LIVE_MEMBER)
         row = client.post("/api/requests", headers=member,
                           json={"block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
         assert row["status"] == "pending" and row["risk_score"] == 16
-        assert "not allowed to change NextDNS" in row["decision_note"]
+        assert "not allowed to change Home DNS" in row["decision_note"]
         admin_headers = live_signin(client)
         client.post(f"/api/requests/{row['id']}/review", headers=admin_headers,
                     json={"decision": "approved", "note": "Fine by me"})
@@ -320,7 +320,7 @@ def test_a_provider_failure_while_opening_leaves_the_request_pending(tmp_path, m
     with TestClient(app) as client:
         seed_live_member(app)
         row, _admin = open_live(client, app)
-        assert row["status"] == "pending" and "could not change NextDNS" in row["decision_note"]
+        assert row["status"] == "pending" and "could not change Home DNS" in row["decision_note"]
         assert client.get("/api/leases").json() == []
 
 

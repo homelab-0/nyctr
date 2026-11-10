@@ -317,7 +317,7 @@ def test_guest_detail_reads_are_capped_for_the_whole_collection(monkeypatch):
     details = [c for c in calls if "/clients/" in c.url.path]
     assert len(details) == 40
     guests = [r for r in snapshot.resources if r["kind"] == "client"]
-    assert len(guests) == 90 and sum("guest_authorization" in g["attributes"] for g in guests) == 40
+    assert len(guests) == 90 and sum(g["attributes"]["guest"].get("method") == "pass" for g in guests) == 40
     assert len(calls) <= core.MAX_REQUESTS
 
 

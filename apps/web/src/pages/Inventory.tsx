@@ -27,11 +27,11 @@ type Group = keyof typeof GROUPS;
 /** A short, source-specific detail worth a column: an address, VLAN, model or firewall state. */
 function detail(row: Resource) {
   const a = row.attributes;
-  if (row.kind === 'network') return a.vlanId !== undefined ? `VLAN ${a.vlanId}` : '';
+  if (row.kind === 'network') return a.vlan !== undefined ? `VLAN ${a.vlan}` : '';
   if (row.kind === 'workload')
     return `${a.type || 'guest'} ${a.vmid ?? ''} · firewall ${a.firewall_enabled === false ? 'off' : a.firewall_enabled === true ? 'on' : 'unknown'}`;
-  if (row.kind === 'client' && a.access_type === 'GUEST') return 'Guest Wi-Fi';
-  return String(a.ipAddress || a.model || a.cidr || a.section || '');
+  if (row.kind === 'client' && a.guest) return 'Guest Wi-Fi';
+  return String(a.ip || a.model || a.cidr || a.section || '');
 }
 
 /** Everything your sources reported, in one searchable list. Each row opens on the map. */

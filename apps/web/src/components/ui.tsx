@@ -466,16 +466,35 @@ export function Factors({ items }: { items: { label: string; points: number | nu
     </ul>
   );
 }
-const SOURCES: Record<string, { letter: string; tone: string; name: string }> = {
-  unifi_network: { letter: 'U', tone: 's-unifi', name: 'UniFi' },
-  unifi_fabric: { letter: 'U', tone: 's-unifi', name: 'UniFi Site Manager' },
-  proxmox: { letter: 'P', tone: 's-pve', name: 'Proxmox' },
-  nextdns: { letter: 'D', tone: 's-dns', name: 'NextDNS' },
-  nyctr: { letter: 'N', tone: 's-nyctr', name: 'Nyctr' },
-};
-/** Describes a provider for chips, colours and plain names. */
-export const sourceOf = (provider: string) =>
-  SOURCES[provider] || { letter: '?', tone: '', name: label(provider) };
+interface SourceKind {
+  letter: string;
+  tone: string;
+  name: string;
+}
+const TONES = new Set(['blue', 'orange', 'teal', 'rose', 'violet', 'grey']);
+// Only Nyctr itself is known ahead of time. Every other kind of source is described by the
+// server's integration catalog, so a new integration needs no change here.
+const SOURCES = new Map<string, SourceKind>([
+  ['nyctr', { letter: 'N', tone: 't-nyctr', name: 'Nyctr' }],
+]);
+/** Teaches chips, colours and names about the integrations this server ships. */
+export function registerSources(
+  kinds: { id: string; name: string; letter: string; tone: string }[],
+) {
+  for (const kind of kinds)
+    SOURCES.set(kind.id, {
+      letter: kind.letter.slice(0, 1) || '?',
+      tone: `t-${TONES.has(kind.tone) ? kind.tone : 'grey'}`,
+      name: kind.name,
+    });
+}
+/** Describes a kind of source for chips, colours and plain names; unknown kinds stay readable. */
+export const sourceOf = (provider: string): SourceKind =>
+  SOURCES.get(provider) || {
+    letter: (label(provider)[0] || '?').toUpperCase(),
+    tone: 't-grey',
+    name: label(provider),
+  };
 /** A coloured letter chip naming where a fact came from, optionally with its name. */
 export function SourceTag({
   provider,

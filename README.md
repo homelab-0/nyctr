@@ -25,16 +25,21 @@ configuration permits, what traffic was actually observed, and what remains
 unknown. Interactive graphs connect those layers without treating a physical
 connection as proof of successful network access.
 
-Nyctr is designed for homelabs, small teams, and administrators managing mixed
-infrastructure. Integrations are adapters to a shared model. UniFi and NextDNS are
-the first targets; the architecture leaves room for hypervisor and cloud controls.
+Nyctr is its own product, not a front end for one vendor. Its features (the map,
+blocks and requests, temporary access, guest Wi-Fi) are written against
+capabilities such as "reports blocked lookups" or "can issue a guest pass". An
+integration declares which capabilities its source offers, and a feature works
+once a connected source offers it. UniFi Network, NextDNS, Proxmox VE and Pi-hole
+are the integrations in this build; adding another is one module and no change to
+the core or the console ([contract](docs/integration-contract.md)).
 
 > **Status: early alpha, unreleased.** Collection is read only. Nyctr can change a
-> provider in exactly three ways (add or remove a NextDNS allowlist entry, create
-> or delete a UniFi guest pass, authorise or unauthorise a UniFi guest device) and
-> only when an operator names that provider in `NYCTR_PROVIDER_WRITES`. It is off
-> by default. Nothing here has been run against real UniFi, NextDNS or Proxmox
-> systems; tests use synthetic provider responses. The capability table below
+> source in exactly three ways (open or close a DNS exception, issue or end a
+> guest pass, let a guest device on or take its access away), only at a source
+> whose integration offers it, and only when an operator names that integration in
+> `NYCTR_PROVIDER_WRITES`. It is off by default. Nothing here has been run against
+> real UniFi, NextDNS, Proxmox or Pi-hole systems; tests use synthetic provider
+> responses. The capability table below
 > separates what is implemented, simulated in demo, experimental and planned.
 
 ## Why Nyctr?
@@ -73,16 +78,18 @@ These screenshots show the running application with synthetic demonstration data
 | Area | In this build | Status | Next |
 | --- | --- | --- | --- |
 | Console | Briefing, map, inventory, findings, blocks, requests, open access, guests, sources, activity, setup | Implemented | Saved views, multiple workspaces |
-| Network map | Column per network, row per layer; per-source views; follow a UniFi device into Proxmox | Implemented; layout tested to a 40-device cell, not at enterprise scale | Temporal comparison, path simulation |
+| Integration contract | Each integration declares what it reads, which capabilities it adds and what it can change; the core and console hold no vendor names, enforced by tests | Implemented | Out-of-tree integrations, per-integration settings in the Helm chart |
+| Network map | Column per network, row per layer; one view per kind of source; follow a network device into the source that hosts it | Implemented; layout tested to a 40-device cell, not at enterprise scale | Temporal comparison, path simulation |
 | Identity | Local accounts, cookie sessions, administrator and member roles, optional OIDC | Implemented | Account administration, group policies |
 | Evidence | Resources, typed relationships and observations, each marked observed, configured or inferred | Implemented | Historical snapshots, drift |
-| Risk score | Rule-based score from the stored block reason and the shape of the name; unknown stays unknown | Implemented. It is not a reputation lookup | Background investigation with source links |
-| Access rule and leases | Administrator-written rule may open a low-risk privacy-list block; durable leases; expiry and restart reconciliation; suggestions for permanent exceptions | Implemented; simulated in demo; real NextDNS writes untested | Exact-plan approval binding, drift checks |
+| Risk score | Rule-based score from the stored block reason, explained by the source's own integration, and the shape of the name; unknown stays unknown | Implemented. It is not a reputation lookup | Background investigation with source links |
+| Access rule and leases | Administrator-written rule may open a low-risk privacy-list block at a source that offers it; durable leases; expiry and restart reconciliation; suggestions for permanent exceptions | Implemented; simulated in demo; real NextDNS writes untested | Exact-plan approval binding, drift checks |
 | Member portal | Blocks on the device in hand, score and factors, one request form, reconnect steps per device type | Implemented. Device recognition needs the member's LAN address to reach Nyctr | Push or email when a person decides |
-| Guest Wi-Fi | Guests sign in on UniFi's own portal; Nyctr issues passes, lets a waiting device on, shows who is on, access point history, data use and blocked lookups, and can cut off, restore or lock out, by hand or under a counted rule ([design](docs/guest-wifi.md)) | Implemented; simulated in demo; real UniFi writes untested | Firewall log receiver, UniFi-side block rule |
+| Guest Wi-Fi | Guests sign in on the network's own portal (UniFi today); Nyctr issues passes, lets a waiting device on, shows who is on, access point history, data use and blocked lookups, and can cut off, restore or lock out, by hand or under a counted rule ([design](docs/guest-wifi.md)) | Implemented; simulated in demo; real UniFi writes untested | Firewall log receiver, UniFi-side block rule |
 | UniFi Network | Read-only inventory, policies, guest access state and vouchers; diagnostics | Implemented against the 11.0.97 contract | Ports, event receiver, policy analysis |
 | NextDNS | Read-only profile and blocked lookups with reason codes; administrator device-label links | Implemented | Incremental collection |
 | Proxmox VE | Read-only nodes, bridges, guests, network cards and firewall switches | Experimental; never run against a cluster | Firewall rules, SDN |
+| Pi-hole | Read-only blocked lookups from a Pi-hole v6 resolver with its client labels. Reports blocks; does not open them, so its requests always wait for a person | Experimental; sign-in follows the published contract, query-log fields unverified against a live Pi-hole | Opening an address, list names |
 | Graph queries | Read-only GraphQL endpoint with length, depth and result limits; schema browser | Implemented | Saved queries, pagination |
 | Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint you configure | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
 | Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The Helm chart does not yet expose the new settings | Upgrade tooling |
@@ -148,8 +155,10 @@ credential value. For example, an administrator can reference
 `NYCTR_CONNECTOR_SECRET_UNIFI` when adding a UniFi integration. Explicitly allow
 the UniFi console's HTTPS hostname using `NYCTR_CONNECTOR_HOSTS`.
 
-Collection only sends GET requests. Changes are a separate code path that refuses
-to run unless the provider is named in `NYCTR_PROVIDER_WRITES`:
+Collection only reads. Changes are a separate code path that refuses to run
+unless the integration is named in `NYCTR_PROVIDER_WRITES`, and only integrations
+that can change their source are accepted there (today `nextdns` and
+`unifi_network`; the Sources page shows what each one could change):
 
 | Setting | Effect |
 | --- | --- |
@@ -206,7 +215,7 @@ server to try it.
 | Web application | React, TypeScript, Vite; SVG network map with a small deterministic layout |
 | API | Python, FastAPI; authentication, authorization and application workflows |
 | Persistence | SQLAlchemy; PostgreSQL for deployment, SQLite for isolated tests |
-| Adapters | Provider-specific collection behind a GET-only client; provider changes isolated in one gated module |
+| Integrations | One module per kind of source behind a declared contract: read-only collection, the capabilities it adds, and gated changes isolated in one module. The core and the console name no vendor |
 | Queries | graphql-core; read-only schema over stored evidence |
 | Distribution | Node build stage plus non-root Python runtime in one Docker image |
 

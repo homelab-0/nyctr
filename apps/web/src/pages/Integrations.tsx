@@ -1,21 +1,18 @@
 import { useState, type FormEvent } from 'react';
 import {
   ArrowRight,
-  Database,
-  Globe2,
+  Check,
   Layers2,
   LockKeyhole,
-  Network,
+  Minus,
   Plus,
   RefreshCw,
   ScanLine,
-  Server,
   Settings2,
-  Workflow,
 } from 'lucide-react';
 import { label, post, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
-import type { Integration, Rules } from '../types';
+import type { Catalog, CatalogProvider, Integration, Rules } from '../types';
 import {
   Badge,
   Card,
@@ -27,77 +24,28 @@ import {
   Modal,
   Notice,
   PageHeader,
+  SourceTag,
   Status,
   Success,
-  type IconComponent,
 } from '../components/ui';
 import {
   IntegrationDiagnostics,
   useIntegrationDiagnostics,
 } from '../components/IntegrationDiagnostics';
 
-const catalog: {
-  id: string;
-  name: string;
-  icon: IconComponent;
-  description: string;
-  available: boolean;
-}[] = [
-  {
-    id: 'unifi_network',
-    name: 'UniFi Network',
-    icon: Network,
-    description: 'Devices, networks, clients, and firewall policy configuration.',
-    available: true,
-  },
-  {
-    id: 'nextdns',
-    name: 'NextDNS',
-    icon: Database,
-    description: 'DNS profiles, configuration, and supported block observations.',
-    available: true,
-  },
-  {
-    id: 'unifi_fabric',
-    name: 'UniFi Fabric',
-    icon: Workflow,
-    description: 'Site Manager discovery and Fabric capabilities, configured together.',
-    available: false,
-  },
-  {
-    id: 'proxmox',
-    name: 'Proxmox VE',
-    icon: Server,
-    description:
-      'Experimental. Nodes, bridges, guests, their network cards and the firewall on/off switches.',
-    available: true,
-  },
-  {
-    id: 'aws',
-    name: 'AWS networking',
-    icon: Globe2,
-    description: 'VPCs, routes, security groups, and network access control lists.',
-    available: false,
-  },
-  {
-    id: 'azure',
-    name: 'Azure networking',
-    icon: Globe2,
-    description: 'Virtual networks, security groups, routes, and policy context.',
-    available: false,
-  },
-];
-
 /**
- * Collects configuration for implemented read-only providers and a server secret reference.
- * The form never requests the provider key itself; the API validates endpoint and
- * credential-reference restrictions and rejects live connections in demo mode.
+ * Collects configuration for one integration and a server secret reference.
+ * The fields come from the integration's own declaration, so a new integration gets a form
+ * without any change here. The form never requests the provider key itself; the API validates
+ * endpoint and credential-reference restrictions and rejects live connections in demo mode.
  */
 function AddIntegration({
+  providers,
   provider,
   onClose,
   onSaved,
 }: {
+  providers: CatalogProvider[];
   provider: string;
   onClose: () => void;
   onSaved: () => void;
@@ -106,26 +54,24 @@ function AddIntegration({
   const [selected, setSelected] = useState(provider);
   const [name, setName] = useState('');
   const [secret, setSecret] = useState('');
-  const [endpoint, setEndpoint] = useState('');
-  const [site, setSite] = useState('');
-  const [profile, setProfile] = useState('');
+  const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const demo = user?.mode === 'demo';
+  const chosen = providers.find((item) => item.id === selected) || providers[0];
   /** Persists connection metadata, leaving source collection to a separate explicit action. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError(null);
     setPending(true);
-    const config =
-      selected === 'nextdns'
-        ? { profile_id: profile.trim(), lookback_hours: 24 }
-        : selected === 'proxmox'
-          ? { base_url: endpoint.trim() }
-          : { base_url: endpoint.trim(), ...(site.trim() ? { site_id: site.trim() } : {}) };
+    const config: Record<string, string | number> = {};
+    for (const field of chosen.fields) {
+      const value = (values[`${chosen.id}.${field.key}`] || '').trim();
+      if (value) config[field.key] = field.kind === 'number' ? Number(value) : value;
+    }
     try {
       await post('/integrations', {
-        provider: selected,
+        provider: chosen.id,
         name: name.trim(),
         config,
         secret_ref: secret.trim(),
@@ -147,11 +93,14 @@ function AddIntegration({
             source.
           </Notice>
         )}
-        <Field label="Provider">
-          <select value={selected} onChange={(e) => setSelected(e.target.value)}>
-            <option value="unifi_network">UniFi Network</option>
-            <option value="nextdns">NextDNS</option>
-            <option value="proxmox">Proxmox VE (experimental)</option>
+        <Field label="Integration" hint={chosen.summary}>
+          <select value={chosen.id} onChange={(e) => setSelected(e.target.value)}>
+            {providers.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+                {item.status === 'experimental' ? ' (experimental)' : ''}
+              </option>
+            ))}
           </select>
         </Field>
         <Field label="Connection name">
@@ -160,67 +109,39 @@ function AddIntegration({
             maxLength={100}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder={selected === 'nextdns' ? 'Home DNS' : 'Primary network'}
+            placeholder="Head office network"
           />
         </Field>
-        {selected === 'unifi_network' ? (
-          <>
-            <Field
-              label="Integration API base URL"
-              hint="Use HTTPS. The server administrator must include this hostname in NYCTR_CONNECTOR_HOSTS."
-            >
-              <input
-                required
-                type="url"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                placeholder="https://gateway.example/proxy/network/integration"
-              />
-            </Field>
-            <Field
-              label="Site ID (optional)"
-              hint="Leave empty to collect supported sites returned by the API."
-            >
-              <input
-                value={site}
-                onChange={(e) => setSite(e.target.value)}
-                placeholder="Provider site identifier"
-              />
-            </Field>
-          </>
-        ) : selected === 'proxmox' ? (
+        {chosen.fields.map((field) => (
           <Field
-            label="Proxmox address"
-            hint="Use HTTPS with a certificate the server trusts. The hostname must be in NYCTR_CONNECTOR_HOSTS. The secret is an API token in the form user@realm!name=value; give it a read-only role such as PVEAuditor."
+            key={`${chosen.id}.${field.key}`}
+            label={field.required ? field.label : `${field.label} (optional)`}
+            hint={
+              field.kind === 'url'
+                ? `${field.hint} The server administrator must include this hostname in NYCTR_CONNECTOR_HOSTS.`
+                : field.hint
+            }
           >
             <input
-              required
-              type="url"
-              value={endpoint}
-              onChange={(e) => setEndpoint(e.target.value)}
-              placeholder="https://pve.example:8006"
+              required={field.required}
+              type={field.kind === 'url' ? 'url' : field.kind === 'number' ? 'number' : 'text'}
+              value={values[`${chosen.id}.${field.key}`] || ''}
+              onChange={(e) =>
+                setValues({ ...values, [`${chosen.id}.${field.key}`]: e.target.value })
+              }
+              placeholder={field.placeholder}
             />
           </Field>
-        ) : (
-          <Field label="NextDNS profile ID">
-            <input
-              required
-              value={profile}
-              onChange={(e) => setProfile(e.target.value)}
-              placeholder="abc123"
-              pattern="[A-Za-z0-9]+"
-            />
-          </Field>
-        )}
+        ))}
         <Field
           label="Credential environment reference"
-          hint="The API key stays on the server. Enter the name of its environment variable, not the key itself."
+          hint={`${chosen.secret_hint} It stays on the server: enter the name of its environment variable, not the secret itself.`}
         >
           <input
             required
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
-            placeholder="NYCTR_CONNECTOR_SECRET_HOME_DNS"
+            placeholder="NYCTR_CONNECTOR_SECRET_HEAD_OFFICE"
             pattern="NYCTR_CONNECTOR_SECRET_[A-Z0-9_]+"
             className="mono"
           />
@@ -244,13 +165,79 @@ function AddIntegration({
   );
 }
 
-/** Lists source health and capabilities while keeping planned providers distinct from live adapters. */
-export default function Integrations({ writes }: { writes?: Rules['writes'] } = {}) {
+/**
+ * The table that carries the product idea: Nyctr's features down the side, integrations across
+ * the top. A feature works when a connected source offers it. Nothing here is hard-coded per
+ * vendor; rows and columns both come from the server's catalog.
+ */
+function CapabilityTable({ catalog, connected }: { catalog: Catalog; connected: Set<string> }) {
+  return (
+    <div className="table-scroll">
+      <table className="capability-table">
+        <thead>
+          <tr>
+            <th scope="col">What Nyctr can do</th>
+            {catalog.providers.map((provider) => (
+              <th scope="col" key={provider.id}>
+                <SourceTag provider={provider.id} named />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {catalog.capabilities.map((capability) => {
+            const live = catalog.providers.some(
+              (provider) =>
+                connected.has(provider.id) &&
+                provider.provides.some((item) => item.id === capability.id),
+            );
+            return (
+              <tr key={capability.id}>
+                <th scope="row">
+                  {capability.name}
+                  <span className="d">
+                    {live
+                      ? 'Working: a connected source offers it'
+                      : 'No connected source offers it'}
+                    {capability.changes_provider ? '. Changes the source' : ''}
+                  </span>
+                </th>
+                {catalog.providers.map((provider) => {
+                  const offers = provider.provides.some((item) => item.id === capability.id);
+                  return (
+                    <td key={provider.id} className={offers ? 'yes' : 'no'}>
+                      {offers ? (
+                        <>
+                          <Check size={15} aria-hidden="true" />
+                          <span className="sr-only">Yes</span>
+                        </>
+                      ) : (
+                        <>
+                          <Minus size={15} aria-hidden="true" />
+                          <span className="sr-only">No</span>
+                        </>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Lists connected sources, what each integration adds to Nyctr, and whether Nyctr may change it. */
+export default function Integrations({ sources = [] }: { sources?: Rules['sources'] } = {}) {
   const result = useApi<Integration[]>('/integrations');
-  const allowed = [
-    writes?.nextdns === 'enabled' && 'NextDNS',
-    writes?.unifi_network === 'enabled' && 'UniFi',
-  ].filter(Boolean);
+  const fetched = useApi<Catalog>('/integrations/catalog');
+  const catalog = fetched.data;
+  const providers = catalog?.providers || [];
+  const kind = (id: string) => providers.find((item) => item.id === id);
+  const allowed = sources.filter((item) => item.write_mode === 'enabled').map((item) => item.name);
+  const connected = new Set((result.data || []).map((item) => item.provider));
   const [add, setAdd] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -288,9 +275,13 @@ export default function Integrations({ writes }: { writes?: Rules['writes'] } = 
     <>
       <PageHeader
         title="Sources"
-        description="Where Nyctr reads from, what each one can tell it, and whether Nyctr may change it."
+        description="Nyctr is the same product whatever you run. Each source you connect adds what its integration can read or change."
         actions={
-          <button className="button primary" onClick={() => setAdd('unifi_network')}>
+          <button
+            className="button primary"
+            disabled={providers.length === 0}
+            onClick={() => setAdd(providers[0].id)}
+          >
             <Plus size={16} />
             Add connection
           </button>
@@ -309,12 +300,15 @@ export default function Integrations({ writes }: { writes?: Rules['writes'] } = 
                 : 'Read-only for every source'}
           </strong>
           <p>
-            Collection never changes a source, and credentials stay on the server. Nyctr can add a
-            NextDNS allowlist entry, issue UniFi guest passes and cut a guest off only when an
-            operator names that source in NYCTR_PROVIDER_WRITES.
+            Collection never changes a source, and credentials stay on the server. Nyctr opens a
+            blocked address, issues a guest pass or cuts a guest off only at a source whose
+            integration offers it, and only when an operator names that integration in
+            NYCTR_PROVIDER_WRITES.
           </p>
         </div>
-        <Badge tone="blue">3 adapters</Badge>
+        <Badge tone="blue">
+          {providers.length} {providers.length === 1 ? 'integration' : 'integrations'}
+        </Badge>
       </div>
       <InlineError message={error} />
       {success && <Success>{success}</Success>}
@@ -335,26 +329,36 @@ export default function Integrations({ writes }: { writes?: Rules['writes'] } = 
       ) : result.data?.length ? (
         <div className="integration-grid">
           {result.data.map((integration) => {
-            const item = catalog.find((c) => c.id === integration.provider);
-            const Icon = item?.icon || Database;
+            const item = kind(integration.provider);
+            const mode = sources.find((source) => source.id === integration.id)?.write_mode;
             return (
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">
-                  <span className="icon-tile large">
-                    <Icon size={24} />
-                  </span>
+                  <SourceTag provider={integration.provider} big />
                   <Status value={integration.status} />
                 </div>
                 <h3>{integration.name}</h3>
-                <p>{item?.name || label(integration.provider)}</p>
+                <p>
+                  {item?.name || integration.provider_name || label(integration.provider)}
+                  {item?.status === 'experimental' ? ' · experimental' : ''}
+                </p>
+                <span className="integration-capability-label">Adds to Nyctr</span>
+                <div className="capabilities">
+                  {(item?.provides || []).map((capability) => (
+                    <span key={capability.id}>
+                      <Layers2 size={12} />
+                      {capability.name}
+                    </span>
+                  ))}
+                  {!item && <span>Unknown integration</span>}
+                </div>
                 <span className="integration-capability-label">
-                  Adapter capabilities · not connection verification
+                  Reads · not connection verification
                 </span>
                 <div className="capabilities">
                   {integration.capabilities?.map((c) => (
                     <span key={c}>
-                      <Layers2 size={12} />
-                      {label(c)}
+                      {item?.reads.find((read) => read.id === c)?.label || label(c)}
                     </span>
                   ))}
                 </div>
@@ -368,11 +372,13 @@ export default function Integrations({ writes }: { writes?: Rules['writes'] } = 
                 <div className="integration-footer">
                   <span>
                     <LockKeyhole size={12} />
-                    {demo
-                      ? 'Changes simulated'
-                      : writes?.[integration.provider as 'nextdns' | 'unifi_network'] === 'enabled'
-                        ? 'Nyctr may change it'
-                        : 'Read only'}
+                    {item && item.changes.length === 0
+                      ? 'Nothing here for Nyctr to change'
+                      : demo
+                        ? 'Changes simulated'
+                        : mode === 'enabled'
+                          ? 'Nyctr may change it'
+                          : 'Read only'}
                   </span>
                 </div>
                 <div className="integration-actions">
@@ -380,17 +386,14 @@ export default function Integrations({ writes }: { writes?: Rules['writes'] } = 
                     <button
                       className="button secondary small"
                       disabled={
-                        pending !== null ||
-                        diagnostics.state?.pending === true ||
-                        demo ||
-                        !item?.available
+                        pending !== null || diagnostics.state?.pending === true || demo || !item
                       }
                       onClick={() => void diagnostics.run(integration)}
                       title={
                         demo
                           ? 'Demo sources use seeded snapshots; live diagnostics are disabled.'
-                          : !item?.available
-                            ? 'Connection diagnostics are not implemented for this provider.'
+                          : !item
+                            ? 'This release has no integration for this source.'
                             : 'Verify supported reads without importing a snapshot'
                       }
                     >
@@ -426,54 +429,66 @@ export default function Integrations({ writes }: { writes?: Rules['writes'] } = 
           <Empty
             icon={Settings2}
             title="Connect your first source"
-            text="Choose UniFi Network, NextDNS or Proxmox VE below to begin collecting."
+            text="Choose an integration below to begin collecting."
           />
         </Card>
       )}
       <div className="section-heading">
         <div>
-          <h2>Integration catalog</h2>
-          <p>One workspace, with provider-specific collection capabilities.</p>
+          <h2>What each integration adds</h2>
+          <p>
+            Nyctr&apos;s features are the same for everyone. A feature works once a connected source
+            offers it.
+          </p>
+        </div>
+      </div>
+      {catalog ? (
+        <Card className="capability-card">
+          <CapabilityTable catalog={catalog} connected={connected} />
+        </Card>
+      ) : fetched.error ? (
+        <ErrorState message={fetched.error} retry={fetched.reload} />
+      ) : (
+        <Loading />
+      )}
+      <div className="section-heading">
+        <div>
+          <h2>Integrations in this release</h2>
+          <p>Each one is a single module that declares what it reads and what it can change.</p>
         </div>
       </div>
       <div className="integration-grid catalog-grid">
-        {catalog.map((item) => (
+        {providers.map((item) => (
           <Card className="integration-card catalog-card" key={item.id}>
             <div className="integration-top">
-              <span className="icon-tile">
-                <item.icon size={21} />
-              </span>
-              <Badge tone={item.available ? 'blue' : ''}>
-                {item.available ? 'Available' : 'Planned'}
+              <SourceTag provider={item.id} big />
+              <Badge tone={item.status === 'stable' ? 'blue' : ''}>
+                {item.status === 'stable' ? 'Available' : 'Experimental'}
               </Badge>
             </div>
             <h3>{item.name}</h3>
-            <p>{item.description}</p>
+            <p>{item.summary}</p>
             <div className="integration-footer">
               <span>
-                {item.id === 'unifi_fabric'
-                  ? 'Includes Site Manager'
-                  : item.available
-                    ? 'Read-only collector'
-                    : 'Adapter not implemented'}
+                {item.changes.length
+                  ? `Can change: ${item.changes.join(', ').toLowerCase()}`
+                  : 'Reads only'}
               </span>
-              {item.available && (
-                <button className="text-link" onClick={() => setAdd(item.id)}>
-                  Set up
-                  <ArrowRight size={14} />
-                </button>
-              )}
+              <button className="text-link" onClick={() => setAdd(item.id)}>
+                Set up
+                <ArrowRight size={14} />
+              </button>
             </div>
           </Card>
         ))}
       </div>
       <Notice>
-        UniFi firewall event export is a separate collection channel from the Network configuration
-        API. Event ingestion and reliable cross-source device attribution are planned; API access
-        alone does not provide every firewall block.
+        An integration reports only what its source exposes. Each connection&apos;s diagnostics list
+        what was read and what that source cannot tell Nyctr.
       </Notice>
       {add && (
         <AddIntegration
+          providers={providers}
           provider={add}
           onClose={() => setAdd(null)}
           onSaved={() => {

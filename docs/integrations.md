@@ -1,5 +1,10 @@
 # Integrations
 
+Nyctr's core is vendor neutral. Each integration below is one module that
+declares what it reads and which capabilities it adds; the
+[integration contract](integration-contract.md) describes how to write one. The
+Sources page in the console shows the same information for a running server.
+
 Collection is always read only. What Nyctr may change at a provider is a separate
 server setting, described under [Provider changes](#provider-changes).
 
@@ -13,6 +18,7 @@ and use its name in the integration form:
 NYCTR_CONNECTOR_SECRET_UNIFI=<set through your secret manager>
 NYCTR_CONNECTOR_SECRET_NEXTDNS=<set through your secret manager>
 NYCTR_CONNECTOR_SECRET_PROXMOX=<API token: user@realm!name=value>
+NYCTR_CONNECTOR_SECRET_PIHOLE=<an application password made for Nyctr>
 ```
 
 Only names starting with `NYCTR_CONNECTOR_SECRET_` are accepted. Credential values
@@ -114,14 +120,47 @@ This adapter was written from the documented API and has not been run against a
 cluster. Firewall rules are not read, only the on/off switches. A failed firewall
 option read leaves the state unknown, never off.
 
-Nyctr joins Proxmox to UniFi at read time: a guest network card and a UniFi
-client with the same hardware address, a card's VLAN tag and a UniFi network
-with that VLAN, a node address and a UniFi client with that address. Each is
-shown as inferred with its basis, and an ambiguous match produces no link.
+Nyctr joins any source that provides `compute` to any source that provides
+`inventory` at read time: a workload's network card and a network client with the
+same hardware address, a card's VLAN tag and a network with that VLAN, a host
+address and a client with that address. Each is shown as inferred with its
+basis, and an ambiguous match produces no link.
+
+## Pi-hole (experimental)
+
+Reads recently blocked lookups from a Pi-hole v6 resolver. Enter its HTTPS
+address, for example `https://pihole.example.net`, add the hostname to
+`NYCTR_CONNECTOR_HOSTS`, and add its certificate to `NYCTR_CONNECTOR_CA_BUNDLE`
+if it is self-signed. The secret is the web password or, better, an application
+password created for Nyctr. Optional `lookback_hours` is bounded to 1 to 72, and
+at most the newest 2,000 queries in the window are read.
+
+Pi-hole has no API keys, so collection signs in (`POST /api/auth`), reads
+`GET /api/queries` with the session id in the `X-FTL-SID` header, and signs out
+(`DELETE /api/auth`), even when a read fails. Nothing on the Pi-hole is changed.
+
+What this integration deliberately does not do:
+
+- It does not open blocked addresses. It declares no `dns.exceptions`
+  capability, so the access rule never acts on a Pi-hole block and an approved
+  request is recorded as not applied for you to carry out in Pi-hole.
+- It does not score a block from a subscribed list. Pi-hole does not say whether
+  a list is about adverts or threats, so those blocks stay unknown. Blocks from
+  the deny list or a deny pattern are scored as an administrator's rule.
+- It does not treat a client name as identity. Names come from Pi-hole's own
+  network table; a block stays unassigned until an administrator links the label
+  to a device under Setup.
+
+Sign-in follows Pi-hole's published authentication contract. The query-log field
+names follow the published API description and have not been run against a live
+Pi-hole by this project.
 
 ## Provider changes
 
-Off unless the provider is listed in `NYCTR_PROVIDER_WRITES` (comma separated).
+Off unless the integration is listed in `NYCTR_PROVIDER_WRITES` (comma separated).
+Only integrations that declare a write capability are accepted there; naming any
+other, such as `pihole` or `proxmox`, stops the server at start-up with a clear
+message.
 
 | Provider | Call | Used for |
 | --- | --- | --- |
@@ -153,6 +192,7 @@ contract is tracked separately.
 ## References
 
 - [NextDNS API documentation](https://nextdns.github.io/api/)
+- [Pi-hole API authentication](https://docs.pi-hole.net/api/auth/)
 - [UniFi developer portal](https://developer.ui.com/)
 - User-provided Network 11.0.97, Site Manager 1.0.0 and Carrier/ISP Fabric 1.0.0
   OpenAPI contracts informed the initial implementation. Raw exports and personal

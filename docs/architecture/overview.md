@@ -83,7 +83,11 @@ organizational Blueprint/Canvas controls.
 The intended flow is collection → normalized evidence → analysis → proposal →
 authorization → execution → verification. Each step has an explicit owner.
 
-- Collection: `nyctr/integrations/*` adapters and `nyctr/collection.py`. GET only.
+- Integrations: `nyctr/integrations/registry.py` holds the contract. Each kind of
+  source is one module that declares what it reads, which capabilities it adds
+  and what it can change. Everything below asks the registry for a capability and
+  never names a vendor; see [the integration contract](../integration-contract.md).
+- Collection: `nyctr/integrations/*` adapters and `nyctr/collection.py`. Read only.
 - Analysis: `nyctr/risk.py` (block scoring), `nyctr/analysis.py` (rule-based
   findings) and `nyctr/links.py` (inferred links between sources). No model.
 - Authorization: an administrator's decision, or a rule in `nyctr/policy.py`.
