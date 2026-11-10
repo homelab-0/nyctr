@@ -7,12 +7,12 @@ NetworkPolicy. It can also create either an Ingress or a Gateway API HTTPRoute.
 TLS termination, PostgreSQL, identity-provider setup, credentials, and Gateway
 infrastructure remain separately managed.
 
-The chart does not install a database operator, worker, event receiver, AI
-service, or infrastructure change executor. The chart does not yet expose
-`NYCTR_PROVIDER_WRITES`, `NYCTR_COLLECT_INTERVAL_SECONDS` or the `NYCTR_AI_*`
-settings, so a chart installation is read-only with the assistant off.
-Validation covers offline rendering and isolated test fixtures; it does not
-establish compatibility with a private homelab, real gateway, or real IdP.
+The chart does not install a database operator, separate worker, AI service or
+model gateway. A default installation is read-only, collects only on request and
+has the assistant off; [three explicit settings](#what-nyctr-may-change-and-do-on-its-own)
+change that. Validation covers offline rendering and isolated test fixtures; it
+does not establish compatibility with a private homelab, real gateway, or real
+IdP.
 
 ## Requirements and image selection
 
@@ -182,8 +182,46 @@ UniFi destinations require the explicit hostname allowlist. NextDNS uses its
 fixed official origin. The mounted CA bundle **replaces** default trust roots
 for both integration clients: include the required public roots along with the
 private console CA. A private-only bundle can break NextDNS TLS verification.
-It does not configure OIDC, PostgreSQL, or browser certificate trust. No API key
-or configuration setting can enable provider write operations in this alpha.
+It does not configure OIDC, PostgreSQL, or browser certificate trust. A provider
+key alone never lets Nyctr change that provider; see the next section. Proxmox
+and Pi-hole destinations also need their hostname in `connectors.hosts` and
+their own `NYCTR_CONNECTOR_SECRET_*` entry.
+
+### What Nyctr may change and do on its own
+
+All of this is off by default. Demo mode rejects every setting in this section.
+
+```yaml
+# Integrations Nyctr may change. Only integrations that can change their source
+# are accepted (today nextdns and unifi_network); the pod refuses to start on
+# any other name.
+providerWrites: [nextdns]
+
+collection:
+  # 60 to 86400. Without an interval the guest cut-off rule and lock-out act
+  # only when an administrator presses Collect.
+  intervalSeconds: 300
+  nudge:
+    # Optional. A Secret holding a token of 32 or more characters lets a network
+    # console call /api/hooks/collect to ask for a collection now.
+    existingSecret: nyctr-nudge
+
+assistant:
+  # Any OpenAI-compatible endpoint. Set both or neither.
+  baseUrl: http://model-gateway.ai.svc.cluster.local:4000/v1
+  model: local/reasoner
+  # Optional, when the endpoint needs a key.
+  existingSecret: nyctr-model
+```
+
+Turn changes on one integration at a time, after a read-only collection from it
+looks right. With `providerWrites` set, Nyctr acts only on an administrator's
+approval or written rule, and only in the ways listed in the
+[security model](../../docs/security-model.md). The assistant receives a bounded,
+redacted evidence pack and has no credentials; a plain-HTTP endpoint is accepted
+for an in-cluster gateway, so keep that traffic inside the cluster. The chart
+adds no egress rules: allow the pod to reach each provider and the model
+endpoint yourself.
 
 Environment-backed secret rotations require an application restart; changing
 an existing Secret alone does not cause Helm to roll the Deployment. After

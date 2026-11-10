@@ -56,6 +56,31 @@ connectors:
     existingSecret: ""
     key: ca-bundle.crt
 
+# Everything below is off by default: a default installation only reads.
+# Integration ids Nyctr may change, for example [nextdns, unifi_network]. Only
+# integrations that can change their source are accepted; the application refuses
+# to start on any other name. Collection stays read-only either way.
+providerWrites: []
+
+collection:
+  # Seconds between automatic collections, 60 to 86400. 0 collects only when an
+  # administrator asks. The guest cut-off rule and lock-out act at each collection.
+  intervalSeconds: 0
+  nudge:
+    # Existing Secret holding a shared token of at least 32 characters. With it a
+    # network console can call /api/hooks/collect to ask for a collection now.
+    existingSecret: ""
+    tokenKey: nudge-token
+
+assistant:
+  # An OpenAI-compatible endpoint, for example an in-cluster model gateway.
+  # Set baseUrl and model together. Empty leaves questions and insights off.
+  baseUrl: ""
+  model: ""
+  # Optional existing Secret holding the endpoint's API key.
+  existingSecret: ""
+  apiKeyKey: api-key
+
 demo:
   allowKnownCredentials: false
   # Optional isolated demo only. Data is lost when the pod is replaced.

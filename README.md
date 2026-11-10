@@ -33,7 +33,9 @@ once a connected source offers it. UniFi Network, NextDNS, Proxmox VE and Pi-hol
 are the integrations in this build; adding another is one module and no change to
 the core or the console ([contract](docs/integration-contract.md)).
 
-> **Status: early alpha, unreleased.** Collection is read only. Nyctr can change a
+> **Status: early alpha.** An image exists only for a completed
+> [GitHub Release](https://github.com/homelab-0/nyctr/releases); if none is
+> listed, build from source. Collection is read only. Nyctr can change a
 > source in exactly three ways (open or close a DNS exception, issue or end a
 > guest pass, let a guest device on or take its access away), only at a source
 > whose integration offers it, and only when an operator names that integration in
@@ -78,7 +80,7 @@ These screenshots show the running application with synthetic demonstration data
 | Area | In this build | Status | Next |
 | --- | --- | --- | --- |
 | Console | Briefing, map, inventory, findings, blocks, requests, open access, guests, sources, activity, setup | Implemented | Saved views, multiple workspaces |
-| Integration contract | Each integration declares what it reads, which capabilities it adds and what it can change; the core and console hold no vendor names, enforced by tests | Implemented | Out-of-tree integrations, per-integration settings in the Helm chart |
+| Integration contract | Each integration declares what it reads, which capabilities it adds and what it can change; the core and console hold no vendor names, enforced by tests | Implemented | Out-of-tree integrations |
 | Network map | Column per network, row per layer; one view per kind of source; follow a network device into the source that hosts it | Implemented; layout tested to a 40-device cell, not at enterprise scale | Temporal comparison, path simulation |
 | Identity | Local accounts, cookie sessions, administrator and member roles, optional OIDC | Implemented | Account administration, group policies |
 | Evidence | Resources, typed relationships and observations, each marked observed, configured or inferred | Implemented | Historical snapshots, drift |
@@ -92,7 +94,7 @@ These screenshots show the running application with synthetic demonstration data
 | Pi-hole | Read-only blocked lookups from a Pi-hole v6 resolver with its client labels. Reports blocks; does not open them, so its requests always wait for a person | Experimental; sign-in follows the published contract, query-log fields unverified against a live Pi-hole | Opening an address, list names |
 | Graph queries | Read-only GraphQL endpoint with length, depth and result limits; schema browser | Implemented | Saved queries, pagination |
 | Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint you configure | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
-| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The Helm chart does not yet expose the new settings | Upgrade tooling |
+| Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The release workflow has not yet completed a first publication | Upgrade tooling |
 
 Synthetic findings in demo mode demonstrate the workflow. The initial live
 collectors do not constitute a complete reachability engine or vulnerability scan.
@@ -120,8 +122,8 @@ Open **http://localhost:8080**. Use the demo sign-in buttons, or:
 
 Try selecting a device in the explorer, opening a finding's graph, signing in as
 the member, and submitting a request from a recent block. Requests and audit
-records persist in PostgreSQL across application restarts. Reviewing a request
-does **not** grant access in this release.
+records persist in PostgreSQL across application restarts. In the demo, approving
+a request opens a simulated lease: nothing is sent to a provider.
 
 ```sh
 docker compose logs -f nyctr

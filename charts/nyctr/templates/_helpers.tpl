@@ -77,6 +77,12 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 {{- $_ := set $names .envName true -}}
 {{- end -}}
+{{- if ne (empty .Values.assistant.baseUrl) (empty .Values.assistant.model) -}}
+{{- fail "assistant.baseUrl and assistant.model must be set together." -}}
+{{- end -}}
+{{- if and .Values.assistant.existingSecret (empty .Values.assistant.baseUrl) -}}
+{{- fail "assistant.existingSecret is set but no assistant endpoint is configured." -}}
+{{- end -}}
 {{- if .Values.ingress.enabled -}}
 {{- $_ := required "ingress.className is required." .Values.ingress.className -}}
 {{- $_ := required "ingress.tlsSecretName must reference an existing certificate Secret." .Values.ingress.tlsSecretName -}}
@@ -133,6 +139,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 {{- if or .Values.auth.oidc.enabled .Values.auth.oidc.existingSecret .Values.auth.oidc.issuer .Values.auth.oidc.clientId .Values.auth.local.bootstrap.existingSecret (not (empty .Values.connectors.secrets)) (not (empty .Values.connectors.hosts)) .Values.connectors.caBundle.existingSecret -}}
 {{- fail "Demo mode cannot receive real identity-provider, bootstrap or connector configuration." -}}
+{{- end -}}
+{{- if or (not (empty .Values.providerWrites)) (ne (int .Values.collection.intervalSeconds) 0) .Values.collection.nudge.existingSecret .Values.assistant.baseUrl .Values.assistant.existingSecret -}}
+{{- fail "Demo mode simulates every change and answers from samples; it cannot receive provider write permission, scheduled collection, a nudge token or a model endpoint." -}}
 {{- end -}}
 {{- if eq (empty .Values.database.existingSecret) (not .Values.demo.ephemeralDatabase) -}}
 {{- fail "Demo requires exactly one external database Secret or demo.ephemeralDatabase=true." -}}

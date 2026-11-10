@@ -1,4 +1,16 @@
-Nyctr is an alpha. This chart creates no provider write operations or background workers.
+Nyctr is an alpha. It runs as one process; there are no separate workers.
+{{- if eq .Values.mode "live" }}
+{{- if .Values.providerWrites }}
+Nyctr MAY CHANGE these integrations' sources: {{ join ", " .Values.providerWrites }}.
+{{- else }}
+Read only: Nyctr may not change any source (providerWrites is empty).
+{{- end }}
+{{- if ne (int .Values.collection.intervalSeconds) 0 }}
+It collects every {{ .Values.collection.intervalSeconds }} seconds.
+{{- else }}
+It collects only when an administrator asks, so the guest cut-off rule and lock-out act only then.
+{{- end }}
+{{- end }}
 
 {{- if eq .Values.mode "demo" }}
 

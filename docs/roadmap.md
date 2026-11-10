@@ -44,8 +44,7 @@ Not done, and needed before larger deployments:
   administrator and member.
 - Pagination and server-side filtering for inventory, blocks and activity.
 - Collection workers outside the web process.
-- Integrations loaded from outside the repository, and the Helm chart exposing
-  per-integration settings.
+- Integrations loaded from outside the repository.
 - Opening addresses in Pi-hole; DNS and firewall integrations beyond the four
   shipped.
 
