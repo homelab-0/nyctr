@@ -169,6 +169,7 @@ class Context:
         """Load inventory, links (including inferred ones) and fresh blocks."""
         rows = list(db.scalars(select(Resource).order_by(Resource.name)))
         self.db = db
+        self.blocks: dict[int, list[dict]] = {}
         self.resources = {row.id: self._resource(row) for row in rows}
         self.links = [self._link(columns) for columns in (
             {"id": r.id, "source": r.source, "target": r.target, "kind": r.kind, "provider": r.provider,
@@ -249,10 +250,13 @@ def _block(row: Observation) -> dict[str, Any]:
 def _fresh_blocks(ctx: Context, hours: int = 24) -> list[dict]:
     """Load unexpired blocks within the requested window, newest first."""
     hours = max(1, min(hours, 168))
-    rows = ctx.db.scalars(select(Observation).where(
-        Observation.expires_at > utcnow(), Observation.observed_at > utcnow() - timedelta(hours=hours))
-        .order_by(Observation.observed_at.desc()).limit(2000))
-    return [_block(row) for row in rows]
+    # One query asks for the same window once per resource; read and score it a single time.
+    if hours not in ctx.blocks:
+        rows = ctx.db.scalars(select(Observation).where(
+            Observation.expires_at > utcnow(), Observation.observed_at > utcnow() - timedelta(hours=hours))
+            .order_by(Observation.observed_at.desc()).limit(2000))
+        ctx.blocks[hours] = [_block(row) for row in rows]
+    return ctx.blocks[hours]
 
 
 def _q_resources(_root, info, kind=None, provider=None, classification=None, evidence=None, search=None,

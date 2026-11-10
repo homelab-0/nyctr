@@ -114,8 +114,10 @@ Inbox expiry is enforced at read/request time. Expired observations are deleted
 when the inbox is read. Access requests retain their domain/device snapshot so
 inbox cleanup does not erase the request or its audit trail. Duplicate requests
 from the same user for the same event return the original request. An expired
-event cannot create a new request. Request review accepts only `reviewed` or
-`denied`; execution and temporary exceptions are not present in this version.
+event cannot create a new request. Request review accepts `approved`, `denied`
+or `reviewed`. Approval opens a temporary lease and is refused once the blocked
+lookup behind the request has expired; whether the provider was changed is
+recorded on the lease (`simulated`, `applied`, `not_applied`, `failed`).
 
 ## Integration diagnostics
 
@@ -179,12 +181,17 @@ missing resources are marked missing rather than silently reassigned or deleted.
 Event replays never extend their original inbox expiry.
 
 Schema initialization is explicit and versioned in `nyctr/database.py` and the
-`schema_versions` table. Version 1 creates only an empty, dedicated database;
-unknown schemas and unsupported versions fail closed. PostgreSQL advisory locks
+`schema_versions` table. The current schema is version 2. A new, empty, dedicated
+database is created at version 2 and a version 1 database is upgraded in place;
+unknown schemas and unsupported versions fail closed. The upgrade is tested on
+SQLite only. PostgreSQL advisory locks
 serialize initial migration and bootstrap. Future model changes require a new
 explicit migration; changing the models alone does not upgrade a database.
 
-The first implementation runs bounded collection in the HTTP request. Durable
-background analysis, scheduled collection, an expiry executor, approved network
-mutations and AI provider routing are subsequent milestones. Audit is append-only
-through the application API, not a tamper-proof external audit store.
+Implemented in this version, all inside the single API process: optional
+scheduled collection (`NYCTR_COLLECT_INTERVAL_SECONDS`), lease expiry and
+reconciliation (`worker.py`, `access.py`), gated provider changes (`actions.py`)
+and an assistant that calls an OpenAI-compatible endpoint (`assistant.py`).
+Still to come: collection and reconciliation in a separate worker process,
+approval bound to an exact plan digest with drift checks, and an external
+tamper-evident audit store. Audit is append-only through the application API.

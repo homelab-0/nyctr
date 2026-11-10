@@ -91,16 +91,29 @@ def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None)
     Each provider reason is matched by identifier and by name. The highest
     matching base score sets the category; name-shape factors add to it. No
     recognised reason returns an unknown assessment with an explanatory factor.
+
+    A privacy-list score is the only one that can open an address without a
+    person, so it must cover every reason the block carries. If the provider
+    gave reason identifiers and one of them is not recognised, the result is
+    unknown: opening the address would also lift whatever that reason was.
+    Identifiers decide when present because reason names are free-form list
+    names; names decide only when there are no identifiers.
     """
-    texts = [code for code in (reason_codes or []) if isinstance(code, str)]
-    texts += [part.strip() for part in reason.split(";") if part.strip()]
+    codes = [code for code in (reason_codes or []) if isinstance(code, str)]
+    names = [part.strip() for part in reason.split(";") if part.strip()]
     best: tuple[int, str, str] | None = None
-    for text in texts:
+    recognised: set[str] = set()
+    for text in codes + names:
         for pattern, category, score, label in _REASONS:
             if pattern.search(text):
+                recognised.add(text)
                 if best is None or score > best[0]:
                     best = (score, category, label)
                 break
+    if best is not None and best[1] == PRIVACY and any(text not in recognised for text in codes or names):
+        return Assessment(None, UNKNOWN, [{
+            "label": "A privacy list blocked this, and so did something Nyctr does not recognise, "
+                     "so it cannot score it", "points": None}])
     if best is None:
         return Assessment(None, UNKNOWN, [{
             "label": "Nyctr does not recognise the reason this was blocked, so it cannot score it", "points": None}])

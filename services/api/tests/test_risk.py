@@ -42,3 +42,24 @@ def test_the_most_serious_reason_wins_and_name_shape_adds():
     random_name = risk.assess("a8f3k2j9x7q1m5z0c4v6.example", "", ["blocklist:x"])
     assert lookalike.score == plain + 20 and random_name.score == plain + 12
     assert all(0 <= r.score <= 100 for r in (mixed, lookalike, random_name))
+
+
+def test_a_privacy_score_never_hides_a_reason_nyctr_does_not_recognise():
+    """A block with a privacy list and an unrecognised reason identifier is unknown, not low.
+
+    Opening the address would lift every reason at once, so the one score that
+    can open things without a person must account for all of them.
+    """
+    mixed = risk.assess("shop.example", "HaGeZi Multi PRO++; Something new",
+                        ["blocklist:hagezi-multi-pro-plusplus", "newfeature:xyz"])
+    assert mixed.score is None and mixed.band == "unknown"
+    assert "does not recognise" in mixed.factors[0]["label"]
+    # A free-form list name beside recognised identifiers is fine: identifiers decide.
+    named = risk.assess("shop.example", "HaGeZi Multi PRO++", ["blocklist:hagezi-multi-pro-plusplus"])
+    assert named.band == "low"
+    # Without identifiers, the names decide.
+    assert risk.assess("shop.example", "Tracker blocklist; Something new", []).score is None
+    assert risk.assess("shop.example", "Tracker blocklist", []).band == "low"
+    # A recognised security reason still wins and is still scored, whatever sits beside it.
+    threat = risk.assess("shop.example", "", ["blocklist:x", "threat-intelligence-feeds", "newfeature:xyz"])
+    assert threat.category == risk.SECURITY and threat.band == "high"

@@ -67,3 +67,14 @@ def test_schema_can_be_explored_and_running_a_query_is_audited_without_its_text(
     assert {"Resource", "Link", "Block", "Finding", "Lease", "Source"} <= names
     event = next(x for x in client.get("/api/audit").json() if x["action"] == "graph.queried")
     assert set(event["details"]) == {"characters", "errors"}
+
+
+def test_blocks_are_read_once_per_query_not_once_per_resource(client, app, admin_headers, monkeypatch):
+    """Asking every resource for its blocks reads and scores the window a single time."""
+    scored = []
+    real = query._block
+    monkeypatch.setattr(query, "_block", lambda row: (scored.append(row.id), real(row))[1])
+    result = run(client, admin_headers, "{ resources(first: 60) { name blocks { domain } } }")
+    assert "errors" not in result and len(result["data"]["resources"]) > 10
+    assert len(scored) == len(set(scored)) > 0
+    assert any(row["blocks"] for row in result["data"]["resources"])
