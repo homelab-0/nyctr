@@ -117,6 +117,31 @@ spec:
             - name: NYCTR_CONNECTOR_CA_BUNDLE
               value: /etc/nyctr/connector-ca/ca-bundle.crt
             {{- end }}
+            # Stated even when empty, so a read-only installation is explicit in the manifest.
+            - name: NYCTR_PROVIDER_WRITES
+              value: {{ join "," .Values.providerWrites | quote }}
+            - name: NYCTR_COLLECT_INTERVAL_SECONDS
+              value: {{ .Values.collection.intervalSeconds | quote }}
+            {{- with .Values.collection.nudge.existingSecret }}
+            - name: NYCTR_NUDGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . | quote }}
+                  key: {{ $.Values.collection.nudge.tokenKey | quote }}
+            {{- end }}
+            {{- if .Values.assistant.baseUrl }}
+            - name: NYCTR_AI_BASE_URL
+              value: {{ .Values.assistant.baseUrl | quote }}
+            - name: NYCTR_AI_MODEL
+              value: {{ .Values.assistant.model | quote }}
+            {{- with .Values.assistant.existingSecret }}
+            - name: NYCTR_AI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . | quote }}
+                  key: {{ $.Values.assistant.apiKeyKey | quote }}
+            {{- end }}
+            {{- end }}
           startupProbe:
             httpGet:
               path: /api/health

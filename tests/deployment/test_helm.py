@@ -166,6 +166,36 @@ def test_live_secrets_are_references_and_ca_mount_preserves_read_only_boundary(h
     assert "Secret" not in manifests and "envFrom" not in container(manifests)
 
 
+def test_a_default_live_installation_is_read_only_with_the_assistant_off(helm_binary, tmp_path):
+    """Nothing Nyctr can do on its own is on unless the operator asked for it."""
+    env = environment(render(helm_binary, tmp_path, fixture("live-values.yaml")))
+    assert env["NYCTR_PROVIDER_WRITES"] == {"name": "NYCTR_PROVIDER_WRITES", "value": ""}
+    assert env["NYCTR_COLLECT_INTERVAL_SECONDS"]["value"] == "0"
+    assert not any(name.startswith("NYCTR_AI_") or name == "NYCTR_NUDGE_TOKEN" for name in env)
+
+
+def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_in_secrets(helm_binary, tmp_path):
+    """Write permission, the schedule and the model are plain values; every credential is a Secret reference."""
+    values = merge(fixture("live-values.yaml"), {
+        "providerWrites": ["nextdns", "unifi_network"],
+        "collection": {"intervalSeconds": 300, "nudge": {"existingSecret": "nyctr-nudge"}},
+        "assistant": {"baseUrl": "http://gateway.ai.svc.cluster.local:4000/v1", "model": "local/reasoner",
+                      "existingSecret": "nyctr-model", "apiKeyKey": "key"},
+    })
+    manifests = render(helm_binary, tmp_path, values)
+    env = environment(manifests)
+    assert env["NYCTR_PROVIDER_WRITES"]["value"] == "nextdns,unifi_network"
+    assert env["NYCTR_COLLECT_INTERVAL_SECONDS"]["value"] == "300"
+    assert env["NYCTR_AI_BASE_URL"]["value"] == "http://gateway.ai.svc.cluster.local:4000/v1"
+    assert env["NYCTR_AI_MODEL"]["value"] == "local/reasoner"
+    assert env["NYCTR_NUDGE_TOKEN"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-nudge", "key": "nudge-token"}
+    assert env["NYCTR_AI_API_KEY"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-model", "key": "key"}
+    assert "Secret" not in manifests and "envFrom" not in container(manifests)
+    # A model gateway that needs no key is supported: the endpoint is set and no key is passed.
+    keyless = environment(render(helm_binary, tmp_path, merge(values, {"assistant": {"existingSecret": ""}})))
+    assert keyless["NYCTR_AI_MODEL"]["value"] == "local/reasoner" and "NYCTR_AI_API_KEY" not in keyless
+
+
 def test_local_bootstrap_uses_existing_secret_and_can_be_removed_after_provisioning(helm_binary, tmp_path):
     """Support initial local provisioning and an explicit existing-account upgrade without password resets."""
     values = merge(fixture("live-values.yaml"), {"auth": {
@@ -256,6 +286,19 @@ def test_https_route_matches_origin_listener_and_service(helm_binary, tmp_path, 
     {"networkPolicy": {"ingressFrom": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}},
     {"demo": {"ephemeralDatabase": True}},
     {"extraEnv": [{"name": "NYCTR_MODE", "value": "demo"}]},
+    {"providerWrites": ["NextDNS"]},
+    {"providerWrites": ["nextdns,unifi_network"]},
+    {"providerWrites": ["nextdns", "nextdns"]},
+    {"providerWrites": "nextdns"},
+    {"collection": {"intervalSeconds": 30}},
+    {"collection": {"intervalSeconds": 100000}},
+    {"collection": {"nudge": {"token": "inline-credential-that-is-long-enough-000"}}},
+    {"assistant": {"baseUrl": "http://gateway.ai.svc:4000/v1"}},
+    {"assistant": {"model": "local/reasoner"}},
+    {"assistant": {"existingSecret": "nyctr-model"}},
+    {"assistant": {"baseUrl": "https://user:password@gateway.example.test/v1", "model": "m"}},
+    {"assistant": {"baseUrl": "https://gateway.example.test/v1?key=inline", "model": "m"}},
+    {"assistant": {"baseUrl": "https://gateway.example.test/v1", "model": "m", "apiKey": "inline-credential"}},
     {"podSecurityContext": {"runAsUser": 0}},
     {"connectors": {"secrets": [{"envName": "NYCTR_MODE", "existingSecret": "secret", "key": "mode"}]}},
     {"connectors": {"secrets": [
@@ -280,6 +323,10 @@ def test_invalid_or_unsafe_live_configuration_fails_before_rendering(helm_binary
     {"httpRoute": {"enabled": True, "parentRefs": [{"name": "gateway", "sectionName": "https"}]}},
     {"connectors": {"secrets": [{"envName": "NYCTR_CONNECTOR_SECRET_HOME", "existingSecret": "real", "key": "key"}]}},
     {"auth": {"oidc": {"enabled": True}}},
+    {"providerWrites": ["nextdns"]},
+    {"collection": {"intervalSeconds": 300}},
+    {"collection": {"nudge": {"existingSecret": "nyctr-nudge"}}},
+    {"assistant": {"baseUrl": "http://gateway.ai.svc:4000/v1", "model": "m"}},
 ])
 def test_demo_cannot_be_accidentally_exposed_or_connected_to_live_providers(helm_binary, tmp_path, changes):
     """Keep known credentials on the explicit isolated path and require a single database choice."""
