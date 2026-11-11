@@ -621,6 +621,11 @@ export default function Portal({ page, params }: { page: string; params: URLSear
           ))}
         </nav>
         <span className="m-user">
+          {user.console_url && (
+            <a className="m-console" href={user.console_url}>
+              Open the console
+            </a>
+          )}
           <span className="who">{user.name}</span>
           <button
             className="icon-button"

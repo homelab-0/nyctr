@@ -14,6 +14,9 @@ spec:
     {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
   hostnames:
     - {{ include "nyctr.hostname" . | quote }}
+    {{- with include "nyctr.portalHostname" . }}
+    - {{ . | quote }}
+    {{- end }}
   rules:
     - matches:
         - path:

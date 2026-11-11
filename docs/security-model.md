@@ -44,6 +44,37 @@ until switched on:
   threat-list lookups within a written number of minutes. It counts stored
   observations. No model output is an input to either rule.
 
+## Two addresses
+
+Nyctr can be served on one address or two. `NYCTR_PUBLIC_URL` is the console.
+`NYCTR_PORTAL_URL`, when set, is a second origin for members, for example
+`https://blocked.example.org`.
+
+- **Portal address.** Every session has member rights, whatever the account's
+  role. An administrator who signs in there sees their own devices' blocks and
+  can ask for access like anyone else; none of the console's reads or changes
+  answer on that address. The account itself is not changed, and the page
+  offers the way to the console.
+- **Console address.** For administrators. A member who signs in there gets no
+  session: single sign-on restarts on the portal address, and local sign-in
+  answers with the portal's address, after the password has been checked.
+- **Sign-in.** The redirect sent to the identity provider is the configured
+  origin of the address the person started on. It is never built from the
+  request's Host header, and an unrecognised Host is treated as the console.
+  Session cookies belong to one host, so each address has its own session.
+- **Changes.** A changing request must carry the origin of the address it
+  arrives on. A page on one address cannot change anything through the other.
+
+What this is not: the application tells the addresses apart by the Host header,
+so the split limits what a session can do on each name, and keeps the console's
+surface off the name members use. It becomes a network boundary only when the
+operator also routes the two hostnames separately, for example by publishing
+only the portal's hostname to a wider network. A caller who can reach the
+application under the console's hostname is on the console address.
+
+Without `NYCTR_PORTAL_URL` there is one address and roles alone decide what a
+session can do, as before.
+
 ## Threats considered
 
 | Threat | Required boundary |

@@ -43,7 +43,8 @@ equipment or an actual identity provider. PostgreSQL is the deployment target.
 | --- | --- |
 | `NYCTR_MODE` | `live` (default) or explicitly `demo`. A database cannot switch between modes. |
 | `NYCTR_DATABASE_URL` | SQLAlchemy URL. Deployment example: `postgresql+psycopg://nyctr:password@postgres/nyctr`. Local default: `sqlite:///./nyctr.db`. |
-| `NYCTR_PUBLIC_URL` | Exact browser origin, e.g. `https://nyctr.example.org`. Used for Origin validation and OIDC callback. |
+| `NYCTR_PUBLIC_URL` | Exact browser origin of the console, e.g. `https://nyctr.example.org`. Used for Origin validation and OIDC callback. |
+| `NYCTR_PORTAL_URL` | Optional second origin for the member portal, e.g. `https://blocked.example.org`. Same scheme, different host. On it every session has member rights. Empty serves the portal on `NYCTR_PUBLIC_URL`. |
 | `NYCTR_COOKIE_SECURE` | Defaults to true in live mode, false in demo. Live deployment should use HTTPS. |
 | `NYCTR_BOOTSTRAP_ADMIN_EMAIL` | Initial local administrator email. |
 | `NYCTR_BOOTSTRAP_ADMIN_PASSWORD` | Initial administrator password, minimum 12 characters. Existing user credentials are not overwritten on restart. |

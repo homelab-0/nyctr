@@ -33,6 +33,11 @@ once a connected source offers it. UniFi Network, NextDNS, Proxmox VE and Pi-hol
 are the integrations in this build; adding another is one module and no change to
 the core or the console ([contract](docs/integration-contract.md)).
 
+Members can be given their own address, separate from the console: on it every
+session has member rights, so someone with a blocked site signs in at
+`blocked.example.org` while the console stays at `nyctr.example.org`
+([security model](docs/security-model.md#two-addresses)).
+
 > **Status: early alpha.** An image exists only for a completed
 > [GitHub Release](https://github.com/homelab-0/nyctr/releases); if none is
 > listed, build from source. Collection is read only. Nyctr can change a

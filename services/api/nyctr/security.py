@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .models import Audit, LoginAttempt, LoginSession, User, utc, utcnow
+from .sites import PortalIdentity
 
 COOKIE_NAME = "nyctr_session"
 
@@ -73,10 +74,15 @@ def authenticate(request: Request, db: Session):
     return user, session
 
 
-def user_response(user: User, session: LoginSession, settings: Settings):
-    """Expose signed-in identity, mode, and CSRF token without credentials or session hashes."""
+def user_response(user, session: LoginSession, settings: Settings):
+    """Expose signed-in identity, mode, and CSRF token without credentials or session hashes.
+
+    `role` is the role on the address the request arrived on. An administrator
+    on the portal address is a member there and is told where the console is.
+    """
+    console = settings.public_url if isinstance(user, PortalIdentity) and user.administers_console() else None
     return {"id": user.id, "email": user.email, "name": user.name, "role": user.role,
-            "csrf_token": session.csrf_token, "mode": settings.mode}
+            "csrf_token": session.csrf_token, "mode": settings.mode, "console_url": console}
 
 
 def issue_session(db: Session, user: User, response, settings: Settings, old_token: str = ""):

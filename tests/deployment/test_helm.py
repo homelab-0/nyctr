@@ -267,8 +267,41 @@ def test_https_route_matches_origin_listener_and_service(helm_binary, tmp_path, 
         assert spec["rules"][0]["timeouts"]["request"] == "100s"
 
 
+@pytest.mark.parametrize("route", ["ingress", "httpRoute"])
+def test_a_member_portal_address_adds_one_hostname_and_one_setting(helm_binary, tmp_path, route):
+    """The portal address reaches the application as its own setting and both hostnames reach the same Service."""
+    changes = {"portalUrl": "https://blocked.example.test"}
+    if route == "ingress":
+        changes[route] = {"enabled": True, "className": "nginx", "tlsSecretName": "nyctr-tls"}
+    else:
+        changes[route] = {"enabled": True, "parentRefs": [{"name": "shared", "sectionName": "https"}]}
+    manifests = render(helm_binary, tmp_path, merge(fixture("live-values.yaml"), changes))
+    env = environment(manifests)
+    assert env["NYCTR_PUBLIC_URL"]["value"] == "https://nyctr.example.test"
+    assert env["NYCTR_PORTAL_URL"]["value"] == "https://blocked.example.test"
+    both = ["nyctr.example.test", "blocked.example.test"]
+    if route == "ingress":
+        spec = manifests["Ingress"]["spec"]
+        assert spec["tls"] == [{"hosts": both, "secretName": "nyctr-tls"}]
+        assert [rule["host"] for rule in spec["rules"]] == both
+        assert all(rule["http"]["paths"][0]["backend"]["service"]["name"] == "nyctr" for rule in spec["rules"])
+    else:
+        assert manifests["HTTPRoute"]["spec"]["hostnames"] == both
+
+    # Without it nothing about the single-address deployment changes.
+    single = render(helm_binary, tmp_path, fixture("live-values.yaml"))
+    assert "NYCTR_PORTAL_URL" not in environment(single)
+
+
 @pytest.mark.parametrize("changes", [
     {"replicaCount": 2},
+    {"portalUrl": "https://nyctr.example.test"},
+    {"portalUrl": "https://NYCTR.example.test"},
+    {"portalUrl": "http://blocked.example.test"},
+    {"portalUrl": "https://blocked.example.test/portal"},
+    {"portalUrl": "https://user:password@blocked.example.test"},
+    {"portalUrl": "https://10.0.0.8"},
+    {"portalUrl": "blocked.example.test"},
     {"publicUrl": "http://nyctr.example.test"},
     {"publicUrl": "https://user:password@nyctr.example.test"},
     {"publicUrl": "https://nyctr.example.test/path"},
@@ -336,6 +369,7 @@ def test_invalid_or_unsafe_live_configuration_fails_before_rendering(helm_binary
     {"demo": {"ephemeralDatabase": True}},
     {"database": {"existingSecret": ""}},
     {"publicUrl": "https://nyctr.example.test"},
+    {"portalUrl": "http://127.0.0.1:8081"},
     {"forwardedAllowIps": ["127.0.0.1"]},
     {"ingress": {"enabled": True, "className": "nginx", "tlsSecretName": "tls"}},
     {"httpRoute": {"enabled": True, "parentRefs": [{"name": "gateway", "sectionName": "https"}]}},

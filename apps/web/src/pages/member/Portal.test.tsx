@@ -104,6 +104,17 @@ afterEach(() => {
 });
 
 describe('member portal', () => {
+  it('offers the console only to an administrator who opened the portal address', async () => {
+    open({});
+    await screen.findByRole('heading', { name: /blocked/i, level: 1 });
+    expect(screen.queryByRole('link', { name: 'Open the console' })).toBeNull();
+    cleanup();
+    open({ 'GET /auth/me': { ...member, console_url: 'https://console.example' } });
+    const link = await screen.findByRole('link', { name: 'Open the console' });
+    expect(link.getAttribute('href')).toBe('https://console.example');
+    expect(screen.queryByText('Briefing')).toBeNull();
+  });
+
   it('lists blocks on the device in hand first and never shows the administrator console', async () => {
     open({
       'GET /blocks': [

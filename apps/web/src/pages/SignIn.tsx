@@ -35,38 +35,63 @@ export default function SignIn() {
     void signIn(email, password);
   };
   const oidcError = new URLSearchParams(window.location.search).get('error');
+  // The member portal has its own address on some installations. There the page speaks to
+  // someone who hit a blocked site, not to the person running the network.
+  const onPortal = config.data?.site === 'portal';
+  const portalUrl = !onPortal ? config.data?.portal_url : null;
   return (
     <main className="signin-page">
       <section className="signin-story">
         <Brand />
-        <div className="signin-message">
-          <h1 className="display">
-            See what is connected.
-            <br />
-            Know why something was blocked.
-          </h1>
-          <p className="lede">
-            One place for your network, DNS and hypervisor. Evidence first, and nothing changes
-            without a rule you wrote or a decision you made.
-          </p>
-          <ul className="signin-values">
-            <li>
-              <i className="ev observed" /> Seen happening
-            </li>
-            <li>
-              <i className="ev configured" /> A setting
-            </li>
-            <li>
-              <i className="ev inferred" /> Worked out by Nyctr
-            </li>
-          </ul>
-        </div>
+        {onPortal ? (
+          <div className="signin-message">
+            <h1 className="display">
+              A site would not open.
+              <br />
+              Find out why, and ask for it.
+            </h1>
+            <p className="lede">
+              Sign in to see what was blocked on your devices and the reason. If you need it, ask
+              for access from the same page.
+            </p>
+          </div>
+        ) : (
+          <div className="signin-message">
+            <h1 className="display">
+              See what is connected.
+              <br />
+              Know why something was blocked.
+            </h1>
+            <p className="lede">
+              One place for your network, DNS and hypervisor. Evidence first, and nothing changes
+              without a rule you wrote or a decision you made.
+            </p>
+            <ul className="signin-values">
+              <li>
+                <i className="ev observed" /> Seen happening
+              </li>
+              <li>
+                <i className="ev configured" /> A setting
+              </li>
+              <li>
+                <i className="ev inferred" /> Worked out by Nyctr
+              </li>
+            </ul>
+          </div>
+        )}
         <footer>Open-source network security workspace</footer>
       </section>
       <section className="signin-form-area">
         <div className="signin-form">
           <h2 className="display d2">Sign in</h2>
-          <p className="lede">Blocked from a site? Sign in to see why and ask to open it.</p>
+          {portalUrl ? (
+            <p className="lede">
+              This address is for administrators. Blocked from a site?{' '}
+              <a href={portalUrl}>Go to the blocked sites page</a>.
+            </p>
+          ) : (
+            <p className="lede">Blocked from a site? Sign in to see why and ask to open it.</p>
+          )}
           {config.loading ? (
             <Loading text="Checking sign-in options…" />
           ) : config.error ? (
@@ -129,13 +154,15 @@ export default function SignIn() {
                     disabled in this mode.
                   </p>
                   <div className="button-row">
-                    <button
-                      className="button secondary"
-                      disabled={pending}
-                      onClick={() => void signIn('admin@nyctr.demo', 'nyctr-demo')}
-                    >
-                      Explore as admin
-                    </button>
+                    {!onPortal && (
+                      <button
+                        className="button secondary"
+                        disabled={pending}
+                        onClick={() => void signIn('admin@nyctr.demo', 'nyctr-demo')}
+                      >
+                        Explore as admin
+                      </button>
+                    )}
                     <button
                       className="button secondary"
                       disabled={pending}

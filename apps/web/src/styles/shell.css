@@ -475,6 +475,12 @@ kbd {
   color: var(--fg2);
   font-size: 13px;
 }
+.m-console {
+  margin-right: 8px;
+  padding-right: 12px;
+  border-right: 1px solid var(--line);
+  white-space: nowrap;
+}
 .member main {
   padding: 36px 16px 72px;
 }

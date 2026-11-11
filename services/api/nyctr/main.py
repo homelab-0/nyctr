@@ -63,6 +63,7 @@ from .security import (
     verify_password,
 )
 from .seed import bootstrap
+from .sites import members_use_portal, origin_of, seen_as, site_of
 
 
 class InputModel(BaseModel):
@@ -152,8 +153,10 @@ def create_app(settings: Settings | None = None):
         enforces the actual streamed byte count when Content-Length is absent.
         """
         if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            # The origin must be the address the request arrived on: the portal's
+            # pages cannot change anything through the console address, or the reverse.
             origin = request.headers.get("origin")
-            if origin and origin.rstrip("/") != settings.public_url:
+            if origin and origin.rstrip("/") != origin_of(settings, site_of(request)):
                 return JSONResponse({"detail": "Request origin is not permitted"}, status_code=403)
             length = request.headers.get("content-length", "0")
             if not length.isdigit() or int(length) > 32768:
@@ -173,10 +176,11 @@ def create_app(settings: Settings | None = None):
         return {"status": "ok", "version": __version__}
 
     @app.get("/api/auth/config")
-    def auth_config():
-        """Return public sign-in capabilities and mode without exposing provider credentials."""
+    def auth_config(request: Request):
+        """Return public sign-in capabilities, mode and which address this is, without provider credentials."""
         return {"mode": settings.mode, "local_enabled": settings.local_login_enabled or settings.mode == "demo",
-                "oidc_enabled": settings.oidc_enabled}
+                "oidc_enabled": settings.oidc_enabled, "site": site_of(request),
+                "portal_url": settings.portal_url or None}
 
     @app.post("/api/auth/login")
     def login(body: LoginInput, request: Request, response: Response, db: Session = Depends(get_db)):
@@ -197,8 +201,11 @@ def create_app(settings: Settings | None = None):
             audit(db, None, "auth.login_failed")
             db.commit()
             raise HTTPException(401, "Invalid email or password")
+        if members_use_portal(request, user):
+            # Decided only after the password was checked, so it says nothing to a stranger.
+            raise HTTPException(403, f"This address is for administrators. Sign in at {settings.portal_url}")
         session = issue_session(db, user, response, settings, request.cookies.get(COOKIE_NAME, ""))
-        return user_response(user, session, settings)
+        return user_response(seen_as(request, user), session, settings)
 
     @app.get("/api/auth/me")
     def me(auth=Depends(identity)):

@@ -37,6 +37,13 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- (urlParse .Values.publicUrl).host | splitList ":" | first -}}
 {{- end -}}
 
+{{/* Hostname of the optional member portal address, or empty. */}}
+{{- define "nyctr.portalHostname" -}}
+{{- if .Values.portalUrl -}}
+{{- (urlParse .Values.portalUrl).host | splitList ":" | first -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Fail before creating any resources when settings weaken release boundaries. */}}
 {{- define "nyctr.validate" -}}
 {{- if not (regexMatch "^[a-z]([-a-z0-9]*[a-z0-9])?$" (include "nyctr.fullname" .)) -}}
@@ -63,6 +70,24 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- $port := last $hostParts | atoi -}}
 {{- if or (lt $port 1) (gt $port 65535) -}}
 {{- fail "publicUrl has an invalid port." -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.portalUrl -}}
+{{- $portal := urlParse .Values.portalUrl -}}
+{{- if or (not $portal.host) $portal.path $portal.query $portal.fragment $portal.userinfo -}}
+{{- fail "portalUrl must be an origin without a path, query, fragment or user information." -}}
+{{- end -}}
+{{- if ne $portal.scheme $origin.scheme -}}
+{{- fail "portalUrl must use the same scheme as publicUrl." -}}
+{{- end -}}
+{{- if eq (lower $portal.host) (lower $origin.host) -}}
+{{- fail "portalUrl must be a different host from publicUrl. Leave it empty to serve the member portal on the console address." -}}
+{{- end -}}
+{{- if eq .Values.mode "demo" -}}
+{{- fail "portalUrl is not supported in demo mode." -}}
+{{- end -}}
+{{- if regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" (include "nyctr.portalHostname" .) -}}
+{{- fail "portalUrl requires a DNS hostname, not an IP address." -}}
 {{- end -}}
 {{- end -}}
 {{- range .Values.forwardedAllowIps -}}

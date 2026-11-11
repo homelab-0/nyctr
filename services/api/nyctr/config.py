@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     mode: Literal["demo", "live"] = "live"
     database_url: str = "sqlite:///./nyctr.db"
     public_url: str = "http://localhost:8080"
+    # Optional second origin for the member portal. Empty serves everything on public_url.
+    portal_url: str = ""
     cookie_secure: bool | None = None
     local_login_enabled: bool = True
     bootstrap_admin_email: str = ""
@@ -55,6 +57,18 @@ class Settings(BaseSettings):
             raise ValueError("NYCTR_PUBLIC_URL must be an HTTP(S) origin without a path")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("NYCTR_PUBLIC_URL must be a plain HTTP(S) origin")
+        if self.portal_url:
+            self.portal_url = self.portal_url.rstrip("/")
+            portal = urlsplit(self.portal_url)
+            if portal.scheme not in ("http", "https") or not portal.netloc or portal.path:
+                raise ValueError("NYCTR_PORTAL_URL must be an HTTP(S) origin without a path")
+            if portal.username or portal.password or portal.query or portal.fragment:
+                raise ValueError("NYCTR_PORTAL_URL must be a plain HTTP(S) origin")
+            if portal.scheme != parsed.scheme:
+                raise ValueError("NYCTR_PORTAL_URL must use the same scheme as NYCTR_PUBLIC_URL")
+            if portal.netloc.lower() == parsed.netloc.lower():
+                raise ValueError("NYCTR_PORTAL_URL must be a different host from NYCTR_PUBLIC_URL; "
+                                 "leave it empty to serve the portal on the console address")
         if self.cookie_secure is None:
             self.cookie_secure = self.mode == "live"
         if not 1 <= self.session_hours <= 24:
