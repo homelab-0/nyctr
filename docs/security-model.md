@@ -72,6 +72,11 @@ operator also routes the two hostnames separately, for example by publishing
 only the portal's hostname to a wider network. A caller who can reach the
 application under the console's hostname is on the console address.
 
+The proxy in front of Nyctr must pass the original Host header through. The two
+addresses must be different hostnames: browsers share cookies between ports of
+one hostname, so two ports would share a session. Both addresses are stored the
+way a browser sends an origin, lower-case and without the scheme's default port.
+
 Without `NYCTR_PORTAL_URL` there is one address and roles alone decide what a
 session can do, as before.
 

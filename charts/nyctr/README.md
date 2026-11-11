@@ -139,6 +139,10 @@ Service, and the Ingress TLS secret must be valid for both. Before deploying:
   address it started from.
 - Create DNS for the second name. An annotation such as
   `external-dns.alpha.kubernetes.io/hostname` needs both names.
+- Make sure your gateway or ingress passes the original `Host` header to the
+  pod, which is the default for both. Nyctr tells the addresses apart by it.
+- Use two different hostnames. Two ports of one hostname are refused, because
+  a browser shares cookies between them.
 
 On the portal address every session has member rights, including an
 administrator's, so the console cannot be reached through it. On the console

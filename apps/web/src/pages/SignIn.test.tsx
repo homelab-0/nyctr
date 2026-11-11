@@ -38,6 +38,28 @@ describe('sign-in page', () => {
     expect(screen.getByRole('heading', { name: /See what is connected/ })).toBeDefined();
   });
 
+  it('sends the demo member shortcut to the portal address instead of signing in on the console', async () => {
+    open({
+      mode: 'demo',
+      local_enabled: true,
+      site: 'console',
+      portal_url: 'https://blocked.example',
+    });
+    const shortcut = await screen.findByRole('link', { name: 'Open member portal' });
+    expect(shortcut.getAttribute('href')).toBe('https://blocked.example');
+    expect(screen.queryByRole('button', { name: 'Open member portal' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Explore as admin' })).toBeDefined();
+    cleanup();
+    open({
+      mode: 'demo',
+      local_enabled: true,
+      site: 'portal',
+      portal_url: 'https://blocked.example',
+    });
+    expect(await screen.findByRole('button', { name: 'Open member portal' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Explore as admin' })).toBeNull();
+  });
+
   it('is unchanged when there is one address for everyone', async () => {
     open({});
     expect(await screen.findByText(/Sign in to see why and ask to open it/)).toBeDefined();

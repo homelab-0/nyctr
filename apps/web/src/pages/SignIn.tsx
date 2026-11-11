@@ -163,13 +163,20 @@ export default function SignIn() {
                         Explore as admin
                       </button>
                     )}
-                    <button
-                      className="button secondary"
-                      disabled={pending}
-                      onClick={() => void signIn('jamie@nyctr.demo', 'nyctr-demo')}
-                    >
-                      Open member portal
-                    </button>
+                    {portalUrl ? (
+                      // Members cannot sign in on the console address, so go to theirs.
+                      <a className="button secondary" href={portalUrl}>
+                        Open member portal
+                      </a>
+                    ) : (
+                      <button
+                        className="button secondary"
+                        disabled={pending}
+                        onClick={() => void signIn('jamie@nyctr.demo', 'nyctr-demo')}
+                      >
+                        Open member portal
+                      </button>
+                    )}
                   </div>
                 </div>
               )}

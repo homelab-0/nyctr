@@ -46,7 +46,10 @@ that binding deliberately if the reverse proxy runs in another container.
 To give members their own address, set `NYCTR_PORTAL_URL` to a second HTTPS
 origin on a different host, serve both names from the reverse proxy to the same
 application, and add `<portal>/api/auth/oidc/callback` to the identity
-provider's allowed redirects. What each address allows is described under
+provider's allowed redirects. The reverse proxy must pass the original `Host`
+header through for both names, including any port: Nyctr tells the addresses
+apart by it, and a proxy that replaces it with the upstream's name makes every
+request look like the console's. What each address allows is described under
 "Two addresses" in the [security model](../docs/security-model.md).
 
 The first deployment either bootstraps a local administrator from environment

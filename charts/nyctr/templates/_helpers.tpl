@@ -80,8 +80,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- if ne $portal.scheme $origin.scheme -}}
 {{- fail "portalUrl must use the same scheme as publicUrl." -}}
 {{- end -}}
-{{- if eq (lower $portal.host) (lower $origin.host) -}}
-{{- fail "portalUrl must be a different host from publicUrl. Leave it empty to serve the member portal on the console address." -}}
+{{- /* Hostnames, not host:port: a browser shares cookies between ports of one host. */ -}}
+{{- if eq (lower (include "nyctr.portalHostname" .)) (lower (include "nyctr.hostname" .)) -}}
+{{- fail "portalUrl must be a different hostname from publicUrl. Leave it empty to serve the member portal on the console address." -}}
 {{- end -}}
 {{- if eq .Values.mode "demo" -}}
 {{- fail "portalUrl is not supported in demo mode." -}}

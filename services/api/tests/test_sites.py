@@ -35,8 +35,11 @@ def signin(client, who):
 
 
 @pytest.mark.parametrize("portal_url,message", [
-    ("http://console.test", "different host"),
-    ("http://CONSOLE.test/", "different host"),
+    ("http://console.test", "different hostname"),
+    ("http://CONSOLE.test/", "different hostname"),
+    ("http://console.test:8081", "different hostname"),
+    ("http://console.test:80", "different hostname"),
+    ("http://portal.test:99999", "invalid port"),
     ("https://portal.test", "same scheme"),
     ("http://portal.test/blocked", "without a path"),
     ("http://user:secret@portal.test", "plain HTTP"),
@@ -48,6 +51,29 @@ def test_portal_address_must_be_a_second_plain_origin(portal_url, message):
     """Refuse a portal address that is the console's own host, another scheme, or not a bare origin."""
     with pytest.raises(ValueError, match=message):
         Settings(mode="demo", database_url="sqlite:///:memory:", public_url=CONSOLE, portal_url=portal_url)
+
+
+def test_addresses_are_stored_the_way_a_browser_sends_them():
+    """Lower-case host, no default port: otherwise a correct request's Origin would never match."""
+    settings = Settings(mode="demo", database_url="sqlite:///:memory:", public_url="HTTP://Console.Test:80/",
+                        portal_url="http://PORTAL.test:80")
+    assert (settings.public_url, settings.portal_url) == (CONSOLE, PORTAL)
+    # A non-default port is part of the origin and is kept, as local development needs.
+    local = Settings(mode="demo", database_url="sqlite:///:memory:", public_url="http://localhost:5173",
+                     portal_url="http://portal.localhost:5173")
+    assert (local.public_url, local.portal_url) == ("http://localhost:5173", "http://portal.localhost:5173")
+
+
+def test_an_address_written_with_its_default_port_still_accepts_its_own_pages():
+    """The case that used to refuse every change: the browser's Origin has no port, the setting had one."""
+    app = create_app(Settings(mode="demo", database_url="sqlite:///:memory:", public_url=CONSOLE + ":80",
+                              portal_url=PORTAL + ":80", cookie_secure=False))
+    with TestClient(app, base_url=CONSOLE) as console, TestClient(app, base_url=PORTAL) as portal:
+        admin = {"X-CSRF-Token": signin(console, ADMIN).json()["csrf_token"], "Origin": CONSOLE}
+        member = {"X-CSRF-Token": signin(portal, MEMBER).json()["csrf_token"], "Origin": PORTAL}
+        assert portal.get("/api/auth/config").json()["site"] == "portal"
+        assert console.post("/api/auth/logout", headers=admin).status_code == 200
+        assert portal.post("/api/auth/logout", headers=member).status_code == 200
 
 
 def test_portal_address_is_optional_and_normalised():
