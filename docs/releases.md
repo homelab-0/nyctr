@@ -38,10 +38,30 @@ When the version has no tag, the same run, for that exact commit:
    prereleases.
 8. Confirms that the new tag identifies the published commit.
 
-The tag is created only after everything is published. If a step fails there is
-no tag and no release: fix the cause and run the workflow again from the Actions
-page (`workflow_dispatch` on `main`), which retries the same version. Until the
-release exists, treat any image or chart tag from a failed run as unpublished.
+### When a release run fails
+
+The tag is created only after everything is published, so a failure before the
+last job leaves no tag and no release. Until the release exists, treat any image
+or chart tag from a failed run as unpublished. First look at which job failed
+and whether the release and tag exist, then choose:
+
+- **Re-run the failed jobs of that run** (Actions page, "Re-run failed jobs").
+  This keeps the run's commit and the results of the jobs that passed. Prefer it
+  whenever the publish job succeeded and only the release job failed: the
+  release is then created for the image digest that was already attested.
+  Running the publish job again builds a new image and moves the version tag to
+  a different digest, leaving the first attestation pointing at an image the
+  tag no longer names.
+- **Start a new run** (`workflow_dispatch` on `main`). This releases whatever
+  `main` declares now, at its current commit. That is the same version only if
+  no later merge changed it, so check the version on `main` first. It rebuilds
+  and republishes everything.
+- **If the release and tag already exist**, neither helps: every later run sees
+  the tag and stops at the plan. That happens when the last step, which
+  confirms the tag points at the published commit, is the one that failed. Do
+  not move the tag. Compare the tag's commit with the run's commit. If they
+  differ, the tag was created by something else while the run was in progress:
+  withdraw the release, say so in its notes, and publish the next version.
 
 Only the publication job receives package-write and attestation permissions, and
 only the final job may write to the repository, to create the release. No
