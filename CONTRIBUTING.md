@@ -29,7 +29,10 @@ Helm available. CI checks Helm 3 and 4, installs the chart in a disposable kind
 cluster, and exercises PostgreSQL persistence. The container jobs run natively
 on AMD64 and ARM64; the provider acceptance job uses an internal Docker network.
 Release metadata checks run with `python -m pytest tests/release -q`. Creating a
-pull request does not publish an image or deploy the application.
+pull request does not publish an image or deploy the application. Merging one
+that changes the version does release it, automatically: see
+[docs/releases.md](docs/releases.md). Leave the version alone unless the pull
+request is meant to be a release.
 
 ## Integration contributions
 

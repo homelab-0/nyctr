@@ -6,18 +6,24 @@ the isolated acceptance stack remain usable before the first publication.
 
 ## What triggers publication
 
-Publishing a GitHub Release triggers `.github/workflows/release.yml`. Both stable
-and prerelease versions use that event. A pull request or ordinary branch push
-does not publish an image or a chart. The workflow:
+A release is made by merging a version change to `main`. Nobody creates a tag or
+a GitHub Release by hand.
 
-1. Runs the reusable CI workflow against the exact release commit, including API,
-   frontend, container, chart, and isolated integration checks.
-2. Checks out the exact commit with persisted Git credentials disabled and
-   verifies that it belongs to `main`.
-3. Validates the version identifier against the API, Python package, frontend,
-   and lockfile metadata before constructing registry tags, and confirms the
-   fetched release tag still identifies that exact commit. Chart tests also
-   require its application version to match the API and frontend.
+Every push to `main` runs `.github/workflows/release.yml`. Its first job reads
+the version the source declares and asks the remote whether a tag for that
+version exists. If it does, the run ends there, which is what happens for every
+ordinary merge. A pull request never publishes anything.
+
+When the version has no tag, the same run, for that exact commit:
+
+1. Requires the version's release notes, `docs/release-notes/v<version>.md`.
+2. Runs the reusable CI workflow, including API, frontend, container, chart, and
+   isolated integration checks.
+3. Checks out the exact commit with persisted Git credentials disabled, verifies
+   that it belongs to `main`, validates the version against the API, Python
+   package, frontend, and lockfile metadata before constructing registry tags,
+   and asks the remote once more that the version is still unreleased. Chart
+   tests also require its version and application version to match.
 4. Builds and publishes `linux/amd64` and `linux/arm64` images to
    `ghcr.io/<repository-owner>/<repository-name>`.
 5. Includes BuildKit SBOM/provenance metadata and creates a GitHub provenance
@@ -26,12 +32,25 @@ does not publish an image or a chart. The workflow:
    and its application version, and pushes it to
    `oci://ghcr.io/<repository-owner>/charts/nyctr`. This happens after the image,
    so a chart version never exists without its image.
-7. Records the immutable `image@sha256:...` reference and the chart reference
-   in the workflow summary.
+7. Creates the GitHub Release and its tag at that commit, last. The body is the
+   release notes file followed by the image digest, the chart reference and the
+   source commit. Versions with `-alpha.N`, `-beta.N` or `-rc.N` are marked as
+   prereleases.
+8. Confirms that the new tag identifies the published commit.
 
-Only the publication job receives package-write and attestation permissions. No
+The tag is created only after everything is published. If a step fails there is
+no tag and no release: fix the cause and run the workflow again from the Actions
+page (`workflow_dispatch` on `main`), which retries the same version. Until the
+release exists, treat any image or chart tag from a failed run as unpublished.
+
+Only the publication job receives package-write and attestation permissions, and
+only the final job may write to the repository, to create the release. No
 provider credentials or deployment secrets belong in build arguments or images.
 Actions are pinned to reviewed commit SHAs; update those pins deliberately.
+
+Because a merge is what releases, review a pull request that changes the version
+as a release. Do not create a tag or a GitHub Release by hand: the workflow
+would see the tag and publish nothing for it.
 
 Accepted tags are `vMAJOR.MINOR.PATCH` and
 `vMAJOR.MINOR.PATCH-alpha.N`, `-beta.N`, or `-rc.N`, for example
@@ -45,14 +64,18 @@ image: set `image.digest` to the digest recorded by the same release.
 
 ## Maintainer release checklist
 
-- Merge the reviewed change and confirm its CI results.
-- Keep API, Python package, frontend, lockfile, chart version and chart
-  application-version metadata aligned with the intended release. Update the README's release status
-  when preparing the first published version.
+In one pull request:
+
+- Change the version in the API (`services/api/nyctr/__init__.py`), the Python
+  package, the frontend package and lockfile, and the chart's version and
+  application version. Tests fail if any of them disagree.
+- Add `docs/release-notes/v<version>.md`. A test fails without it.
 - Run the isolated acceptance instructions and retain a report that identifies
   the exact source commit, operating system, architecture, and tested scenarios.
-- Create the version tag on the tested commit in `main` and publish its GitHub
-  Release, marking alpha/beta/rc releases as prereleases.
+
+Then:
+
+- Merge it. The release workflow starts on its own.
 - Wait for the release workflow to complete. A failed publication or attestation
   step is not a completed release, even if an image tag was created earlier.
 - Verify package visibility and access. The image and the chart are two separate
@@ -67,7 +90,7 @@ the previous digest for reproducible investigations or application rollback.
 
 ## Using a published image with Compose
 
-Set `NYCTR_IMAGE` to a digest copied from a successful release. The image override
+Set `NYCTR_IMAGE` to the digest listed in a release's notes. The image override
 retains the existing Compose security and database settings. For the local demo:
 
 ```sh
