@@ -196,11 +196,12 @@ Secret references, OIDC, and optional Ingress or Gateway API routing. It keeps
 one application replica during alpha and validates explicit live-mode settings.
 It does not provision an identity provider or a production database for you.
 
-The [release workflow](docs/releases.md) validates a tagged source version before
-publishing AMD64/ARM64 images with SBOM and provenance metadata, followed by the
-Helm chart under the same version. A workflow in the repository is not proof
-that a release image has been published: use only a completed release's
-recorded image digest. The source-build quick start above
+Merging a version change to `main` releases it: the
+[release workflow](docs/releases.md) validates the source version, publishes
+AMD64/ARM64 images with SBOM and provenance metadata, then the Helm chart under
+the same version, and only then creates the GitHub Release. A workflow in the
+repository is not proof that a release image has been published: use only a
+completed release's recorded image digest. The source-build quick start above
 works before the first published image.
 
 For independent testing, use the [Cloudex acceptance handoff](docs/testing/cloudex.md).

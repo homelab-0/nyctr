@@ -1,4 +1,4 @@
-"""Protect the publication boundary from ambiguous tags and output injection."""
+"""Protect the publication boundary from ambiguous tags, output injection and repeated releases."""
 
 import importlib.util
 import json
@@ -82,6 +82,13 @@ def test_current_checkout_versions_are_consistent():
     root = Path(__file__).resolve().parents[2]
     version = json.loads((root / "apps/web/package.json").read_text(encoding="utf-8"))["version"]
     MODULE.validate_source_versions(version, root)
+
+
+def test_current_checkout_version_has_release_notes():
+    """A pull request that changes the version must bring that version's notes, or the release would stop on main."""
+    root = Path(__file__).resolve().parents[2]
+    version = json.loads((root / "apps/web/package.json").read_text(encoding="utf-8"))["version"]
+    assert MODULE.release_notes_path("v" + version, root) == f"docs/release-notes/v{version}.md"
 
 
 @pytest.mark.parametrize("source", ["runtime", "python", "web", "lock", "lock_root"])
@@ -258,3 +265,142 @@ def test_cli_git_guard_runs_before_metadata_or_workflow_output(git_source, match
         assert result.returncode != 0 and "does not resolve to the expected commit" in result.stderr
         assert result.stdout == ""
         assert output.read_text(encoding="utf-8") == "existing=value\n"
+
+
+def with_notes(root, tag="v0.1.0-alpha.1", text="What changed.\n"):
+    """Add a version's release notes to a synthetic checkout."""
+    notes = root / "docs/release-notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / f"{tag}.md").write_text(text, encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def released_source(tmp_path):
+    """A checkout whose origin is a real bare repository, so the remote tag lookup is not simulated."""
+    root = with_notes(source_tree(tmp_path / "work"))
+    git(root, "init", "--quiet", "--initial-branch=main", "--object-format=sha1")
+    git(root, "add", "--all")
+    git(root, "commit", "--quiet", "-m", "Synthetic release source")
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--quiet", "--bare", "--initial-branch=main", "--object-format=sha1", str(origin))
+    git(root, "remote", "add", "origin", str(origin))
+    git(root, "push", "--quiet", "origin", "main")
+    return root
+
+
+@pytest.mark.parametrize("version,python_version,prerelease", [
+    ("0.1.0-alpha.1", "0.1.0a1", "true"), ("2.3.4-rc.1", "2.3.4rc1", "true"), ("1.0.0", "1.0.0", "false"),
+])
+def test_plan_releases_a_source_version_the_remote_has_no_tag_for(tmp_path, version, python_version, prerelease):
+    """An unreleased version is released once, as a prerelease exactly when its version says so."""
+    root = with_notes(source_tree(tmp_path / "work", version, python_version), "v" + version)
+    git(root, "init", "--quiet", "--initial-branch=main", "--object-format=sha1")
+    git(root, "add", "--all")
+    git(root, "commit", "--quiet", "-m", "Synthetic release source")
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--quiet", "--bare", "--initial-branch=main", "--object-format=sha1", str(origin))
+    git(root, "remote", "add", "origin", str(origin))
+    assert MODULE.release_plan(root) == {"release": "true", "tag": "v" + version, "prerelease": prerelease,
+                                         "notes": f"docs/release-notes/v{version}.md"}
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_plan_never_releases_a_version_the_remote_already_tagged(released_source, annotated):
+    """The remote decides, not the checkout: the tag exists only on origin and is still found."""
+    root = released_source
+    git(root, "tag", *(["-a", "-m", "Synthetic release tag"] if annotated else []), "v0.1.0-alpha.1")
+    git(root, "push", "--quiet", "origin", "refs/tags/v0.1.0-alpha.1")
+    git(root, "tag", "--delete", "v0.1.0-alpha.1")
+    assert MODULE.tag_is_published("v0.1.0-alpha.1", root) is True
+    assert MODULE.release_plan(root) == {"release": "false", "tag": "v0.1.0-alpha.1", "prerelease": "false",
+                                         "notes": ""}
+
+
+def test_a_local_tag_or_a_similar_remote_tag_does_not_count_as_published(released_source):
+    """Only the exact tag on the remote means released: not a local tag, a longer tag or a branch of that name."""
+    root = released_source
+    git(root, "tag", "v0.1.0-alpha.1")
+    git(root, "tag", "v0.1.0-alpha.10")
+    git(root, "push", "--quiet", "origin", "refs/tags/v0.1.0-alpha.10", "main:refs/heads/v0.1.0-alpha.1")
+    assert MODULE.tag_is_published("v0.1.0-alpha.1", root) is False
+    assert MODULE.release_plan(root)["release"] == "true"
+
+
+def test_an_unreachable_remote_is_an_error_not_an_unreleased_version(tmp_path):
+    """Failing to ask must never be read as permission to publish."""
+    root = with_notes(source_tree(tmp_path))
+    git(root, "init", "--quiet", "--initial-branch=main", "--object-format=sha1")
+    git(root, "remote", "add", "origin", str(tmp_path / "absent.git"))
+    with pytest.raises(ValueError, match="Cannot ask the remote"):
+        MODULE.release_plan(root)
+
+
+@pytest.mark.parametrize("tag", ["--upload-pack=touch /tmp/x", "v0.1.0-alpha.1\nHEAD", "main"])
+def test_remote_lookup_validates_the_tag_before_invoking_git(tmp_path, monkeypatch, tag):
+    """A malformed tag must fail validation without reaching the subprocess boundary."""
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *a, **k: pytest.fail("Git was invoked"))
+    with pytest.raises(ValueError):
+        MODULE.tag_is_published(tag, tmp_path)
+
+
+@pytest.mark.parametrize("problem", ["missing", "empty", "oversized", "symlink"])
+def test_an_unreleased_version_without_usable_notes_is_not_released(released_source, problem):
+    """Stop before publication when the version's notes are absent, blank, too long or not a regular file."""
+    root = released_source
+    notes = root / "docs/release-notes/v0.1.0-alpha.1.md"
+    notes.unlink()
+    if problem == "empty":
+        notes.write_text(" \n", encoding="utf-8")
+    elif problem == "oversized":
+        notes.write_text("x" * (MODULE.MAX_NOTES_BYTES + 1), encoding="utf-8")
+    elif problem == "symlink":
+        (root / "elsewhere.md").write_text("Not the notes.\n", encoding="utf-8")
+        notes.symlink_to(root / "elsewhere.md")
+    with pytest.raises(ValueError, match="[Rr]elease notes"):
+        MODULE.release_plan(root)
+
+
+@pytest.mark.parametrize("version", ["0.1.0", "9.9.9-dev", "1.0.0+build"])
+def test_plan_refuses_inconsistent_or_unreleasable_source_versions(released_source, version):
+    """A version that disagrees across sources, or cannot be a release tag, never becomes a plan."""
+    (released_source / "services/api/nyctr/__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        MODULE.release_plan(released_source)
+
+
+def test_cli_plan_writes_only_the_plan_and_rejects_mixed_modes(released_source):
+    """The plan is the whole output; publication arguments cannot be combined with it."""
+    root = released_source
+    output = root / "github-output"
+    result = subprocess.run([sys.executable, str(MODULE.__file__), "--plan", "--source-root", str(root),
+                             "--github-output", str(output)],
+                            capture_output=True, text=True, check=False, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == (
+        "release=true\ntag=v0.1.0-alpha.1\nprerelease=true\nnotes=docs/release-notes/v0.1.0-alpha.1.md\n")
+    for extra in (["--tag", "v0.1.0-alpha.1"], ["--revision", REVISION], ["--verify-git-tag"]):
+        mixed = subprocess.run([sys.executable, str(MODULE.__file__), "--plan", "--source-root", str(root), *extra],
+                               capture_output=True, text=True, check=False, timeout=30)
+        assert mixed.returncode != 0 and mixed.stdout == ""
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_cli_refuses_to_emit_publication_metadata_for_a_released_version(released_source, published):
+    """Checked again immediately before publishing, so a tag created meanwhile stops the image push."""
+    root = released_source
+    if published:
+        git(root, "tag", "v0.1.0-alpha.1")
+        git(root, "push", "--quiet", "origin", "refs/tags/v0.1.0-alpha.1")
+    output = root / "github-output"
+    output.write_text("existing=value\n", encoding="utf-8")
+    result = subprocess.run([sys.executable, str(MODULE.__file__), "--tag", "v0.1.0-alpha.1",
+                             "--repository", "homelab-0/nyctr", "--revision", REVISION,
+                             "--source-root", str(root), "--github-output", str(output), "--require-unreleased"],
+                            capture_output=True, text=True, check=False, timeout=30)
+    if published:
+        assert result.returncode != 0 and "already has a release tag" in result.stderr
+        assert result.stdout == "" and output.read_text(encoding="utf-8") == "existing=value\n"
+    else:
+        assert result.returncode == 0, result.stderr
+        assert "version=0.1.0-alpha.1\n" in output.read_text(encoding="utf-8")

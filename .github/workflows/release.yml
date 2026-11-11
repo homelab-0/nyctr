@@ -1,27 +1,65 @@
-name: Publish release image and chart
+name: Release
 
+# A release is made by merging a version change to main. Every push to main
+# runs the plan job, which takes seconds: it reads the version the source
+# declares and asks the remote whether that version has a tag. If it has, the
+# run ends there. If not, the same commit is verified, published and released.
+# Nobody creates a tag or a GitHub Release by hand.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+  # Retry a release whose run failed, without another commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# One release at a time. A run waiting behind another plans again when its turn
+# comes and finds the version already released.
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  plan:
+    name: Decide whether this commit is an unreleased version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      notes: ${{ steps.plan.outputs.notes }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Compare the source version with the released tags
+        id: plan
+        run: python3 scripts/release_metadata.py --plan --github-output "$GITHUB_OUTPUT"
+
   verify:
     name: Validate release source
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   publish:
     name: Publish verified version
-    needs: verify
+    needs: [plan, verify]
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.metadata.outputs.image }}
+      digest: ${{ steps.image.outputs.digest }}
+      version: ${{ steps.metadata.outputs.version }}
+      chart_registry: ${{ steps.metadata.outputs.chart_registry }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -34,10 +72,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate version and main ancestry
+      # Asked again here, immediately before anything is pushed: a version that
+      # gained a tag while CI ran is never published a second time.
+      - name: Validate version, main ancestry and that the version is unreleased
         id: metadata
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_REVISION: ${{ github.sha }}
         run: |
@@ -47,7 +87,7 @@ jobs:
             --tag "$RELEASE_TAG" \
             --repository "$RELEASE_REPOSITORY" \
             --revision "$RELEASE_REVISION" \
-            --verify-git-tag \
+            --require-unreleased \
             --github-output "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
         with:
@@ -109,3 +149,60 @@ jobs:
         run: |
           printf '## Published image\n\n`%s@%s`\n' "$RELEASE_IMAGE" "$RELEASE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
           printf '\n## Published chart\n\n`%s/nyctr` version `%s`\n' "$CHART_REGISTRY" "$CHART_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  # Last, so a GitHub Release and its tag exist only once the image, its
+  # attestation and the chart are all published. If anything above fails there
+  # is no tag, and running the workflow again retries the same version. This is
+  # the only job that can write to the repository, and it cannot write packages.
+  release:
+    name: Create the GitHub Release
+    needs: [plan, publish]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Create the release and its tag at the published commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+          RELEASE_NOTES: ${{ needs.plan.outputs.notes }}
+          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_IMAGE: ${{ needs.publish.outputs.image }}
+          RELEASE_DIGEST: ${{ needs.publish.outputs.digest }}
+          CHART_REGISTRY: ${{ needs.publish.outputs.chart_registry }}
+          CHART_VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_REVISION"
+          case "$RELEASE_DIGEST" in sha256:*) ;; *) echo "No image digest was published" >&2; exit 1 ;; esac
+          body="$RUNNER_TEMP/release-body.md"
+          cp -- "$RELEASE_NOTES" "$body"
+          {
+            printf '\n## Artifacts\n\n'
+            printf -- '- Image: `%s@%s`\n' "$RELEASE_IMAGE" "$RELEASE_DIGEST"
+            printf -- '- Chart: `%s/nyctr` version `%s`\n' "$CHART_REGISTRY" "$CHART_VERSION"
+            printf -- '- Source: `%s`\n' "$RELEASE_REVISION"
+          } >> "$body"
+          flags=()
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_REVISION" \
+            --title "$RELEASE_TAG" --notes-file "$body" "${flags[@]}"
+      # A tag that someone created meanwhile would have been reused as it was.
+      # Fail loudly if the tag is not the commit that was just published.
+      - name: Confirm the tag identifies the published commit
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_REVISION: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          python3 scripts/release_metadata.py \
+            --tag "$RELEASE_TAG" \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$RELEASE_REVISION" \
+            --verify-git-tag
