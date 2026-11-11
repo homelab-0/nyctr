@@ -8,11 +8,17 @@ export interface User {
   role: Role;
   csrf_token: string;
   mode: Mode;
+  /** Set for an administrator on the member portal address: where the console is. */
+  console_url?: string | null;
 }
 export interface AuthConfig {
   mode: Mode;
   local_enabled: boolean;
   oidc_enabled: boolean;
+  /** Which address this page was opened on. Absent on servers that only have one. */
+  site?: 'console' | 'portal';
+  /** The member portal's address when it is separate from the console. */
+  portal_url?: string | null;
 }
 export interface Resource {
   id: string;

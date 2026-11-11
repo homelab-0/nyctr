@@ -11,19 +11,24 @@ metadata:
   {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- $hosts := compact (list (include "nyctr.hostname" .) (include "nyctr.portalHostname" .)) }}
   tls:
     - hosts:
-        - {{ include "nyctr.hostname" . | quote }}
+        {{- range $hosts }}
+        - {{ . | quote }}
+        {{- end }}
       secretName: {{ .Values.ingress.tlsSecretName | quote }}
   rules:
-    - host: {{ include "nyctr.hostname" . | quote }}
+    {{- range $hosts }}
+    - host: {{ . | quote }}
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ include "nyctr.fullname" . }}
+                name: {{ include "nyctr.fullname" $ }}
                 port:
-                  number: {{ .Values.service.port }}
+                  number: {{ $.Values.service.port }}
+    {{- end }}
 {{- end }}

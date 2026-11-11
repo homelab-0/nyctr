@@ -7,6 +7,26 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _browser_origin(name: str, parsed) -> str:
+    """Write an origin the way a browser sends it, so the origin check cannot fail for a correct request.
+
+    Browsers lower-case the host and leave the scheme's default port out of the
+    Origin header. An address configured as `https://Host:443` would never
+    match, and every change would be refused. The sign-in redirect is built from
+    the same normalised origin.
+    """
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError(f"{name} has an invalid port") from None
+    host = (parsed.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    if port is None or port == {"http": 80, "https": 443}.get(parsed.scheme):
+        return f"{parsed.scheme}://{host}"
+    return f"{parsed.scheme}://{host}:{port}"
+
+
 class Settings(BaseSettings):
     """Operational configuration loaded from NYCTR_ environment variables.
 
@@ -17,6 +37,8 @@ class Settings(BaseSettings):
     mode: Literal["demo", "live"] = "live"
     database_url: str = "sqlite:///./nyctr.db"
     public_url: str = "http://localhost:8080"
+    # Optional second origin for the member portal. Empty serves everything on public_url.
+    portal_url: str = ""
     cookie_secure: bool | None = None
     local_login_enabled: bool = True
     bootstrap_admin_email: str = ""
@@ -55,6 +77,22 @@ class Settings(BaseSettings):
             raise ValueError("NYCTR_PUBLIC_URL must be an HTTP(S) origin without a path")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("NYCTR_PUBLIC_URL must be a plain HTTP(S) origin")
+        self.public_url = _browser_origin("NYCTR_PUBLIC_URL", parsed)
+        if self.portal_url:
+            self.portal_url = self.portal_url.rstrip("/")
+            portal = urlsplit(self.portal_url)
+            if portal.scheme not in ("http", "https") or not portal.netloc or portal.path:
+                raise ValueError("NYCTR_PORTAL_URL must be an HTTP(S) origin without a path")
+            if portal.username or portal.password or portal.query or portal.fragment:
+                raise ValueError("NYCTR_PORTAL_URL must be a plain HTTP(S) origin")
+            self.portal_url = _browser_origin("NYCTR_PORTAL_URL", portal)
+            if portal.scheme != parsed.scheme:
+                raise ValueError("NYCTR_PORTAL_URL must use the same scheme as NYCTR_PUBLIC_URL")
+            # Hostnames, not host:port. A browser shares cookies between ports of one
+            # host, so two ports of the same name would share a session.
+            if (portal.hostname or "").lower() == (parsed.hostname or "").lower():
+                raise ValueError("NYCTR_PORTAL_URL must be a different hostname from NYCTR_PUBLIC_URL; "
+                                 "leave it empty to serve the portal on the console address")
         if self.cookie_secure is None:
             self.cookie_secure = self.mode == "live"
         if not 1 <= self.session_hours <= 24:

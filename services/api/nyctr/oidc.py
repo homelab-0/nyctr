@@ -20,7 +20,8 @@ from sqlalchemy import delete, select
 from starlette.responses import RedirectResponse
 
 from .models import OIDCFlow, User, utc, utcnow
-from .security import COOKIE_NAME, digest, issue_session
+from .security import COOKIE_NAME, audit, digest, issue_session
+from .sites import members_use_portal, origin_of, seen_as, site_of
 
 router = APIRouter(prefix="/api/auth/oidc")
 FLOW_COOKIE = "nyctr_oidc"
@@ -120,7 +121,8 @@ async def login(request: Request):
     url = metadata["authorization_endpoint"]
     url += ("&" if "?" in url else "?") + urlencode({
         "response_type": "code", "client_id": settings.oidc_client_id,
-        "redirect_uri": settings.public_url + "/api/auth/oidc/callback",
+        # Back to the address the person started from: the session cookie belongs to that host.
+        "redirect_uri": origin_of(settings, site_of(request)) + "/api/auth/oidc/callback",
         "scope": "openid profile email", "state": state, "nonce": nonce,
         "code_challenge": challenge, "code_challenge_method": "S256",
     })
@@ -162,7 +164,7 @@ async def callback(request: Request, state: str = "", code: str = ""):
                 metadata = await discovery(client, settings)
                 methods = metadata.get("token_endpoint_auth_methods_supported", ["client_secret_basic"])
                 data = {"grant_type": "authorization_code", "code": code, "code_verifier": verifier,
-                        "redirect_uri": settings.public_url + "/api/auth/oidc/callback"}
+                        "redirect_uri": origin_of(settings, site_of(request)) + "/api/auth/oidc/callback"}
                 if "client_secret_basic" in methods:
                     auth = httpx.BasicAuth(settings.oidc_client_id, settings.oidc_client_secret)
                 elif "client_secret_post" in methods:
@@ -191,7 +193,17 @@ async def callback(request: Request, state: str = "", code: str = ""):
             raise HTTPException(403, "This account is disabled")
         else:
             user.role, user.email, user.name = role, email, name
-        response = RedirectResponse("/#/overview" if role == "admin" else "/#/portal", status_code=302)
+        if members_use_portal(request, user):
+            # The console address is for administrators. Keep the account up to date, give no
+            # session here, and start sign-in again on the portal address. The target is the
+            # configured portal origin, never a value from the request.
+            audit(db, user.id, "auth.sent_to_portal", user.id)
+            db.commit()
+            response = RedirectResponse(settings.portal_url + "/api/auth/oidc/login", status_code=302)
+            response.delete_cookie(FLOW_COOKIE, path="/api/auth/oidc")
+            return response
+        here = seen_as(request, user).role
+        response = RedirectResponse("/#/overview" if here == "admin" else "/#/portal", status_code=302)
         response.delete_cookie(FLOW_COOKIE, path="/api/auth/oidc")
         issue_session(db, user, response, settings, request.cookies.get(COOKIE_NAME, ""))
         return response

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .models import DeviceGrant, Resource, utc, utcnow
 from .security import authenticate
+from .sites import seen_as
 
 
 def columns(instance, fields):
@@ -82,8 +83,13 @@ def get_db(request: Request):
 
 
 def identity(request: Request, db: Session = Depends(get_db)):
-    """Resolve the current session and enforce mutation CSRF through the shared auth boundary."""
-    return authenticate(request, db)
+    """Resolve the current session and enforce mutation CSRF through the shared auth boundary.
+
+    On the portal address the account is returned with member rights, so every
+    permission check downstream, including `admin`, treats it as a member.
+    """
+    user, session = authenticate(request, db)
+    return seen_as(request, user), session
 
 
 def admin(auth=Depends(identity)):

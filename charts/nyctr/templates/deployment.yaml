@@ -56,6 +56,10 @@ spec:
               value: {{ .Values.mode | quote }}
             - name: NYCTR_PUBLIC_URL
               value: {{ .Values.publicUrl | quote }}
+            {{- if .Values.portalUrl }}
+            - name: NYCTR_PORTAL_URL
+              value: {{ .Values.portalUrl | quote }}
+            {{- end }}
             - name: NYCTR_COOKIE_SECURE
               value: {{ eq .Values.mode "live" | quote }}
             - name: FORWARDED_ALLOW_IPS

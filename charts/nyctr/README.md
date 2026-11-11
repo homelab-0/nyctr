@@ -124,6 +124,34 @@ from `publicUrl`. Configure HTTPS redirect and a request timeout of at least
 100 seconds in your ingress controller. If you already manage routing outside
 the chart, leave both disabled and target the ClusterIP Service.
 
+### A separate address for members
+
+```yaml
+publicUrl: https://nyctr.example.org    # the console, for administrators
+portalUrl: https://blocked.example.org  # where members go about a blocked site
+```
+
+With `portalUrl` set, the HTTPRoute or Ingress carries both hostnames to the same
+Service, and the Ingress TLS secret must be valid for both. Before deploying:
+
+- Add `https://blocked.example.org/api/auth/oidc/callback` to the identity
+  provider's allowed redirects, next to the console's. Sign-in returns to the
+  address it started from.
+- Create DNS for the second name. An annotation such as
+  `external-dns.alpha.kubernetes.io/hostname` needs both names.
+- Make sure your gateway or ingress passes the original `Host` header to the
+  pod, which is the default for both. Nyctr tells the addresses apart by it.
+- Use two different hostnames. Two ports of one hostname are refused, because
+  a browser shares cookies between them.
+
+On the portal address every session has member rights, including an
+administrator's, so the console cannot be reached through it. On the console
+address a member is not signed in and is sent to the portal. This narrows what
+a session can do on each name. It is a network boundary only if you also route
+the two hostnames separately, because the application tells them apart by the
+Host header. See "Two addresses" in the
+[security model](../../docs/security-model.md).
+
 ### Proxy identity and network restrictions
 
 Live mode requires `forwardedAllowIps`: IPv4/IPv6 addresses of trusted proxy
@@ -153,6 +181,13 @@ reach the pod:
   is ignored.
 
 If you cannot establish all three, use exact proxy addresses.
+
+Known gap: those three cover who can connect to the pod. They do not cover a
+client that reaches Nyctr through your proxy from an address inside the trusted
+range, such as another pod in the same cluster. Nyctr skips that address as if
+it were a proxy and believes the client address the request claimed. Nyctr
+grants nothing on the client address alone, but treat it as a hint when you
+trust a range, and use exact proxy addresses if that is not acceptable.
 
 ```yaml
 forwardedAllowIps:

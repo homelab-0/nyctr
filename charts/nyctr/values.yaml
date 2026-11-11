@@ -14,7 +14,15 @@ image:
 imagePullSecrets: []
 
 # Live mode requires an HTTPS origin with no path, query or trailing slash.
+# This is the console address, where administrators work.
 publicUrl: ""
+# Optional second origin for the member portal, for example
+# https://blocked.example.org. Members sign in there to see what was blocked and
+# ask for access; on that address every session has member rights, so the
+# console is not reachable through it. Empty serves everything on publicUrl.
+# The HTTPRoute or Ingress then carries both hostnames, and the identity
+# provider must allow <portalUrl>/api/auth/oidc/callback as a second redirect.
+portalUrl: ""
 # Trusted proxy peers as observed by the pod: exact IPs, never hostnames or '*'.
 # A range such as 10.42.0.0/16 is accepted only while networkPolicy.enabled is
 # true. The chart cannot check who the policies admit: make sure ingressFrom,

@@ -5,6 +5,7 @@ services:
       NYCTR_MODE: live
       NYCTR_DATABASE_URL: postgresql+psycopg://nyctr:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@database:5432/nyctr
       NYCTR_PUBLIC_URL: ${NYCTR_PUBLIC_URL:?Set the public HTTPS origin}
+      NYCTR_PORTAL_URL: ${NYCTR_PORTAL_URL:-}
       NYCTR_COOKIE_SECURE: "true"
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:?Set the actual trusted reverse-proxy peer IPs}
       NYCTR_BOOTSTRAP_ADMIN_EMAIL: ${NYCTR_BOOTSTRAP_ADMIN_EMAIL:-}
