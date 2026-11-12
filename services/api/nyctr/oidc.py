@@ -203,7 +203,10 @@ async def callback(request: Request, state: str = "", code: str = ""):
             response.delete_cookie(FLOW_COOKIE, path="/api/auth/oidc")
             return response
         here = seen_as(request, user).role
-        response = RedirectResponse("/#/overview" if here == "admin" else "/#/portal", status_code=302)
+        # Fixed same-origin paths. The console address names no page, so the console opens its own
+        # first screen. Its fragment ("/") is still sent, because a browser carries the fragment of
+        # the sign-in address over to a redirect that has none.
+        response = RedirectResponse("/#/" if here == "admin" else "/#/portal", status_code=302)
         response.delete_cookie(FLOW_COOKIE, path="/api/auth/oidc")
         issue_session(db, user, response, settings, request.cookies.get(COOKIE_NAME, ""))
         return response

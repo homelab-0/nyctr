@@ -262,7 +262,8 @@ def test_an_administrator_signing_in_on_the_portal_lands_in_the_portal(signing_k
         me = portal.get("/api/auth/me").json()
         assert me["role"] == "member" and me["console_url"] == SSO_CONSOLE
         assert portal.get("/api/overview").status_code == 403
-        assert sso(console, seen).headers["location"] == "/#/overview"
+        # No page is named for the console: its own first screen applies (apps/web/src/App.test.tsx).
+        assert sso(console, seen).headers["location"] == "/#/"
         assert console.get("/api/auth/me").json()["role"] == "admin"
 
 
