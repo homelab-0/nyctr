@@ -270,11 +270,13 @@ async function openIntegrations({
   role = 'admin',
   diagnose = async () => jsonResponse(partialReport),
   source = connection,
+  partial,
 }: {
   mode?: Mode;
   role?: Role;
   diagnose?: () => Promise<Response>;
   source?: Integration;
+  partial?: boolean;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -291,7 +293,7 @@ async function openIntegrations({
     if (path === '/api/integrations/catalog') return jsonResponse(catalog);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
     if (path === `/api/integrations/${connection.id}/sync`) {
-      return jsonResponse({ ok: true, resource_count: 1, observation_count: 0 });
+      return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
     }
     throw new Error(`Unexpected synthetic request: ${options?.method || 'GET'} ${path}`);
   });
@@ -584,6 +586,16 @@ describe('integration connection diagnostics', () => {
     const posts = fetchMock.mock.calls.filter(([, options]) => options?.method === 'POST');
     expect(posts.map(([path]) => path)).toEqual([`/api/integrations/${connection.id}/sync`]);
     expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByText(/Only the most recent blocked lookups/)).toBeNull();
+  });
+
+  /** The confirmation must not read as a complete collection when the source held more than was read. */
+  it('says so right after collecting when only the most recent blocked lookups were read', async () => {
+    const { interaction } = await openIntegrations({ partial: true });
+    await interaction.click(screen.getByRole('button', { name: 'Collect snapshot' }));
+    await screen.findByText(
+      "Snapshot collected: 1 resources and 0 observations. Only the most recent blocked lookups were read. Older ones in this source's time window were not.",
+    );
   });
 });
 

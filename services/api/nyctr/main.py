@@ -78,6 +78,23 @@ class LoginInput(InputModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+def _settled_status(db: Session, integration: Integration) -> str:
+    """Work out the status a source had before an abandoned lease replaced it with "syncing".
+
+    The lease overwrites the stored status, so it is rebuilt from what the last
+    finished collection left behind: its error, else the audit record of the
+    last stored collection, which says whether that read was partial. A partial
+    source therefore stays partial until its next collection.
+    """
+    if integration.last_error:
+        return "error"
+    if not integration.last_sync:
+        return "configured"
+    last = db.scalar(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == integration.id)
+                     .order_by(Audit.created_at.desc()).limit(1))
+    return "partial" if last is not None and last.details.get("partial") is True else "connected"
+
+
 class IntegrationInput(InputModel):
     """Accept any registered integration and a constrained server-side secret reference."""
     provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]+$")
@@ -330,7 +347,7 @@ def create_app(settings: Settings | None = None):
         if previous_status == "syncing":
             # A claim can replace only an expired syncing lease. Restoring that
             # abandoned lease would leave a finished probe displayed as running.
-            previous_status = "error" if integration.last_error else "connected" if integration.last_sync else "configured"
+            previous_status = _settled_status(db, integration)
             previous_started_at = None
         claimed_at = utcnow()
         locked = db.execute(update(Integration).where(
@@ -386,7 +403,8 @@ def create_app(settings: Settings | None = None):
         due = after_collection(db, settings)
         db.commit()
         await guests.enforce(db, settings, due)
-        return {"ok": True, "resource_count": len(snapshot.resources), "observation_count": len(snapshot.blocks)}
+        return {"ok": True, "resource_count": len(snapshot.resources), "observation_count": len(snapshot.blocks),
+                "partial": snapshot.partial_rows is not None}
 
     @app.get("/api/devices")
     def devices(auth=Depends(identity), db: Session = Depends(get_db)):

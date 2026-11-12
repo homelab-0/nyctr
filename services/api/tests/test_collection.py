@@ -140,6 +140,7 @@ def test_busy_source_is_stored_and_audited_as_partial_not_as_an_error(tmp_path, 
         headers, id_ = setup_integration(client)
         response = client.post(f"/api/integrations/{id_}/sync", headers=headers)
         assert response.status_code == 200 and response.json()["observation_count"] == 30
+        assert response.json()["partial"] is True
         source = client.get("/api/integrations").json()[0]
         assert source["status"] == "partial"
         assert source["last_error"] is None and source["last_sync"]
@@ -159,7 +160,8 @@ def test_complete_collection_is_connected_and_audited_as_not_partial(tmp_path, m
     monkeypatch.setattr("nyctr.integrations.collect", complete)
     with live_client(tmp_path) as client:
         headers, id_ = setup_integration(client)
-        assert client.post(f"/api/integrations/{id_}/sync", headers=headers).status_code == 200
+        response = client.post(f"/api/integrations/{id_}/sync", headers=headers)
+        assert response.status_code == 200 and response.json()["partial"] is False
         assert client.get("/api/integrations").json()[0]["status"] == "connected"
         action, details = collection_audits(client, id_)[-1]
         assert action == "integration.collected" and details["partial"] is False and "rows_kept" not in details
