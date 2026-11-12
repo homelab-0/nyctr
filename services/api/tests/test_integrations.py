@@ -205,6 +205,76 @@ def test_pagination_cursor_is_only_a_query_value_never_an_external_url(monkeypat
     assert all(request.url.host == "api.nextdns.io" for request in calls)
 
 
+def log_pages(pages, fault=None):
+    """Serve a newest-first blocked log of full pages; `fault` maps a page number to its reply.
+
+    Row k of the whole log is k seconds older than the newest and has its own
+    name, so a test can tell exactly which rows were kept. A cursor is offered
+    after every page but the last.
+    """
+    def handler(request):
+        """Answer the profile read, then one log page per cursor."""
+        if request.url.path.endswith("abc123"):
+            return httpx.Response(200, json=profile())
+        assert request.url.params["sort"] == "desc"
+        assert request.url.params["limit"] == str(core.PAGE_SIZE)
+        page = int(request.url.params.get("cursor", "page-1").removeprefix("page-"))
+        if fault and page in fault:
+            return fault[page]
+        first = (page - 1) * core.PAGE_SIZE
+        rows = [blocked(timestamp=core.iso(NOW - timedelta(seconds=k + 1)), domain=f"d{k}.example")
+                for k in range(first, first + core.PAGE_SIZE)]
+        cursor = f"page-{page + 1}" if page < pages else None
+        return httpx.Response(200, json={"data": rows, "meta": {"pagination": {"cursor": cursor}}})
+    return handler
+
+
+def test_busy_log_keeps_the_most_recent_rows_within_the_unchanged_bound(monkeypatch):
+    """More blocked lookups than one collection may read: keep the newest, succeed, and say so."""
+    assert (core.MAX_PAGES, core.PAGE_SIZE) == (20, 200)
+    calls = mock_client(monkeypatch, log_pages(pages=core.MAX_PAGES + 10))
+    snapshot = run_nextdns()
+    kept = core.MAX_PAGES * core.PAGE_SIZE
+    # One profile read and no more than the page bound of log reads, exactly as before.
+    assert len(calls) == 1 + core.MAX_PAGES
+    assert snapshot.partial_rows == kept
+    assert {block["domain"] for block in snapshot.blocks} == {f"d{k}.example" for k in range(kept)}
+    assert min(block["observed_at"] for block in snapshot.blocks) == core.iso(NOW - timedelta(seconds=kept))
+
+
+def test_log_that_ends_on_the_last_allowed_page_is_complete(monkeypatch):
+    """A window that fits the bound exactly is a complete read, not a partial one."""
+    calls = mock_client(monkeypatch, log_pages(pages=core.MAX_PAGES))
+    snapshot = run_nextdns()
+    assert len(calls) == 1 + core.MAX_PAGES
+    assert snapshot.partial_rows is None
+    assert len(snapshot.blocks) == core.MAX_PAGES * core.PAGE_SIZE
+
+
+@pytest.mark.parametrize("page", [3, core.MAX_PAGES])
+@pytest.mark.parametrize(("reply", "message"), [
+    (lambda: httpx.Response(401), "denied access"),
+    (lambda: httpx.Response(403), "denied access"),
+    (lambda: httpx.Response(200, json={"data": ["not a row"]}), "invalid list"),
+    (lambda: httpx.Response(200, content=b"{not json"), "invalid JSON"),
+    (lambda: httpx.Response(200, json={"data": [blocked()], "meta": {"pagination": {"cursor": 7}}}), "invalid or repeated"),
+    (lambda: httpx.Response(200, json={"data": [blocked()], "meta": {"pagination": {"cursor": "page-2"}}}),
+     "invalid or repeated"),
+    (lambda: httpx.Response(200, content=b" " * (core.MAX_BODY_BYTES + 1)), "size limit"),
+])
+def test_a_fault_on_a_later_page_still_fails_and_returns_nothing(monkeypatch, page, reply, message):
+    """Keeping recent rows applies only to the page bound: every other fault discards what was read.
+
+    Each fault is tried mid-log and on the last allowed page, where the bound
+    must not turn it into a partial success.
+    """
+    calls = mock_client(monkeypatch, log_pages(pages=core.MAX_PAGES + 10, fault={page: reply()}))
+    with pytest.raises(IntegrationError, match=message) as error:
+        run_nextdns()
+    assert len(calls) == 1 + page
+    assert KEY not in str(error.value)
+
+
 @pytest.mark.parametrize("url", [
     "http://unifi.example/proxy/network/integration",
     "https://user:password@unifi.example/proxy/network/integration",

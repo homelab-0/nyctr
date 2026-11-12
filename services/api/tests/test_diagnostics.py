@@ -15,6 +15,7 @@ from test_collection import live_client, setup_integration
 from nyctr.integrations import IntegrationError, Snapshot, core
 from nyctr.models import (
     AccessRequest,
+    Audit,
     DeviceGrant,
     Finding,
     Integration,
@@ -462,15 +463,28 @@ def test_cancelled_probe_restores_prior_collection_health(saved, monkeypatch):
         assert db.get(Integration, integration_id).sync_started_at is None
 
 
-@pytest.mark.parametrize("prior_status", ["configured", "connected", "error"])
+@pytest.mark.parametrize("prior_status", ["configured", "connected", "partial", "error"])
 def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch, prior_status):
-    """Reclaim an expired probe and fence the original cleanup from the replacement's active lease."""
+    """Reclaim an expired probe and fence the original cleanup from the replacement's active lease.
+
+    The replacement finds only an abandoned "syncing" lease, so it must rebuild
+    the earlier status: a source whose last collection was partial stays partial,
+    and one whose last collection was complete is not turned into a partial one.
+    """
     client, headers, integration_id = saved
     with client.app.state.session_factory() as db:
         integration = db.get(Integration, integration_id)
         integration.status = prior_status
         integration.last_sync = None if prior_status == "configured" else utcnow() - timedelta(days=1)
         integration.last_error = "Earlier collection failed" if prior_status == "error" else None
+        if prior_status != "configured":
+            # An older partial read, then the collection that left the current status.
+            db.add(Audit(action="integration.collected", target_id=integration_id, created_at=utcnow() - timedelta(days=2),
+                         details={"resources": 1, "observations": 30, "partial": True, "rows_kept": 30}))
+            last_partial = prior_status in {"partial", "error"}
+            db.add(Audit(action="integration.collected", target_id=integration_id, created_at=utcnow() - timedelta(days=1),
+                         details={"resources": 1, "observations": 30, "partial": last_partial,
+                                  **({"rows_kept": 30} if last_partial else {})}))
         db.commit()
     prior_health = client.get("/api/integrations").json()
     lease_clock = [utcnow()]

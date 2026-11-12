@@ -33,6 +33,10 @@ import {
   useIntegrationDiagnostics,
 } from '../components/IntegrationDiagnostics';
 
+/** Shown wherever a collection stopped at its read limit, so it is never taken for a complete one. */
+const PARTIAL_NOTE =
+  "Only the most recent blocked lookups were read. Older ones in this source's time window were not.";
+
 /**
  * Collects configuration for one integration and a server secret reference.
  * The fields come from the integration's own declaration, so a new integration gets a form
@@ -259,9 +263,11 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
         ok: boolean;
         resource_count: number;
         observation_count: number;
+        partial?: boolean;
       }>(`/integrations/${encodeURIComponent(integration.id)}/sync`);
       setSuccess(
-        `Snapshot collected: ${response.resource_count} resources and ${response.observation_count} observations.`,
+        `Snapshot collected: ${response.resource_count} resources and ${response.observation_count} observations.` +
+          (response.partial ? ` ${PARTIAL_NOTE}` : ''),
       );
       result.reload();
     } catch (e) {
@@ -366,6 +372,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                   <span>Last collected</span>
                   <strong>{relativeTime(integration.last_sync)}</strong>
                 </div>
+                {integration.status === 'partial' && <Notice tone="amber">{PARTIAL_NOTE}</Notice>}
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>
                 )}

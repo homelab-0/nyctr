@@ -27,7 +27,7 @@ specified. Errors use FastAPI's `detail` string. Version: `0.1.0-alpha.1`.
 - `GET /api/findings` -> Finding[].
 - `GET /api/integrations` -> Integration[].
 - `POST /api/integrations` with `{provider,name,config,secret_ref}` -> Integration.
-- `POST /api/integrations/{id}/sync` -> `{ok,resource_count,observation_count}`.
+- `POST /api/integrations/{id}/sync` -> `{ok,resource_count,observation_count,partial}`.
 - `GET /api/audit` -> `{id,created_at,actor_id,action,target_id,details}`[].
 
 Resource: `{id,name,kind,provider,source_id,site_id,observed_at,evidence_kind,

@@ -153,11 +153,14 @@ export default function Briefing({
                     <span className="d">
                       {source.status === 'error'
                         ? source.last_error || 'Last collection failed'
-                        : `Collected ${ago(source.last_sync, now)}`}
+                        : source.status === 'partial'
+                          ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
+                          : `Collected ${ago(source.last_sync, now)}`}
                     </span>
                   </span>
                   <i
-                    className={`dot ${source.status === 'error' ? 'red' : source.last_sync ? 'green' : ''}`}
+                    className={`dot ${source.status === 'error' ? 'red' : source.status === 'partial' ? 'yellow' : source.last_sync ? 'green' : ''}`}
+                    title={source.status === 'partial' ? 'Partly collected' : undefined}
                   />
                 </a>
               ))}
