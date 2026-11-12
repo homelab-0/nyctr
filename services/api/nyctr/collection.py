@@ -102,7 +102,8 @@ def apply_snapshot(db, integration, snapshot, settings):
         db.add(Observation(integration_id=integration.id, observed_at=when, expires_at=expires, **values))
     _store_passes(db, integration, snapshot, now)
     _record_sightings(db, integration, snapshot, now)
-    integration.status = "connected"
+    # A read that stopped at its bound is stored, but never reported as a complete one.
+    integration.status = "connected" if snapshot.partial_rows is None else "partial"
     integration.last_sync = now
     integration.last_error = None
     integration.sync_started_at = None
@@ -168,7 +169,8 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
     """Collect one live integration under a database lease and store its snapshot atomically.
 
     Returns (snapshot, error message). A second caller during a running
-    collection gets ("busy"). Failure rolls back the snapshot, records a
+    collection gets ("busy"). A snapshot that kept only the most recent rows is
+    stored and audited as partial, not as an error. Failure rolls back the snapshot, records a
     sanitized error and releases the lease. Never performs a provider change.
     """
     from .integrations import IntegrationError, collect
@@ -194,8 +196,10 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             snapshot = await asyncio.wait_for(
                 collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
             apply_snapshot(db, integration, snapshot, settings)
+            partial = snapshot.partial_rows is not None
             audit(db, actor, "integration.collected", integration.id,
-                  resources=len(snapshot.resources), observations=len(snapshot.blocks))
+                  resources=len(snapshot.resources), observations=len(snapshot.blocks),
+                  partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}))
             db.commit()
         except Exception as exc:
             db.rollback()

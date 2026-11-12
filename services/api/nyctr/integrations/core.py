@@ -101,6 +101,9 @@ class Snapshot:
     # activated_at, expires_at, expired}. None means the source did not report passes this time,
     # so stored passes are left alone; a list is the complete current set.
     passes: list[dict[str, Any]] | None = None
+    # Set when the source held more log rows than one collection may read: the number of
+    # most recent rows kept. None means the whole requested window was read.
+    partial_rows: int | None = None
 
 
 def utc_now() -> datetime:
@@ -414,8 +417,15 @@ async def offset_pages(client: ReadClient, path: str) -> list[dict[str, Any]]:
     raise IntegrationError("Provider inventory exceeded the page limit; narrow the site scope.")
 
 
-async def cursor_pages(client: ReadClient, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-    """Read bounded NextDNS pages with cursors used only as query values."""
+async def cursor_pages(client: ReadClient, path: str, params: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Read bounded cursor pages, using each cursor only as a query value.
+
+    Returns the rows and whether the source still had more after the last page
+    this collection may read. Stopping at that bound is not a failure: the
+    caller keeps what was read and must report the read as partial. The rows are
+    the most recent ones only if the caller asked the source for newest first.
+    Every other fault, on any page, still raises and nothing is returned.
+    """
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     query = dict(params)
@@ -429,9 +439,9 @@ async def cursor_pages(client: ReadClient, path: str, params: dict[str, Any]) ->
             raise IntegrationError("Provider returned invalid cursor pagination metadata.")
         cursor = meta.get("pagination", {}).get("cursor")
         if cursor is None:
-            return results
+            return results, False
         if not isinstance(cursor, str) or not cursor or len(cursor) > 2048 or cursor in seen:
             raise IntegrationError("Provider returned an invalid or repeated pagination cursor.")
         seen.add(cursor)
         query["cursor"] = cursor
-    raise IntegrationError("Provider logs exceeded the page limit; reduce the lookback period.")
+    return results, True

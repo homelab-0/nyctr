@@ -366,6 +366,12 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                   <span>Last collected</span>
                   <strong>{relativeTime(integration.last_sync)}</strong>
                 </div>
+                {integration.status === 'partial' && (
+                  <Notice tone="amber">
+                    Only the most recent blocked lookups were read. Older ones in this source&apos;s
+                    time window were not.
+                  </Notice>
+                )}
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>
                 )}

@@ -158,10 +158,14 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             snapshot.capabilities = [x for x in snapshot.capabilities if x != "blocked_dns_logs:read"]
             snapshot.capabilities.append("blocked_dns_logs:disabled_at_source")
             return snapshot
-        logs = await cursor_pages(reader, path + "/logs", {
+        # The published API returns logs "from newest to oldest" under sort=desc, so when the
+        # window holds more than one collection may read, the rows kept are the most recent.
+        logs, more = await cursor_pages(reader, path + "/logs", {
             "status": "blocked", "from": core.iso(cutoff), "to": collected_at,
             "sort": "desc", "limit": core.PAGE_SIZE,
         })
+        if more:
+            snapshot.partial_rows = len(logs)
         for row in logs:
             # Never classify another status as a block just because a query asked
             # for blocked records. Providers may return unexpected records.

@@ -269,10 +269,12 @@ async function openIntegrations({
   mode = 'live',
   role = 'admin',
   diagnose = async () => jsonResponse(partialReport),
+  source = connection,
 }: {
   mode?: Mode;
   role?: Role;
   diagnose?: () => Promise<Response>;
+  source?: Integration;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -285,7 +287,7 @@ async function openIntegrations({
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, options) => {
     const path = String(input);
     if (path === '/api/auth/me') return jsonResponse(user);
-    if (path === '/api/integrations') return jsonResponse([connection]);
+    if (path === '/api/integrations') return jsonResponse([source]);
     if (path === '/api/integrations/catalog') return jsonResponse(catalog);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
     if (path === `/api/integrations/${connection.id}/sync`) {
@@ -588,6 +590,26 @@ describe('integration connection diagnostics', () => {
 /** The page is built from the server's catalog, so an integration this app has never heard of still works. */
 describe('integrations add capabilities', () => {
   /** Features are rows, integrations are columns, and a feature without a connected source says so. */
+  it('says in plain words when only the most recent blocked lookups were read', async () => {
+    await openIntegrations({
+      source: { ...connection, status: 'partial', last_sync: '2026-11-09T12:00:00Z' },
+    });
+    expect(
+      screen.getByText(
+        /Only the most recent blocked lookups were read\. Older ones in this source's time window were not\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText('Partial')).toBeTruthy();
+    expect(screen.queryByText('Error')).toBeNull();
+    expect(screen.queryByText('Connected')).toBeNull();
+  });
+
+  it('shows no partial note for a source that was read completely', async () => {
+    await openIntegrations({ source: { ...connection, status: 'connected' } });
+    expect(screen.getByText('Connected')).toBeTruthy();
+    expect(screen.queryByText(/Only the most recent blocked lookups/)).toBeNull();
+  });
+
   it('shows what each integration adds and which features have a connected source', async () => {
     await openIntegrations();
     const table = screen.getByRole('table');
