@@ -346,7 +346,8 @@ def collect_fixtures(client: Client, connections: dict[str, dict]) -> None:
     for scenario, count, observations in (("unifi", 5, 0), ("nextdns", 8, 1)):
         result = client.json(source_path(connections[scenario], "sync"), method="POST")
         require(
-            result == {"ok": True, "resource_count": count, "observation_count": observations},
+            result
+            == {"ok": True, "resource_count": count, "observation_count": observations, "partial": False},
             f"Explicit {scenario} collection returned unexpected counts.",
         )
         print(f"PASS explicit collection: {scenario}")
