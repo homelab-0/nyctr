@@ -29,14 +29,14 @@ const INTROSPECTION = `{ __schema { types { name kind description fields { name 
   args { name type { ...T } } type { ...T } } } } }
 fragment T on __Type { name kind ofType { name kind ofType { name kind ofType { name kind } } } }`;
 
-const SAVED = [
+export const SAVED = [
   {
     name: 'Workloads with the firewall off',
     text: '{\n  workloads(firewall: false) {\n    name\n    attr(key: "vmid")\n    network { name }\n    neighbors(kind: "host") { name }\n  }\n}',
   },
   {
     name: 'Every network and what is on it',
-    text: '{\n  networks {\n    name\n    vlan: attr(key: "vlan")\n    neighbors(first: 100) { name kind provider }\n  }\n}',
+    text: '{\n  networks {\n    name\n    vlan: attr(key: "vlan")\n    links(first: 100) {\n      kind\n      evidence\n      basis\n      source { name kind }\n      target { name kind }\n    }\n  }\n}',
   },
   {
     name: 'High-risk blocks in the last day',

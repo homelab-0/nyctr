@@ -128,14 +128,16 @@ class FixtureContractCase(unittest.TestCase):
             return asyncio.run(collect(provider, "acceptance-test", config, GOOD_API_KEY))
 
     def test_unifi_graph_counts_match_acceptance_assertions(self):
-        """The gateway, network, client, and policy produce the expected evidence-aware graph."""
+        """The gateway, gear, networks, clients, and policy produce the expected evidence-aware graph."""
         snapshot = self.collect_fixture(
             "unifi_network", {"base_url": "https://fixture/proxy/network/integration", "site_id": "site-one"}
         )
         self.assertEqual(
-            (len(snapshot.resources), len(snapshot.relationships), len(snapshot.blocks)), (5, 7, 0)
+            (len(snapshot.resources), len(snapshot.relationships), len(snapshot.blocks)), (11, 17, 0)
         )
         self.assertIn("source_zone_policy", {edge["kind"] for edge in snapshot.relationships})
+        # Which network a device is on is never something the source said, so it is never collected.
+        self.assertNotIn("member_of", {edge["kind"] for edge in snapshot.relationships})
 
     def test_nextdns_block_stays_unassigned_with_unknown_risk(self):
         """A provider device label must not become a user identity or a fabricated risk score."""

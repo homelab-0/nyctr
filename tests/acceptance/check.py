@@ -260,7 +260,7 @@ def verify_diagnostics(client: Client, connections: dict[str, dict]) -> None:
         "malformed": "failed",
     }
     expected_counts = {
-        "unifi": {"resources": 5, "relationships": 7, "observations": 0},
+        "unifi": {"resources": 11, "relationships": 17, "observations": 0},
         "nextdns": {"resources": 8, "relationships": 7, "observations": 1},
         "disabled": {"resources": 6, "relationships": 5, "observations": 0},
     }
@@ -343,7 +343,7 @@ def verify_diagnostics(client: Client, connections: dict[str, dict]) -> None:
 
 def collect_fixtures(client: Client, connections: dict[str, dict]) -> None:
     """Import only the two positive fixtures through the ordinary administrator collection API."""
-    for scenario, count, observations in (("unifi", 5, 0), ("nextdns", 8, 1)):
+    for scenario, count, observations in (("unifi", 11, 0), ("nextdns", 8, 1)):
         result = client.json(source_path(connections[scenario], "sync"), method="POST")
         require(
             result
@@ -353,16 +353,84 @@ def collect_fixtures(client: Client, connections: dict[str, dict]) -> None:
         print(f"PASS explicit collection: {scenario}")
 
 
+def verify_placement(client: Client, graph: dict) -> None:
+    """Check the gateway, each network's range, gear uplinks and where each device is placed.
+
+    The source never says which network a device is on. Nyctr works that out when
+    the graph is read, so those links must be labelled inferred and say so.
+    """
+    name = {node["id"]: node["name"] for node in graph["nodes"]}
+    kinds = {node["name"]: node["kind"] for node in graph["nodes"] if node["kind"] != "site"}
+    require(
+        kinds.get("Synthetic gateway") == "gateway"
+        and [kind for kind in kinds.values() if kind == "gateway"] == ["gateway"]
+        and kinds.get("Synthetic switch") == "switch",
+        "The gateway, switch and access point were not each filed as what the source lists them as.",
+    )
+    ranges = {node["name"]: node["attributes"].get("subnets") for node in graph["nodes"] if node["kind"] == "network"}
+    require(
+        ranges
+        == {"Synthetic LAN": ["192.0.2.0/26"], "Synthetic IoT": ["198.51.100.0/24"], "Synthetic workshop": ["203.0.113.0/24"]}
+        and all(node["evidence_kind"] == "configured" for node in graph["nodes"] if node["kind"] == "network"),
+        "A network lost the address range the source configured for it.",
+    )
+
+    def found(kind: str) -> set[tuple[str, str, str]]:
+        return {(name[e["source"]], name[e["target"]], e["evidence_kind"]) for e in graph["edges"] if e["kind"] == kind}
+
+    require(
+        {("Synthetic switch", "Synthetic gateway", "observed"), ("Synthetic access point", "Synthetic switch", "observed")}
+        <= found("connects_to"),
+        "Equipment was not linked to the equipment above it as observed.",
+    )
+    placed = [edge for edge in graph["edges"] if edge["kind"] == "member_of"]
+    require(
+        found("member_of")
+        == {("Synthetic laptop", "Synthetic LAN", "inferred"), ("Synthetic camera", "Synthetic IoT", "inferred")}
+        and all(
+            edge["id"].startswith("derived:") and edge["attributes"]["basis"].startswith("Worked out by Nyctr")
+            for edge in placed
+        ),
+        "A device was not placed on its network, or the placement was shown as the source's statement.",
+    )
+    require(
+        found("managed_by")
+        == {
+            ("Synthetic workshop", "Synthetic switch", "configured"),
+            ("Synthetic LAN", "Synthetic gateway", "inferred"),
+            ("Synthetic IoT", "Synthetic gateway", "inferred"),
+        },
+        "Networks were not linked to the device that runs them with the right evidence.",
+    )
+    saved = "{ networks { name links(first: 100) { kind evidence basis source { name } target { name } } } }"
+    answer = client.json("/api/graph/query", method="POST", body={"query": saved})
+    on = {
+        row["name"]: {link["source"]["name"]: (link["evidence"], link["basis"] or "") for link in row["links"]}
+        for row in answer["data"]["networks"]
+    }
+    require(
+        all(
+            on[network].get(device, ("", ""))[0] == "inferred"
+            and on[network][device][1].startswith("Worked out by Nyctr")
+            for network, device in (("Synthetic LAN", "Synthetic laptop"), ("Synthetic IoT", "Synthetic camera"))
+        )
+        and not any("Synthetic visitor" in names for names in on.values()),
+        "The saved query for every network and what is on it did not return the placed devices as worked out by Nyctr.",
+    )
+    print("PASS placement: one gateway, ranges, uplinks, two devices placed as inferred, one not reported")
+
+
 def verify_persisted_evidence(client: Client, connections: dict[str, dict]) -> None:
     """Check the saved graph and unassigned block using read endpoints only, including after restart."""
     resources = client.json("/api/resources")
     graph = client.json("/api/graph")
     blocks = client.json("/api/blocks")
     require(
-        len(resources) == 13 and len(graph["nodes"]) == 13 and len(graph["edges"]) == 14,
-        "The synthetic graph was lost, duplicated, or mixed with other data; expected 13 resources and 14 relationships.",
+        len(resources) == 19 and len(graph["nodes"]) == 19 and len(graph["edges"]) == 28,
+        "The synthetic graph was lost, duplicated, or mixed with other data; expected 19 resources and 28 relationships.",
     )
-    for scenario, expected in (("unifi", 5), ("nextdns", 8)):
+    verify_placement(client, graph)
+    for scenario, expected in (("unifi", 11), ("nextdns", 8)):
         source_id = connections[scenario]["id"]
         require(
             sum(row["attributes"].get("integration_id") == source_id for row in resources) == expected,
@@ -384,7 +452,7 @@ def verify_persisted_evidence(client: Client, connections: dict[str, dict]) -> N
     )
     clients = [row for row in resources if row["kind"] == "client"]
     require(
-        len(clients) == 2
+        len(clients) == 4
         and all(row["classification"] == "unassigned" and row["owner_id"] is None for row in clients),
         "Fixture devices were incorrectly assigned to a user.",
     )
@@ -406,7 +474,7 @@ def verify_persisted_evidence(client: Client, connections: dict[str, dict]) -> N
         "Successful collection health did not persist.",
     )
     print(
-        "PASS persisted evidence: 13 resources, 14 relationships, 1 unassigned DNS block; risk remains unknown"
+        "PASS persisted evidence: 19 resources, 28 relationships, 1 unassigned DNS block; risk remains unknown"
     )
 
 

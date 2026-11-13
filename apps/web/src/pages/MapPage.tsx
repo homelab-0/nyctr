@@ -43,6 +43,8 @@ function facts(resource: Resource): [string, string][] {
       'Firewall',
       a.firewall_enabled === false ? 'Off' : a.firewall_enabled === true ? 'On' : 'Unknown',
     ]);
+  if (resource.kind === 'network' && Array.isArray(a.subnets) && a.subnets.length)
+    rows.push(['Address range', a.subnets.join(', ')]);
   if (Array.isArray(a.nics))
     rows.push([
       'Network cards',
@@ -192,7 +194,14 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
                     </div>
                   </a>
                 ))}
-              <KV items={facts(node)} />
+              <KV
+                items={[
+                  ...facts(node),
+                  ...(node.kind === 'client' && !links.some((edge) => edge.kind === 'member_of')
+                    ? ([['Network', 'Not reported']] as [string, string][])
+                    : []),
+                ]}
+              />
               {node.attributes.access_type === 'GUEST' && (
                 <a
                   className="button secondary small"
