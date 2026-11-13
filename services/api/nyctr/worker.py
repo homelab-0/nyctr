@@ -2,7 +2,7 @@
 
 Runs inside each API process. Closing leases is always on so temporary access
 ends even if nobody opens the console. The collection schedule is read from the
-database at every pass, so a change made in the Console applies within one tick
+database at every pass, so a change an administrator saves applies within one tick
 on every running copy, and it never runs in demo mode.
 """
 

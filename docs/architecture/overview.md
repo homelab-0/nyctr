@@ -24,7 +24,7 @@ adapters are independent Python modules, not separate microservices.
 The API owns identity, authorization and persistence. The frontend cannot choose
 its role or widen a query's member scope. Read-only collection is
 initiated by an administrator and bounded per request, or run on the schedule an
-administrator sets in the console (on by default, every 15 minutes), by an
+administrator sets with `PUT /api/collection` (on by default, every 15 minutes), by an
 upkeep loop inside the API process. The schedule and the time of its last run
 are stored in the database, so a change applies within one upkeep pass on every
 running copy, a restart does not reset the clock, and only one copy performs a

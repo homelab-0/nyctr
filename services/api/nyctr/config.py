@@ -54,8 +54,8 @@ class Settings(BaseSettings):
     oidc_groups_claim: str = "groups"
     # Comma-separated integration ids Nyctr may change. Empty keeps every connector read-only.
     provider_writes: str = ""
-    # Starting value for the collection schedule, in seconds, until an administrator saves one in the
-    # Console. 0 leaves it to the product default (every 15 minutes in live mode).
+    # Starting value for the collection schedule, in seconds, until an administrator saves one.
+    # 0 leaves it to the product default (every 15 minutes in live mode).
     collect_interval_seconds: int = 0
     worker_enabled: bool = True
     # Optional OpenAI-compatible chat endpoint for the assistant. The key never leaves the server.

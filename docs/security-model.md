@@ -126,7 +126,7 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   copies do not both perform it; the nudge and the assistant's limit are still
   per process.
 - Scheduled collection is on by default and only an administrator can change it
-  (Setup, This installation); every change is audited with the old and new
+  (`PUT /api/collection`); every change is audited with the old and new
   value. Collection only reads, but the guest cut-off rule and lock-out act at
   every collection, so with the schedule on a rule an administrator wrote and
   switched on acts with nobody at the console.

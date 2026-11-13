@@ -190,7 +190,7 @@ serialize initial migration and bootstrap. Future model changes require a new
 explicit migration; changing the models alone does not upgrade a database.
 
 Implemented in this version, all inside the API process: scheduled collection
-set in the console (`schedule.py`; `NYCTR_COLLECT_INTERVAL_SECONDS` is only its
+set with `PUT /api/collection` (`schedule.py`; `NYCTR_COLLECT_INTERVAL_SECONDS` is only its
 starting value), lease expiry and
 reconciliation (`worker.py`, `access.py`), gated provider changes (`actions.py`)
 and an assistant that calls an OpenAI-compatible endpoint (`assistant.py`).

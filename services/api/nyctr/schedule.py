@@ -1,4 +1,4 @@
-"""The collection schedule, set by an administrator in the Console.
+"""The collection schedule, set by an administrator.
 
 One schedule covers every source. The saved value lives in the `settings` table,
 so every running copy of Nyctr reads the same one at each upkeep pass. The time
@@ -36,7 +36,7 @@ class Schedule(BaseModel):
 def in_force(db: Session, settings: Settings) -> dict:
     """Return the schedule that applies now and where it came from.
 
-    A value saved in the Console wins. Before one is saved, a deployment
+    A value an administrator saved wins. Before one is saved, a deployment
     interval above zero is the starting value, and without one a live
     installation collects every 15 minutes. Demo mode never collects.
     """
