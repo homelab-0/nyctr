@@ -80,6 +80,24 @@ def test_without_sound_evidence_nothing_is_filed_as_a_gateway(monkeypatch, chang
     assert not links(derived_links(snapshot.resources), "managed_by")
 
 
+def test_a_candidate_with_something_above_it_or_an_unread_uplink_is_never_the_gateway(monkeypatch):
+    """Gear names the candidate as its uplink, yet the source reports a device above the candidate, or did not say."""
+    # The switch hangs off the candidate, so only "nothing above it" can stop the rule here.
+    above = outside(devices=[gear("gw", "203.0.113.9", above="core"), gear("core", "10.0.1.4"),
+                             gear("sw", "10.0.1.2", above="gw")])
+    snapshot, evidence, _calls = run(monkeypatch, above)
+    assert all(node["kind"] != "gateway" for node in snapshot.resources)
+    assert "unifi_gateway_not_identified" in evidence.gaps
+    # Without the device above it, the same site files the candidate: the uplink was the only obstacle.
+    alone = outside(devices=[gear("gw", "203.0.113.9"), gear("core", "10.0.1.4"), gear("sw", "10.0.1.2", above="gw")])
+    snapshot, _evidence, _calls = run(monkeypatch, alone)
+    assert named(snapshot)["gw"]["attributes"]["kind_basis"] == "outside_network_ranges"
+    # The candidate's own detail read refused: whether anything is above it is unknown, so nothing is filed.
+    snapshot, evidence, _calls = run(monkeypatch, alone, _no_uplink_read)
+    assert all(node["kind"] != "gateway" for node in snapshot.resources)
+    assert "unifi_gateway_not_identified" in evidence.gaps
+
+
 def test_the_address_match_is_tried_before_position(monkeypatch):
     """A device holding a gateway address is filed on that, even when another sits outside every range."""
     snapshot, _evidence, _calls = run(monkeypatch, unlisted(devices=[

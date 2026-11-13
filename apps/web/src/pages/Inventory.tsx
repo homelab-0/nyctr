@@ -24,13 +24,13 @@ const GROUPS = {
 } as const;
 type Group = keyof typeof GROUPS;
 
-/** A short, source-specific detail worth a column: an address, VLAN, model or firewall state. */
 /** The kind as the table shows it. A kind Nyctr deduced says so, so it never reads as the source's word. */
 export function kindText(row: Resource) {
   const name = label(row.kind);
   return typeof row.attributes.kind_basis === 'string' ? `${name}, worked out by Nyctr` : name;
 }
 
+/** A short, source-specific detail worth a column: an address, VLAN, model or firewall state. */
 function detail(row: Resource) {
   const a = row.attributes;
   if (row.kind === 'network') return a.vlan !== undefined ? `VLAN ${a.vlan}` : '';

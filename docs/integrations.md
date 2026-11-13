@@ -109,10 +109,13 @@ The third rule can be wrong in one shape, and this source's data cannot tell it
 apart from a real gateway: the site's router is another vendor's, the source
 still holds a gateway-managed network, and the core switch has equipment below
 it and a management address outside every collected range. That switch would be
-filed as the gateway. It is why this stays a labelled deduction and is never
-shown as the source's statement. A device with nothing attached, a site with a
-single piece of equipment, and equipment reporting an IPv6 address are never
-filed by this rule.
+filed as the gateway. The same holds, behind another vendor's router, for an
+old switch with an out-of-range address that still has one old access point
+naming it as its uplink: this source's data cannot tell that pair apart from a
+gateway with equipment below it either. It is why this stays a labelled
+deduction and is never shown as the source's statement. A device with nothing
+attached, a site with a single piece of equipment, and equipment reporting an
+IPv6 address are never filed by this rule.
 
 The local integration base URL has this shape:
 
