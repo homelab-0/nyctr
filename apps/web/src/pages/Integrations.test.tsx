@@ -747,9 +747,41 @@ describe('editing a saved source', () => {
   });
 
   it('says on the card that a changed source needs testing again and that its data is older', async () => {
-    await openIntegrations({ source: { ...resolver, status: 'configured' } });
+    await openIntegrations({
+      source: { ...resolver, status: 'configured', predates_change: true },
+    });
     expect(screen.getByText(/was changed and needs testing again/)).toBeDefined();
     expect(screen.getByText(/· before the change/)).toBeDefined();
+  });
+
+  it('keeps that note when a collection after the change has failed', async () => {
+    await openIntegrations({
+      source: { ...resolver, status: 'error', last_error: 'Unreachable.', predates_change: true },
+    });
+    expect(screen.getByText(/was changed and needs testing again/)).toBeDefined();
+    expect(screen.getByText(/· before the change/)).toBeDefined();
+  });
+
+  it('does not let a save that finishes late close a form opened in the meantime', async () => {
+    const response = deferredResponse();
+    const { interaction } = await openIntegrations({
+      source: resolver,
+      save: () => response.promise,
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    const first = await screen.findByRole('dialog', { name: 'Edit source' });
+    await interaction.click(within(first).getByRole('button', { name: /Save changes/ }));
+    await interaction.click(within(first).getByRole('button', { name: 'Cancel' }));
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    const second = await screen.findByRole('dialog', { name: 'Edit source' });
+    await interaction.type(within(second).getByLabelText(/^Connection name/), ' two');
+    await act(async () => response.resolve(jsonResponse(resolver)));
+    await screen.findByText('Changes saved.');
+    expect(
+      within(screen.getByRole('dialog', { name: 'Edit source' })).getByLabelText(
+        /^Connection name/,
+      ),
+    ).toHaveProperty('value', `${resolver.name} two`);
   });
 
   it('shows no such note for a source that was never collected or is collected and unchanged', async () => {

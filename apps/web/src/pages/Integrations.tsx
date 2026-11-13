@@ -75,6 +75,14 @@ function AddIntegration({
   const [pending, setPending] = useState(false);
   const demo = user?.mode === 'demo';
   const chosen = providers.find((item) => item.id === selected) || providers[0];
+  // A save that finishes after this form was dismissed must not close whichever form is open now.
+  const open = useRef(true);
+  useEffect(() => {
+    open.current = true;
+    return () => {
+      open.current = false;
+    };
+  }, []);
   /** Persists connection metadata, leaving source collection to a separate explicit action. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -90,7 +98,7 @@ function AddIntegration({
       if (editing) await put(`/integrations/${encodeURIComponent(editing.id)}`, saved);
       else await post('/integrations', { provider: chosen.id, ...saved });
       onSaved();
-      onClose();
+      if (open.current) onClose();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -364,8 +372,8 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           {result.data.map((integration) => {
             const item = kind(integration.provider);
             const mode = sources.find((source) => source.id === integration.id)?.write_mode;
-            // Only an edit to the address or secret name leaves a collected source "configured".
-            const changed = integration.status === 'configured' && Boolean(integration.last_sync);
+            // Set by the server until a collection succeeds, so a failed one does not hide it.
+            const changed = integration.predates_change === true;
             return (
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">

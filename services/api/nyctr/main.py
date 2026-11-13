@@ -44,7 +44,9 @@ from .models import (
     Audit,
     DeviceGrant,
     Finding,
+    GuestPass,
     Integration,
+    Lease,
     Observation,
     Relationship,
     Resource,
@@ -78,6 +80,24 @@ class LoginInput(InputModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+def _last_test(db: Session, integration: Integration) -> Audit | None:
+    """Return the newest record that settles whether a source is tested: a stored collection,
+    or a later edit of its address or secret name, after which it is untested again."""
+    history = select(Audit).where(Audit.action.in_(("integration.collected", "integration.updated")),
+                                  Audit.target_id == integration.id).order_by(Audit.created_at.desc())
+    return next((record for record in db.scalars(history)
+                 if record.action == "integration.collected" or record.details.get("retest") is True), None)
+
+
+def _predates_change(db: Session, integration: Integration) -> bool:
+    """Say whether what is stored was collected before the address or secret name last changed.
+
+    Only a stored collection clears this; a failed one leaves the old data and the mark.
+    """
+    last = _last_test(db, integration) if integration.last_sync else None
+    return last is not None and last.action == "integration.updated"
+
+
 def _settled_status(db: Session, integration: Integration) -> str:
     """Work out the status a source had before an abandoned lease replaced it with "syncing".
 
@@ -90,15 +110,10 @@ def _settled_status(db: Session, integration: Integration) -> str:
         return "error"
     if not integration.last_sync:
         return "configured"
-    history = select(Audit).where(Audit.action.in_(("integration.collected", "integration.updated")),
-                                  Audit.target_id == integration.id).order_by(Audit.created_at.desc())
-    for last in db.scalars(history):
-        if last.action == "integration.collected":
-            return "partial" if last.details.get("partial") is True else "connected"
-        if last.details.get("retest") is True:
-            # Its address or secret name changed after the last collection, so it is untested again.
-            return "configured"
-    return "connected"
+    last = _last_test(db, integration)
+    if last is not None and last.action == "integration.updated":
+        return "configured"
+    return "partial" if last is not None and last.details.get("partial") is True else "connected"
 
 
 class IntegrationEdit(InputModel):
@@ -299,7 +314,8 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/integrations")
     def integrations(_user=Depends(admin), db: Session = Depends(get_db)):
         """List administrator connector metadata while excluding resolved secrets."""
-        return [integration_json(i) for i in db.scalars(select(Integration).order_by(Integration.name))]
+        return [{**integration_json(i), "predates_change": _predates_change(db, i)}
+                for i in db.scalars(select(Integration).order_by(Integration.name))]
 
     @app.get("/api/integrations/catalog")
     def integration_catalog(_user=Depends(admin)):
@@ -350,6 +366,12 @@ def create_app(settings: Settings | None = None):
         collection. A name or a numeric reading setting keeps the status. The
         audit record names the changed fields, never their values. No credential
         is read here.
+
+        Such a change is refused while Nyctr still has an exception or a guest
+        pass of its own at the source, because ending those later would go to
+        the new address and leave the old one holding them. The row is locked
+        before it is compared, so overlapping edits are applied one after the
+        other and each is audited against the settings it actually replaced.
         """
         if settings.mode == "demo":
             raise HTTPException(409, "Sources cannot be changed in the demo workspace")
@@ -367,6 +389,18 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, f"Not saved. {error}") from None
         except ValueError:
             raise HTTPException(422, "Not saved. Check the settings and try again.") from None
+        # Take the row's write lock first, with the collection lease's guard, then read it again:
+        # nothing can change it until this request commits, and a running read never finishes
+        # on changed settings.
+        locked = db.execute(update(Integration).where(
+            Integration.id == integration_id,
+            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
+        ).values(name=Integration.name).execution_options(synchronize_session=False))
+        if locked.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, "This source is being collected or tested right now. "
+                                     "Try again when that has finished.")
+        db.refresh(row)
         try:
             before = validate_config(row.provider, row.config)
         except (IntegrationError, ValueError):
@@ -374,25 +408,33 @@ def create_app(settings: Settings | None = None):
         settings_changed = sorted(key for key in set(before) | set(config) if before.get(key) != config.get(key))
         fields = ((["name"] if body.name != row.name else []) + [f"config.{key}" for key in settings_changed]
                   + (["secret_ref"] if body.secret_ref != row.secret_ref else []))
-        if not fields:
-            return integration_json(row)
         kinds = {field.key: field.kind for field in provider.fields}
         retest = "secret_ref" in fields or any(kinds.get(key) != "number" for key in settings_changed)
-        values = {"name": body.name, "config": config, "secret_ref": body.secret_ref}
+        exceptions = passes = 0
         if retest:
-            values.update(status="configured", last_error=None, sync_started_at=None)
-        # The same guard as the collection lease, so a running read never finishes on changed settings.
-        saved = db.execute(update(Integration).where(
-            Integration.id == integration_id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
-        ).values(**values).execution_options(synchronize_session="fetch"))
-        if saved.rowcount != 1:
+            exceptions = db.scalar(select(func.count()).select_from(Lease).where(
+                Lease.integration_id == integration_id, Lease.status == "active",
+                Lease.execution == "applied", Lease.owned.is_(True)))
+            # A pass read from the source has no issuer and is not Nyctr's to end.
+            passes = db.scalar(select(func.count()).select_from(GuestPass).where(
+                GuestPass.integration_id == integration_id, GuestPass.execution == "applied",
+                GuestPass.issued_by.is_not(None), GuestPass.ended_at.is_(None),
+                or_(GuestPass.expires_at.is_(None), GuestPass.expires_at > utcnow())))
+        if not fields or exceptions or passes:
             db.rollback()
-            raise HTTPException(409, "This source is being collected or tested right now. "
-                                     "Try again when that has finished.")
+            if not fields:
+                return integration_json(row)
+            held = " and ".join(text for count, text in (
+                (exceptions, f"{exceptions} open exception{'' if exceptions == 1 else 's'} (end under Open now)"),
+                (passes, f"{passes} guest pass{'' if passes == 1 else 'es'} it issued (end under Guests)")) if count)
+            raise HTTPException(409, f"Not saved. Nyctr still has {held} at this source. End them first, then "
+                                     "change its address, settings or secret name. Its name and numeric "
+                                     "settings can be changed at any time.")
+        row.name, row.config, row.secret_ref = body.name, config, body.secret_ref
+        if retest:
+            row.status, row.last_error, row.sync_started_at = "configured", None, None
         audit(db, user.id, "integration.updated", integration_id, provider=row.provider, fields=fields, retest=retest)
         db.commit()
-        db.refresh(row)
         return integration_json(row)
 
     @app.post("/api/integrations/{integration_id}/diagnostics", response_model=DiagnosticReport)

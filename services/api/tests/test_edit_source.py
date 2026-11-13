@@ -12,7 +12,7 @@ from nyctr.collection import collect_integration
 from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import Snapshot
 from nyctr.main import _settled_status
-from nyctr.models import Audit, Integration, Resource, User, utcnow
+from nyctr.models import Audit, GuestPass, Integration, Lease, Resource, User, utcnow
 
 KEY = "EDIT_SECRET_SENTINEL"
 ADDRESS = "https://resolver.example.net"
@@ -301,3 +301,96 @@ def test_diagnostics_never_probe_or_restore_what_an_edit_replaced_before_the_lea
     assert probed == [("https://second.example.net/api", NEW_ADDRESS["secret_ref"])]
     row = stored(client, id_)
     assert row["status"] == "configured" and row["config"]["base_url"] == "https://second.example.net/api"
+
+
+def add(client, row):
+    """Store one fabricated row and return its id."""
+    with client.app.state.session_factory() as db:
+        db.add(row)
+        db.commit()
+        return row.id
+
+
+@pytest.mark.parametrize("kind, told", [("exception", "1 open exception (end under Open now)"),
+                                        ("pass", "1 guest pass it issued (end under Guests)")])
+def test_address_or_secret_change_waits_until_nyctrs_own_entries_at_the_source_are_ended(source, kind, told):
+    """Ending Nyctr's own exception or pass later would go to the new address, so the change is refused first."""
+    client, headers, id_ = source
+    if kind == "exception":
+        held = add(client, Lease(integration_id=id_, domain="held.example.org", execution="applied", owned=True))
+    else:
+        held = add(client, GuestPass(integration_id=id_, code="12345-67890", name="Visitor", minutes=60,
+                                     issued_by="owner", execution="applied"))
+    for changes in ({"config": {"base_url": "https://second.example.net"}}, NEW_ADDRESS["secret_ref"]):
+        changes = changes if isinstance(changes, dict) else {"secret_ref": changes}
+        response = edit(client, headers, id_, **changes)
+        assert response.status_code == 409 and told in response.json()["detail"], response.text
+        assert_untouched(client, id_)
+    assert edit(client, headers, id_, name="Renamed", config={"base_url": ADDRESS, "lookback_hours": 6}).status_code == 200
+    with client.app.state.session_factory() as db:
+        if kind == "exception":
+            db.get(Lease, held).status = "ended"
+        else:
+            db.get(GuestPass, held).ended_at = utcnow()
+        db.commit()
+    assert edit(client, headers, id_, **NEW_ADDRESS).status_code == 200
+    assert stored(client, id_)["status"] == "configured"
+
+
+def test_entries_nyctr_did_not_create_do_not_hold_back_a_change(source):
+    """An exception that already existed, one never applied, and a pass read from the source are not Nyctr's."""
+    client, headers, id_ = source
+    add(client, Lease(integration_id=id_, domain="theirs.example.org", execution="applied", owned=False))
+    add(client, Lease(integration_id=id_, domain="by-hand.example.org", execution="not_applied", owned=False))
+    add(client, GuestPass(integration_id=id_, code="22222-33333", name="Made at the source", minutes=60,
+                          issued_by=None, execution="applied"))
+    assert edit(client, headers, id_, **NEW_ADDRESS).status_code == 200
+
+
+def test_overlapping_edits_are_compared_with_the_settings_they_replace(source, monkeypatch):
+    """A rename that started before another edit and a collection of it must not quietly restore old settings."""
+    client, headers, id_ = source
+    land_edit, landed = edit_once(client, headers, id_), []
+    from nyctr.integrations import validate_config
+
+    def validate(provider, config):
+        # The first edit has loaded the source and not yet locked it: the second lands, then is collected.
+        if not landed:
+            landed.append(True)
+            land_edit()
+            with client.app.state.session_factory() as db:
+                db.get(Integration, id_).status = "connected"
+                db.commit()
+        return validate_config(provider, config)
+    monkeypatch.setattr("nyctr.integrations.validate_config", validate)
+    assert edit(client, headers, id_, name="Renamed").status_code == 200
+    row = stored(client, id_)
+    assert (row["name"], row["config"]["base_url"], row["status"]) == ("Renamed", ADDRESS + "/api", "configured")
+    with client.app.state.session_factory() as db:
+        records = list(db.scalars(select(Audit).where(Audit.action == "integration.updated")
+                                  .order_by(Audit.created_at)))
+        assert [record.details["retest"] for record in records] == [True, True]
+        assert records[1].details["fields"] == ["name", "config.base_url", "secret_ref"]
+
+
+def test_stored_data_stays_marked_as_older_than_the_change_until_a_collection_succeeds(source, monkeypatch):
+    """A failed collection after an address change turns the status to error but replaces nothing."""
+    client, headers, id_ = source
+    app, answers = client.app, [RuntimeError("unreachable"), Snapshot()]
+
+    async def collect(provider, integration_id, config, api_key):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr("nyctr.integrations.collect", collect)
+
+    def listed():
+        row = client.get("/api/integrations").json()[0]
+        return row["status"], row["predates_change"]
+    assert listed() == ("partial", False)
+    assert edit(client, headers, id_, config={"base_url": "https://second.example.net"}).status_code == 200
+    assert listed() == ("configured", True)
+    for expected in (("error", True), ("connected", False)):
+        asyncio.run(collect_integration(app.state.session_factory, app.state.settings, id_, None))
+        assert listed() == expected

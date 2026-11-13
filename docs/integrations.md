@@ -43,8 +43,15 @@ Changing where or as whom Nyctr reads (the secret name, or any setting that is
 not a number, such as an address, profile or site) marks the source as needing a
 test again. Its status returns to "Configured" and the card says so. What was
 collected before stays, marked on the card as collected before the change, until
-the next collection replaces it. Changing only the name or a numeric reading
-setting such as the hours of lookups to read keeps the status.
+a collection succeeds and replaces it; a failed collection leaves the mark.
+Changing only the name or a numeric reading setting such as the hours of lookups
+to read keeps the status.
+
+Such a change is refused while Nyctr still has something of its own at the
+source: an open exception it applied, or a guest pass it issued that has not
+ended. Ending those later would be sent to the new address and leave the old one
+holding them. The refusal says how many there are and where to end them. Entries
+Nyctr did not create do not block a change.
 
 Every edit is written to the audit history with who made it, which source, and
 the names of the fields that changed. The values are not recorded.

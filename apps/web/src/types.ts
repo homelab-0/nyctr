@@ -72,6 +72,8 @@ export interface Integration {
   maturity?: string;
   /** Feature capabilities this source adds to Nyctr, by id. */
   provides?: string[];
+  /** True while what is stored was collected before the address or secret name last changed. */
+  predates_change?: boolean;
 }
 /** One thing Nyctr can do once a source that offers it is connected. */
 export interface Capability {
