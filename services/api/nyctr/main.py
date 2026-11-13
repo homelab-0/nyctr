@@ -30,11 +30,14 @@ from .deps import (  # noqa: F401  (re-exported for callers that import them fro
     grant_at,
     identity,
     integration_json,
+    last_test,
     observation_json,
     observation_permitted,
+    predates_change,
     relationship_json,
     request_json,
     resource_json,
+    source_for_people,
 )
 from .diagnostics import DiagnosticReport, diagnose_integration
 from .links import derived_links
@@ -81,24 +84,6 @@ class LoginInput(InputModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
-def _last_test(db: Session, integration: Integration) -> Audit | None:
-    """Return the newest record that settles whether a source is tested: a stored collection,
-    or a later edit of its address or secret name, after which it is untested again."""
-    history = select(Audit).where(Audit.action.in_(("integration.collected", "integration.updated")),
-                                  Audit.target_id == integration.id).order_by(Audit.created_at.desc())
-    return next((record for record in db.scalars(history)
-                 if record.action == "integration.collected" or record.details.get("retest") is True), None)
-
-
-def _predates_change(db: Session, integration: Integration) -> bool:
-    """Say whether what is stored was collected before the address or secret name last changed.
-
-    Only a stored collection clears this; a failed one leaves the old data and the mark.
-    """
-    last = _last_test(db, integration) if integration.last_sync else None
-    return last is not None and last.action == "integration.updated"
-
-
 def _settled_status(db: Session, integration: Integration) -> str:
     """Work out the status a source had before an abandoned lease replaced it with "syncing".
 
@@ -111,7 +96,7 @@ def _settled_status(db: Session, integration: Integration) -> str:
         return "error"
     if not integration.last_sync:
         return "configured"
-    last = _last_test(db, integration)
+    last = last_test(db, integration)
     if last is not None and last.action == "integration.updated":
         return "configured"
     return "partial" if last is not None and last.details.get("partial") is True else "connected"
@@ -315,7 +300,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/integrations")
     def integrations(_user=Depends(admin), db: Session = Depends(get_db)):
         """List administrator connector metadata while excluding resolved secrets."""
-        return [{**integration_json(i), "predates_change": _predates_change(db, i)}
+        return [{**integration_json(i), "predates_change": predates_change(db, i)}
                 for i in db.scalars(select(Integration).order_by(Integration.name))]
 
     @app.get("/api/integrations/catalog")
@@ -557,6 +542,9 @@ def create_app(settings: Settings | None = None):
         time, and open the new grants without backdating visibility. Record the
         classification change in the same committed transaction.
         """
+        found = db.execute(select(Resource.integration_id, Resource.kind).where(Resource.id == device_id)).first()
+        if found and found.kind == "client":
+            source_for_people(db, found.integration_id, adding=bool(body.user_ids))
         row = db.scalar(select(Resource).where(Resource.id == device_id).with_for_update())
         if not row or row.kind != "client":
             raise HTTPException(404, "Device not found")

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from . import risk
 from .collection import SECRET_REF
 from .config import Settings
-from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
+from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted, source_for_people
 from .integrations import registry
 from .models import AccessRequest, DeviceLink, Integration, Lease, Observation, Resource, User, utc, utcnow
 from .policy import AccessRule, GuestRule, get_list, get_rule, put_list, put_rule
@@ -400,6 +400,7 @@ def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(
     label = db.get(Resource, body.source_id)
     if not label or not _is_label(label):
         raise HTTPException(404, "DNS device label not found")
+    source_for_people(db, label.integration_id, adding=bool(body.device_id))
     existing = db.get(DeviceLink, body.source_id)
     if existing:
         db.delete(existing)

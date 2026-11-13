@@ -272,13 +272,15 @@ async function openIntegrations({
   source = connection,
   partial,
   save = async () => jsonResponse(source),
+  others = [],
 }: {
   mode?: Mode;
   role?: Role;
   diagnose?: () => Promise<Response>;
   source?: Integration;
   partial?: boolean;
-  save?: () => Promise<Response>;
+  save?: (path: string) => Promise<Response>;
+  others?: Integration[];
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -291,10 +293,10 @@ async function openIntegrations({
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, options) => {
     const path = String(input);
     if (path === '/api/auth/me') return jsonResponse(user);
-    if (path === '/api/integrations') return jsonResponse([source]);
+    if (path === '/api/integrations') return jsonResponse([source, ...others]);
     if (path === '/api/integrations/catalog') return jsonResponse(catalog);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
-    if (path === `/api/integrations/${source.id}` && options?.method === 'PUT') return save();
+    if (path.startsWith('/api/integrations/') && options?.method === 'PUT') return save(path);
     if (path === `/api/integrations/${connection.id}/sync`) {
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
     }
@@ -790,6 +792,32 @@ describe('editing a saved source', () => {
     );
     await interaction.click(screen.getByRole('button', { name: 'Edit' }));
     expect(await screen.findByRole('dialog', { name: 'Edit source' })).toBeDefined();
+  });
+
+  it('keeps each of two sources shut for its own unfinished save', async () => {
+    const saves = { first: deferredResponse(), second: deferredResponse() };
+    const { interaction } = await openIntegrations({
+      source: resolver,
+      others: [{ ...resolver, id: 'second', name: 'Second resolver' }],
+      save: (path) => (path.endsWith('/second') ? saves.second : saves.first).promise,
+    });
+    const edits = () => screen.getAllByRole('button', { name: 'Edit' });
+    const shut = () => edits().map((button) => button.getAttribute('aria-disabled'));
+    for (const index of [0, 1]) {
+      await interaction.click(edits()[index]);
+      const form = await screen.findByRole('dialog', { name: 'Edit source' });
+      await interaction.click(within(form).getByRole('button', { name: /Save changes/ }));
+      await interaction.click(within(form).getByRole('button', { name: 'Cancel' }));
+    }
+    // The second save must not take over the first one's mark.
+    expect(shut()).toEqual(['true', 'true']);
+    await act(async () => saves.first.resolve(jsonResponse(resolver)));
+    // The first is read back and opens again; its reload must not open the second.
+    await waitFor(() => expect(shut()).toEqual(['false', 'true']));
+    await interaction.click(edits()[1]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await act(async () => saves.second.resolve(jsonResponse(resolver)));
+    await waitFor(() => expect(shut()).toEqual(['false', 'false']));
   });
 
   it('shows no such note for a source that was never collected or is collected and unchanged', async () => {

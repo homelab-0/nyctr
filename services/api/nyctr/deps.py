@@ -7,10 +7,10 @@ authentication and member-visibility boundary as the core API.
 from datetime import datetime
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from .models import DeviceGrant, Resource, utc, utcnow
+from .models import Audit, DeviceGrant, Integration, Resource, utc, utcnow
 from .security import authenticate
 from .sites import seen_as
 
@@ -52,6 +52,41 @@ def integration_json(row):
     data["maturity"] = provider.status if provider else "unknown"
     data["provides"] = [c for c in registry.CAPABILITIES if provider and c in provider.provides]
     return data
+
+
+def last_test(db: Session, integration: Integration) -> Audit | None:
+    """Return the newest record that settles whether a source is tested: a stored collection,
+    or a later edit of its address or secret name, after which it is untested again."""
+    history = select(Audit).where(Audit.action.in_(("integration.collected", "integration.updated")),
+                                  Audit.target_id == integration.id).order_by(Audit.created_at.desc())
+    return next((record for record in db.scalars(history)
+                 if record.action == "integration.collected" or record.details.get("retest") is True), None)
+
+
+def predates_change(db: Session, integration: Integration) -> bool:
+    """Say whether what is stored was collected before the address or secret name last changed.
+
+    Only a stored collection clears this; a failed one leaves the old data and the mark.
+    """
+    last = last_test(db, integration) if integration.last_sync else None
+    return last is not None and last.action == "integration.updated"
+
+
+def source_for_people(db: Session, integration_id: str, *, adding: bool) -> None:
+    """Hold a source's row until the caller commits, and refuse to tie people to data it has outgrown.
+
+    Editing a source counts its assignments and label links under this same row
+    lock, so the edit and a new assignment or link run one after the other. One
+    that comes second finds the source changed and not yet collected again: its
+    devices are still the old network's, and an assignment or link made now would
+    carry over to whatever the new address reports. Removing one is always allowed.
+    """
+    db.execute(update(Integration).where(Integration.id == integration_id)
+               .values(name=Integration.name).execution_options(synchronize_session=False))
+    source = db.get(Integration, integration_id, populate_existing=True)
+    if adding and source is not None and predates_change(db, source):
+        raise HTTPException(409, f"{source.name} was changed and has not been collected since, so this device "
+                                 "was read before the change. Collect that source again first.")
 
 
 def observation_json(row):

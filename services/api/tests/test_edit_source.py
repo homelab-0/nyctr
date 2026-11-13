@@ -5,14 +5,14 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 from test_collection import live_client
 
 from nyctr.collection import collect_integration
 from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import Snapshot
 from nyctr.main import _settled_status
-from nyctr.models import Audit, DeviceLink, GuestPass, Integration, Lease, Resource, User, utcnow
+from nyctr.models import Audit, DeviceGrant, DeviceLink, GuestPass, Integration, Lease, Resource, User, utcnow
 
 KEY = "EDIT_SECRET_SENTINEL"
 ADDRESS = "https://resolver.example.net"
@@ -428,3 +428,80 @@ def test_stored_data_stays_marked_as_older_than_the_change_until_a_collection_su
     for expected in (("error", True), ("connected", False)):
         asyncio.run(collect_integration(app.state.session_factory, app.state.settings, id_, None))
         assert listed() == expected
+
+
+@pytest.fixture
+def people(source):
+    """Add an inventory source with one device, and return what the assignment and label-link routes need."""
+    client, headers, id_ = source
+    add(client, Integration(id="net", provider="unifi_network", name="Network", config={}, secret_ref=""))
+    add(client, Resource(id="net:client:phone", integration_id="net", name="Phone", kind="client",
+                         provider="unifi_network", source_id="phone", observed_at=utcnow(),
+                         evidence_kind="observed"))
+    with client.app.state.session_factory() as db:
+        owner = db.scalar(select(User.id))
+    assign = ("/api/devices/net:client:phone/assignment", {"classification": "personal", "user_ids": [owner]})
+    link = ("/api/device-links", {"source_id": f"{id_}:client:one", "device_id": "net:client:phone"})
+    return client, headers, {"assign": assign, "link": link}
+
+
+def retarget(client, source_id):
+    """Change a source's address the way the edit route records it, leaving its data from before."""
+    with client.app.state.session_factory() as db:
+        row = db.get(Integration, source_id)
+        row.status, row.last_sync = "configured", utcnow()
+        db.add(Audit(action="integration.updated", target_id=source_id, details={"retest": True}))
+        db.commit()
+
+
+@pytest.mark.parametrize("route, changed, undo", [
+    ("assign", "net", {"classification": "unassigned", "user_ids": []}), ("link", None, {"device_id": None})])
+def test_people_are_not_tied_to_a_source_changed_and_not_yet_collected_again(people, monkeypatch, route, changed, undo):
+    """Its devices are still the old network's; an assignment or link made now would carry over to the new one."""
+    client, headers, routes = people
+    path, body = routes[route]
+    changed = changed or body["source_id"].split(":")[0]
+    retarget(client, changed)
+    response = client.put(path, headers=headers, json=body)
+    assert response.status_code == 409 and "Collect that source again first" in response.json()["detail"]
+    with client.app.state.session_factory() as db:
+        assert db.scalar(select(DeviceGrant)) is None and db.scalar(select(DeviceLink)) is None
+        assert db.get(Resource, "net:client:phone").classification == "unassigned"
+    assert client.put(path, headers=headers, json={**body, **undo}).status_code == 200
+    with client.app.state.session_factory() as db:
+        db.add(Audit(action="integration.collected", target_id=changed, details={}))
+        db.commit()
+    assert client.put(path, headers=headers, json=body).status_code == 200
+
+
+@pytest.mark.parametrize("route, table", [("assign", "device_grants"), ("link", "device_links")])
+def test_assignment_and_label_link_wait_for_the_source_row_an_edit_holds(people, route, table):
+    """Both take the source's row lock before they read or write, so an edit's count cannot miss them."""
+    client, headers, routes = people
+    statements = []
+    engine = client.app.state.session_factory.kw["bind"]
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+    assert client.put(*routes[route][:1], headers=headers, json=routes[route][1]).status_code == 200
+    lock = next(i for i, text in enumerate(statements) if text.startswith("UPDATE integrations SET name="))
+    assert lock < next(i for i, text in enumerate(statements) if table in text)
+
+
+@pytest.mark.parametrize("route", ["assign", "link"])
+def test_assignment_and_label_link_keep_their_refusals(people, route):
+    """Signed out, a member, a missing token and a wrong target are refused as before, and nothing is stored."""
+    client, headers, routes = people
+    path, body = routes[route]
+    missing = (client.put("/api/devices/nothing/assignment", headers=headers, json=body) if route == "assign"
+               else client.put(path, headers=headers, json={**body, "source_id": "nothing"}))
+    wrong = {**body, "user_ids": []} if route == "assign" else {**body, "device_id": body["source_id"]}
+    assert missing.status_code == 404
+    assert client.put(path, headers=headers, json=wrong).status_code == 422
+    assert client.put(path, json=body).status_code == 403
+    with client.app.state.session_factory() as db:
+        db.scalar(select(User)).role = "member"
+        db.commit()
+    assert client.put(path, headers=headers, json=body).status_code == 403
+    client.cookies.clear()
+    assert client.put(path, headers=headers, json=body).status_code == 401
+    with client.app.state.session_factory() as db:
+        assert db.scalar(select(DeviceGrant)) is None and db.scalar(select(DeviceLink)) is None

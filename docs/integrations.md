@@ -56,6 +56,11 @@ describe another network and those people must not be shown its blocked lookups.
 The refusal says how many there are and where to remove them. Entries Nyctr did
 not create, and other sources' assignments, do not block a change.
 
+After such a change, and until the source has been collected again, its devices
+cannot be assigned to people and its device labels cannot be linked: what Nyctr
+holds was read before the change. Removing an assignment or a link is always
+allowed.
+
 Every edit is written to the audit history with who made it, which source, and
 the names of the fields that changed. The values are not recorded.
 

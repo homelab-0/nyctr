@@ -278,15 +278,15 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const [add, setAdd] = useState<string | null>(null);
   const [edit, setEdit] = useState<Integration | null>(null);
   const editButton = useRef<HTMLButtonElement | null>(null);
-  // The source whose edit is being saved, or is saved and not yet read back. Its form would open
-  // on the values from before that save and could undo it, so it stays shut until the list reloads.
-  const [saving, setSaving] = useState<string | null>(null);
-  const awaitingReload = useRef(false);
-  useEffect(() => {
-    if (!awaitingReload.current) return;
-    awaitingReload.current = false;
-    setSaving(null);
-  }, [result.data, result.error]);
+  // Per source: 'pending' while an edit of it is being saved, then the list as it was when that
+  // save succeeded. Its form would open on the values from before the save and could undo it, so
+  // the source stays shut until a newer list has arrived. Every save starts a fresh read and
+  // drops any older one, so the next list to arrive was read after the save.
+  const [saving, setSaving] = useState<Record<string, 'pending' | Integration[] | null>>({});
+  const listed = useRef(result.data);
+  listed.current = result.data;
+  const shut = (id: string) =>
+    id in saving && (saving[id] === 'pending' || saving[id] === result.data);
   /** Puts the keyboard back on the card's Edit button once the edit form has closed. */
   useEffect(() => {
     if (!edit) editButton.current?.focus();
@@ -452,9 +452,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <button
                       className="button secondary small"
                       disabled={pending !== null || demo || !item}
-                      aria-disabled={saving === integration.id}
+                      aria-disabled={shut(integration.id)}
                       onClick={(event) => {
-                        if (saving === integration.id) return;
+                        if (shut(integration.id)) return;
                         editButton.current = event.currentTarget;
                         setEdit(integration);
                       }}
@@ -463,7 +463,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                           ? 'Demo sources cannot be changed.'
                           : !item
                             ? 'This release has no integration for this source.'
-                            : saving === integration.id
+                            : shut(integration.id)
                               ? 'Your last change to this source is still being saved.'
                               : 'Change the name, settings or secret name'
                       }
@@ -595,12 +595,17 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           provider={edit.provider}
           editing={edit}
           onClose={() => setEdit(null)}
-          onPending={(busy) => {
-            if (busy) setSaving(edit.id);
-            else if (!awaitingReload.current) setSaving(null);
-          }}
+          onPending={(busy) =>
+            setSaving(({ [edit.id]: was, ...rest }) =>
+              busy
+                ? { ...rest, [edit.id]: 'pending' }
+                : was === 'pending'
+                  ? rest
+                  : { ...rest, [edit.id]: was },
+            )
+          }
           onSaved={() => {
-            awaitingReload.current = true;
+            setSaving((all) => ({ ...all, [edit.id]: listed.current }));
             result.reload();
             setError(null);
             setSuccess('Changes saved.');
