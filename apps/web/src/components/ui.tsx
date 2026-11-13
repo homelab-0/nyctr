@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode, type ComponentType, type SVGProps } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentType,
+  type SVGProps,
+} from 'react';
 import {
   AlertCircle,
   ArrowRight,

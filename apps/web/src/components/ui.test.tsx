@@ -3,9 +3,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { registerSources, SourceTag } from './ui';
 
 // A one-pixel picture; the chip only needs something a browser would accept as an image.
-const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const SVG = `data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg"/>')}`;
-const kind = (id: string, logo?: string) => ({ id, name: `${id} source`, letter: 'A', tone: 'rose', logo });
+const kind = (id: string, logo?: string) => ({
+  id,
+  name: `${id} source`,
+  letter: 'A',
+  tone: 'rose',
+  logo,
+});
 
 afterEach(cleanup);
 
