@@ -43,6 +43,7 @@ from .models import (
     AccessRequest,
     Audit,
     DeviceGrant,
+    DeviceLink,
     Finding,
     GuestPass,
     Integration,
@@ -369,7 +370,10 @@ def create_app(settings: Settings | None = None):
 
         Such a change is refused while Nyctr still has an exception or a guest
         pass of its own at the source, because ending those later would go to
-        the new address and leave the old one holding them. The row is locked
+        the new address and leave the old one holding them. It is refused as
+        well while a device of the source is assigned to people or a device label
+        of it is linked, because the source may then describe another network
+        and those people must not be shown its lookups. The row is locked
         before it is compared, so overlapping edits are applied one after the
         other and each is audited against the settings it actually replaced.
         """
@@ -410,7 +414,7 @@ def create_app(settings: Settings | None = None):
                   + (["secret_ref"] if body.secret_ref != row.secret_ref else []))
         kinds = {field.key: field.kind for field in provider.fields}
         retest = "secret_ref" in fields or any(kinds.get(key) != "number" for key in settings_changed)
-        exceptions = passes = 0
+        exceptions = passes = assigned = links = 0
         if retest:
             exceptions = db.scalar(select(func.count()).select_from(Lease).where(
                 Lease.integration_id == integration_id, Lease.status == "active",
@@ -420,16 +424,31 @@ def create_app(settings: Settings | None = None):
                 GuestPass.integration_id == integration_id, GuestPass.execution == "applied",
                 GuestPass.issued_by.is_not(None), GuestPass.ended_at.is_(None),
                 or_(GuestPass.expires_at.is_(None), GuestPass.expires_at > utcnow())))
-        if not fields or exceptions or passes:
+            # Device ids carry this source's id, not its address. Collection keeps who a device is
+            # assigned to and applies label links to new lookups, so after such a change a member
+            # could be shown another network's blocks under an old assignment or link.
+            assigned = db.scalar(select(func.count()).select_from(Resource).where(
+                Resource.integration_id == integration_id, Resource.classification.in_(("personal", "shared"))))
+            links = db.scalar(select(func.count()).select_from(DeviceLink).join(
+                Resource, Resource.id == DeviceLink.source_id).where(Resource.integration_id == integration_id))
+        if not fields or exceptions or passes or assigned or links:
             db.rollback()
             if not fields:
                 return integration_json(row)
-            held = " and ".join(text for count, text in (
-                (exceptions, f"{exceptions} open exception{'' if exceptions == 1 else 's'} (end under Open now)"),
-                (passes, f"{passes} guest pass{'' if passes == 1 else 'es'} it issued (end under Guests)")) if count)
-            raise HTTPException(409, f"Not saved. Nyctr still has {held} at this source. End them first, then "
-                                     "change its address, settings or secret name. Its name and numeric "
-                                     "settings can be changed at any time.")
+
+            def some(count, one, many, where):
+                return [f"{count} {one if count == 1 else many} ({where})"] if count else []
+            own = some(exceptions, "open exception", "open exceptions", "end under Open now") \
+                + some(passes, "guest pass it issued", "guest passes it issued", "end under Guests")
+            people = some(assigned, "device assigned to people", "devices assigned to people", "unassign under Setup") \
+                + some(links, "linked device label", "linked device labels", "unlink under Setup")
+            why = ([f"Nyctr still has {' and '.join(own)} at this source, and ending them later would reach "
+                    "the new address instead."] if own else []) \
+                + ([f"This source has {' and '.join(people)}, and those people could be shown another "
+                    "network's blocked lookups."] if people else [])
+            raise HTTPException(409, f"Not saved. {' '.join(why)} Do that first, then change its address, "
+                                     "settings or secret name. Its name and numeric settings can be changed "
+                                     "at any time.")
         row.name, row.config, row.secret_ref = body.name, config, body.secret_ref
         if retest:
             row.status, row.last_error, row.sync_started_at = "configured", None, None

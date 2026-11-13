@@ -52,12 +52,14 @@ function AddIntegration({
   editing,
   onClose,
   onSaved,
+  onPending,
 }: {
   providers: CatalogProvider[];
   provider: string;
   editing?: Integration;
   onClose: () => void;
   onSaved: () => void;
+  onPending?: (pending: boolean) => void;
 }) {
   const { user } = useAuth();
   const [selected, setSelected] = useState(provider);
@@ -88,6 +90,7 @@ function AddIntegration({
     event.preventDefault();
     setError(null);
     setPending(true);
+    onPending?.(true);
     const config: Record<string, string | number> = {};
     for (const field of chosen.fields) {
       const value = (values[`${chosen.id}.${field.key}`] || '').trim();
@@ -103,6 +106,7 @@ function AddIntegration({
       setError((e as Error).message);
     } finally {
       setPending(false);
+      onPending?.(false);
     }
   };
   return (
@@ -274,6 +278,15 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const [add, setAdd] = useState<string | null>(null);
   const [edit, setEdit] = useState<Integration | null>(null);
   const editButton = useRef<HTMLButtonElement | null>(null);
+  // The source whose edit is being saved, or is saved and not yet read back. Its form would open
+  // on the values from before that save and could undo it, so it stays shut until the list reloads.
+  const [saving, setSaving] = useState<string | null>(null);
+  const awaitingReload = useRef(false);
+  useEffect(() => {
+    if (!awaitingReload.current) return;
+    awaitingReload.current = false;
+    setSaving(null);
+  }, [result.data, result.error]);
   /** Puts the keyboard back on the card's Edit button once the edit form has closed. */
   useEffect(() => {
     if (!edit) editButton.current?.focus();
@@ -439,7 +452,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <button
                       className="button secondary small"
                       disabled={pending !== null || demo || !item}
+                      aria-disabled={saving === integration.id}
                       onClick={(event) => {
+                        if (saving === integration.id) return;
                         editButton.current = event.currentTarget;
                         setEdit(integration);
                       }}
@@ -448,7 +463,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                           ? 'Demo sources cannot be changed.'
                           : !item
                             ? 'This release has no integration for this source.'
-                            : 'Change the name, settings or secret name'
+                            : saving === integration.id
+                              ? 'Your last change to this source is still being saved.'
+                              : 'Change the name, settings or secret name'
                       }
                     >
                       <Pencil size={14} />
@@ -578,7 +595,12 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           provider={edit.provider}
           editing={edit}
           onClose={() => setEdit(null)}
+          onPending={(busy) => {
+            if (busy) setSaving(edit.id);
+            else if (!awaitingReload.current) setSaving(null);
+          }}
           onSaved={() => {
+            awaitingReload.current = true;
             result.reload();
             setError(null);
             setSuccess('Changes saved.');

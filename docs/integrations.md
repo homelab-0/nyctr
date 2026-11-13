@@ -50,8 +50,11 @@ to read keeps the status.
 Such a change is refused while Nyctr still has something of its own at the
 source: an open exception it applied, or a guest pass it issued that has not
 ended. Ending those later would be sent to the new address and leave the old one
-holding them. The refusal says how many there are and where to end them. Entries
-Nyctr did not create do not block a change.
+holding them. It is refused as well while a device of the source is assigned to
+people or one of its device labels is linked, because the source may then
+describe another network and those people must not be shown its blocked lookups.
+The refusal says how many there are and where to remove them. Entries Nyctr did
+not create, and other sources' assignments, do not block a change.
 
 Every edit is written to the audit history with who made it, which source, and
 the names of the fields that changed. The values are not recorded.

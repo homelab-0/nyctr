@@ -762,7 +762,7 @@ describe('editing a saved source', () => {
     expect(screen.getByText(/· before the change/)).toBeDefined();
   });
 
-  it('does not let a save that finishes late close a form opened in the meantime', async () => {
+  it('keeps a source shut while its save is unfinished, and a late save closes no other form', async () => {
     const response = deferredResponse();
     const { interaction } = await openIntegrations({
       source: resolver,
@@ -772,16 +772,24 @@ describe('editing a saved source', () => {
     const first = await screen.findByRole('dialog', { name: 'Edit source' });
     await interaction.click(within(first).getByRole('button', { name: /Save changes/ }));
     await interaction.click(within(first).getByRole('button', { name: 'Cancel' }));
+    // Reopening now would fill the form with the values from before the save and could undo it.
     await interaction.click(screen.getByRole('button', { name: 'Edit' }));
-    const second = await screen.findByRole('dialog', { name: 'Edit source' });
-    await interaction.type(within(second).getByLabelText(/^Connection name/), ' two');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Edit' }).getAttribute('aria-disabled')).toBe('true');
+    await interaction.click(screen.getByRole('button', { name: /Add connection/ }));
+    const other = await screen.findByRole('dialog', { name: 'Connect a source' });
+    await interaction.type(within(other).getByLabelText(/^Connection name/), 'Second');
     await act(async () => response.resolve(jsonResponse(resolver)));
     await screen.findByText('Changes saved.');
-    expect(
-      within(screen.getByRole('dialog', { name: 'Edit source' })).getByLabelText(
-        /^Connection name/,
+    expect(within(other).getByLabelText(/^Connection name/)).toHaveProperty('value', 'Second');
+    await interaction.click(within(other).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit' }).getAttribute('aria-disabled')).toBe(
+        'false',
       ),
-    ).toHaveProperty('value', `${resolver.name} two`);
+    );
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(await screen.findByRole('dialog', { name: 'Edit source' })).toBeDefined();
   });
 
   it('shows no such note for a source that was never collected or is collected and unchanged', async () => {

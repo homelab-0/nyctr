@@ -12,7 +12,7 @@ from nyctr.collection import collect_integration
 from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import Snapshot
 from nyctr.main import _settled_status
-from nyctr.models import Audit, GuestPass, Integration, Lease, Resource, User, utcnow
+from nyctr.models import Audit, DeviceLink, GuestPass, Integration, Lease, Resource, User, utcnow
 
 KEY = "EDIT_SECRET_SENTINEL"
 ADDRESS = "https://resolver.example.net"
@@ -308,7 +308,7 @@ def add(client, row):
     with client.app.state.session_factory() as db:
         db.add(row)
         db.commit()
-        return row.id
+        return getattr(row, "id", None)
 
 
 @pytest.mark.parametrize("kind, told", [("exception", "1 open exception (end under Open now)"),
@@ -344,6 +344,40 @@ def test_entries_nyctr_did_not_create_do_not_hold_back_a_change(source):
     add(client, Lease(integration_id=id_, domain="by-hand.example.org", execution="not_applied", owned=False))
     add(client, GuestPass(integration_id=id_, code="22222-33333", name="Made at the source", minutes=60,
                           issued_by=None, execution="applied"))
+    assert edit(client, headers, id_, **NEW_ADDRESS).status_code == 200
+
+
+def test_address_or_secret_change_waits_until_assignments_and_label_links_are_removed(source):
+    """An assignment or label link made for one network must not carry over to whatever the source reads next."""
+    client, headers, id_ = source
+    other = add(client, Integration(provider="pihole", name="Other", config={}, secret_ref=""))
+    for owner in (id_, other):
+        add(client, Resource(id=f"{owner}:client:phone", integration_id=owner, name="Phone", kind="client",
+                             provider="pihole", source_id="phone", observed_at=utcnow(), evidence_kind="observed"))
+
+    def set_assignment(owner, classification):
+        with client.app.state.session_factory() as db:
+            db.get(Resource, f"{owner}:client:phone").classification = classification
+            db.commit()
+
+    def refused(told):
+        for changes in ({"config": {"base_url": "https://second.example.net"}},
+                        {"secret_ref": NEW_ADDRESS["secret_ref"]}):
+            response = edit(client, headers, id_, **changes)
+            assert response.status_code == 409, response.text
+            assert told in response.json()["detail"] and "another network's blocked lookups" in response.text
+            assert_untouched(client, id_)
+    set_assignment(other, "personal")
+    set_assignment(id_, "shared")
+    refused("1 device assigned to people (unassign under Setup)")
+    set_assignment(id_, "unassigned")
+    add(client, DeviceLink(source_id=f"{id_}:client:one", device_id=f"{other}:client:phone", created_by="owner"))
+    refused("1 linked device label (unlink under Setup)")
+    assert edit(client, headers, id_, config={"base_url": ADDRESS, "lookback_hours": 6}).status_code == 200
+    with client.app.state.session_factory() as db:
+        db.delete(db.get(DeviceLink, f"{id_}:client:one"))
+        db.commit()
+    # The other source still has an assigned device; that is not this source's concern.
     assert edit(client, headers, id_, **NEW_ADDRESS).status_code == 200
 
 
