@@ -265,8 +265,8 @@ their own `NYCTR_CONNECTOR_SECRET_*` entry.
 
 Changes and the assistant are off by default. Scheduled collection is on: a
 live installation collects every 15 minutes until an administrator changes the
-schedule with `PUT /api/collection` (a console control is planned). Demo mode
-rejects every setting in this section and never collects.
+schedule in the Console. Demo mode rejects every setting in this section and
+never collects.
 
 ```yaml
 # Integrations Nyctr may change. Only integrations that can change their source
@@ -276,7 +276,7 @@ providerWrites: [nextdns]
 
 collection:
   # Optional starting interval, 60 to 86400 seconds, used until an administrator
-  # saves a schedule. 0 or unset leaves the product default.
+  # saves a schedule in the Console. 0 or unset leaves the product default.
   intervalSeconds: 300
   nudge:
     # Optional. A Secret holding a token of 32 or more characters lets a network
@@ -298,11 +298,11 @@ The pod cannot start if a referenced Secret lacks the named key, so set
 
 The guest cut-off rule and lock-out act at every collection, whatever started
 it: the schedule, an administrator pressing Collect, or a nudge. The schedule is
-on unless an administrator turns it off with `PUT /api/collection`, so once the
-cut-off rule is written and switched on it can cut a guest off without anyone
-at the console. A nudge can do the same. With the schedule off and no nudge, the
-rule and lock-out act only when an administrator collects. The chart cannot
-turn the schedule off; an administrator does that through the API.
+on unless an administrator turns it off in the Console (Setup, This
+installation), so once the cut-off rule is written and switched on it can cut a
+guest off without anyone at the console. A nudge can do the same. With the
+schedule off and no nudge, the rule and lock-out act only when an administrator
+collects. The chart cannot turn the schedule off; that is done in the Console.
 
 Turn changes on one integration at a time, after a read-only collection from it
 looks right. With `providerWrites` set, Nyctr acts only on an administrator's

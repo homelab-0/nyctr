@@ -5,6 +5,7 @@ import App from '../../App';
 import { setCsrfToken } from '../../api';
 import { AuthProvider } from '../../auth';
 import { mockApi } from '../../test/mock-api';
+import { memberSchedule } from '../../test/schedule';
 import type { AccessRequest, Block, Lease, User } from '../../types';
 
 const member: User = {
@@ -104,6 +105,35 @@ afterEach(() => {
 });
 
 describe('member portal', () => {
+  it('only tells a member to come back when a collection is scheduled', async () => {
+    open({ 'GET /collection': memberSchedule(true) });
+    expect(
+      await screen.findByText(
+        'If a page will not load, open it again, then come back here in a while. Nyctr looks for new blocks every 15 minutes.',
+      ),
+    ).toBeDefined();
+    cleanup();
+    open({ 'GET /collection': memberSchedule(false) });
+    expect(
+      await screen.findByText(
+        'If a page will not load, open it again, then ask whoever runs Nyctr to collect. New blocks show up here only after that.',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText(/in a minute|in a while/)).toBeNull();
+  });
+
+  it('names no interval when the schedule is on but the answer carries none', async () => {
+    open({ 'GET /collection': { enabled: true, next_at: null } });
+    expect(
+      await screen.findByText('If a page will not load, open it again, then come back here later.'),
+    ).toBeDefined();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText(/NaN|ask whoever runs Nyctr/)).toBeNull();
+    expect(
+      screen.getByText('If a page will not load, open it again, then come back here later.'),
+    ).toBeDefined();
+  });
+
   it('offers the console only to an administrator who opened the portal address', async () => {
     open({});
     await screen.findByRole('heading', { name: /blocked/i, level: 1 });

@@ -26,6 +26,7 @@ const WORDS: Record<string, string> = {
   'integration.created': 'Added a source',
   'integration.collected': 'Collected from a source',
   'integration.collection_failed': 'Collection failed',
+  'collection.schedule_changed': 'Changed the collection schedule',
   'integration.diagnosed': 'Tested a source',
   'suggestion.dismissed': 'Dismissed a suggestion',
   'graph.queried': 'Ran a graph query',

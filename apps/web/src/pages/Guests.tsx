@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Ban, Check, Copy, Lock, RotateCcw, Ticket } from 'lucide-react';
 import { post, put, useApi } from '../api';
+import { everyText, useSchedule } from '../lib/schedule';
 import {
   Empty,
   ErrorState,
@@ -52,7 +53,13 @@ function CopyCode({ code }: { code: string }) {
  * page, Nyctr is not reachable from the guest network, and data comes back by Nyctr reading
  * that source. The source is named from what is connected, never assumed.
  */
-function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
+function HowGuestsGetOn({
+  portal,
+  every,
+}: {
+  portal: GuestOverview['portal'];
+  every: string | null;
+}) {
   const [copied, setCopied] = useState(false);
   const gated = portal.wifi.filter((item) => item.captive_portal);
   const net = portal.served_by.join(' and ') || 'Your network system';
@@ -72,7 +79,9 @@ function HowGuestsGetOn({ portal }: { portal: GuestOverview['portal'] }) {
             <b>Nyctr reads {net}</b> to see who is on, where, and what was blocked.{' '}
             {portal.nudge
               ? 'The network also tells Nyctr to look straight away.'
-              : 'It looks at each collection.'}
+              : every
+                ? `It looks at each collection, ${every}.`
+                : 'It looks when you collect from the source.'}
           </li>
         </ol>
         <div className="note green">
@@ -157,6 +166,7 @@ export default function Guests({
   const [issued, setIssued] = useState<GuestPass | null>(null);
   const [admitFor, setAdmitFor] = useState(240);
   const now = useNow();
+  const every = everyText(useSchedule().data);
   useEffect(() => {
     if (guests.data) setData(guests.data);
   }, [guests.data]);
@@ -296,7 +306,11 @@ export default function Guests({
           </Panel>
           <Panel
             title="Automatic cut-off"
-            hint="A rule you write. Nyctr applies it after each collection."
+            hint={
+              every
+                ? `A rule you write. Nyctr applies it after each collection, ${every}.`
+                : 'A rule you write. Nyctr applies it when a source is collected.'
+            }
           >
             <div className="stack">
               <p className="rule">
@@ -535,7 +549,7 @@ export default function Guests({
               <Empty title="Pick a device" text="Its timeline, risk and controls open here." />
             )
           )}
-          <HowGuestsGetOn portal={data.portal} />
+          <HowGuestsGetOn portal={data.portal} every={every} />
           <Panel title="New guest pass">
             <form className="form-stack" onSubmit={issue}>
               <label className="field">

@@ -63,11 +63,8 @@ def test_a_saved_schedule_wins_over_the_deployment_value_and_is_audited_with_old
         saved = client.put("/api/collection", headers=headers, json={"enabled": True, "minutes": 60})
         assert saved.status_code == 200
         assert (saved.json()["interval_seconds"], saved.json()["source"]) == (3600, "console")
-        # The current Setup page reads the interval from the rules; it must show the one in force.
-        assert client.get("/api/rules").json()["collect_interval_seconds"] == 3600
         off = client.put("/api/collection", headers=headers, json={"enabled": False, "minutes": 60}).json()
         assert off["enabled"] is False and off["next_at"] is None
-        assert client.get("/api/rules").json()["collect_interval_seconds"] == 0
         with app.state.session_factory() as db:
             owner = db.scalar(select(User).where(User.email == LIVE_ADMIN[0]))
             first, second = db.scalars(select(Audit).where(Audit.action == "collection.schedule_changed")

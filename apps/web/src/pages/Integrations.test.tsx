@@ -3,7 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '../auth';
 import { setCsrfToken } from '../api';
+import { scheduleFixture, scheduleOff } from '../test/schedule';
 import type {
+  CollectionSchedule,
   Catalog,
   Integration,
   IntegrationDiagnosticsReport,
@@ -271,12 +273,14 @@ async function openIntegrations({
   diagnose = async () => jsonResponse(partialReport),
   source = connection,
   partial,
+  schedule = scheduleFixture(),
 }: {
   mode?: Mode;
   role?: Role;
   diagnose?: () => Promise<Response>;
   source?: Integration;
   partial?: boolean;
+  schedule?: CollectionSchedule;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -291,6 +295,7 @@ async function openIntegrations({
     if (path === '/api/auth/me') return jsonResponse(user);
     if (path === '/api/integrations') return jsonResponse([source]);
     if (path === '/api/integrations/catalog') return jsonResponse(catalog);
+    if (path === '/api/collection') return jsonResponse(schedule);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
     if (path === `/api/integrations/${connection.id}/sync`) {
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
@@ -620,6 +625,29 @@ describe('integrations add capabilities', () => {
     await openIntegrations({ source: { ...connection, status: 'connected' } });
     expect(screen.getByText('Connected')).toBeTruthy();
     expect(screen.queryByText(/Only the most recent blocked lookups/)).toBeNull();
+  });
+
+  it('says on the source card when it is next collected, or that it is only on request', async () => {
+    await openIntegrations();
+    expect((await screen.findByText('Next collection')).parentElement!.textContent).toBe(
+      'Next collectionin 12 min',
+    );
+    cleanup();
+    await openIntegrations({ schedule: scheduleOff() });
+    expect(await screen.findByText('Only when you press Collect')).toBeDefined();
+  });
+
+  it('counts the next collection down on the source card while the page stays open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await openIntegrations();
+      const card = (await screen.findByText('Next collection')).parentElement!;
+      expect(card.textContent).toBe('Next collectionin 12 min');
+      await act(() => vi.advanceTimersByTimeAsync(5 * 60_000));
+      expect(card.textContent).toBe('Next collectionin 7 min');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows what each integration adds and which features have a connected source', async () => {

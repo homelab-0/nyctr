@@ -91,9 +91,8 @@ and UniFi's page can carry Nyctr's notice.
 4. In the firewall, block the guest network from reaching the Nyctr host.
 5. In Nyctr, connect UniFi and add `unifi_network` to `NYCTR_PROVIDER_WRITES`
    so it can issue passes and cut devices off.
-6. Optional: choose how often Nyctr collects (every 15 minutes unless an
-   administrator changes it with `PUT /api/collection`; a console control is
-   planned), and in UniFi's Alarm Manager
+6. Optional: choose how often Nyctr collects under Setup, This installation
+   (every 15 minutes unless changed), and in UniFi's Alarm Manager
    (Network 9.3 or later) add a webhook on client connected and threat
    detected that calls `https://<nyctr>/api/hooks/collect/<token>`
    ([Ubiquiti: Alarm Manager](https://help.ui.com/hc/en-us/articles/27721287753239)).

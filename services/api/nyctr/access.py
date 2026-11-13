@@ -332,13 +332,10 @@ def rules(request: Request, _user=Depends(admin), db: Session = Depends(get_db))
                         "changes": provider.changes if provider else [],
                         "write_mode": settings.write_mode(row.provider) if provider and provider.changes
                         else "none"})
-    in_force = schedule.in_force(db, settings)
     return {"access": get_rule(db, "access_rule").model_dump(), "guest": get_rule(db, "guest_rule").model_dump(),
             "writes": {"access": feature_mode(db, settings, "dns.exceptions"),
                        "guests": feature_mode(db, settings, "guest.control")},
-            "sources": sources,
-            # For the console's current Setup page, until it reads /api/collection: the interval in force.
-            "collect_interval_seconds": in_force["interval_seconds"] if in_force["enabled"] else 0}
+            "sources": sources}
 
 
 def _schedule_json(db: Session, settings: Settings) -> dict:
