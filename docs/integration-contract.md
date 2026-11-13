@@ -86,6 +86,7 @@ it keeps is source detail for people to read and query.
 | `client` | `ip`, `mac`, `uplink` (source id of the device it is attached to), `connected_at` |
 | `client` on guest access | `guest: {authorized, method, authorized_at, expires_at, bytes, seconds}` where `method` is `pass`, `console`, `other` or absent |
 | `gateway`, `switch`, `access_point` | `ip`, `mac`, `uplink` (source id of the equipment above it) |
+| `gateway` filed on evidence other than the source naming it one | `kind_basis` saying which evidence (see below) |
 | `network` | `vlan`, `subnets` (the address ranges the source configured, as `["192.0.2.0/24"]`), `gateway_ip`, `managed_by` (`gateway`, `switch` or `unmanaged`) |
 | `workload` | `nics: [{bridge, mac, vlan, firewall}]`, `firewall_enabled` |
 | `host` | `addresses` |
@@ -120,6 +121,19 @@ link and the console shows its network as not reported. A network whose
 site has no `subnets`, no client of that site is placed, because its address
 could belong there. An `unmanaged` network has no range to miss and does not
 block placement.
+
+`kind_basis` is absent when the source itself said what kind a device is. An
+adapter that files a device on anything else sets it, and the console then says
+on the device's panel that Nyctr worked the kind out and from what:
+
+| `kind_basis` | Meaning |
+| --- | --- |
+| `gateway_address` | The source does not list the device as a gateway. Its own address is the gateway address of a network the source says its gateway manages, and no other device holds one |
+| `outside_network_ranges` | The source names no gateway and no device holds a gateway address. Every gateway-managed range was collected, this is the only equipment whose address is outside every collected range, the source reports nothing above it, and other equipment reports it as its uplink |
+
+A new value needs a row here and a sentence in the console. A value the console
+does not know is still shown as worked out by Nyctr, never as the source's
+statement.
 
 ## Rules every integration follows
 

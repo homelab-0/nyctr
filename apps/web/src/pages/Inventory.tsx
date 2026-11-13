@@ -24,6 +24,12 @@ const GROUPS = {
 } as const;
 type Group = keyof typeof GROUPS;
 
+/** The kind as the table shows it. A kind Nyctr deduced says so, so it never reads as the source's word. */
+export function kindText(row: Resource) {
+  const name = label(row.kind);
+  return typeof row.attributes.kind_basis === 'string' ? `${name}, worked out by Nyctr` : name;
+}
+
 /** A short, source-specific detail worth a column: an address, VLAN, model or firewall state. */
 function detail(row: Resource) {
   const a = row.attributes;
@@ -122,7 +128,7 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
                           <Icon size={15} /> {row.name}
                         </a>
                       </th>
-                      <td>{label(row.kind)}</td>
+                      <td>{kindText(row)}</td>
                       <td>
                         <SourceTag provider={row.provider} named />
                       </td>

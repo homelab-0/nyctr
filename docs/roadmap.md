@@ -68,8 +68,9 @@ UniFi console, NextDNS profile and Proxmox node, with differences fixed.
 - Durable background collection, scheduling, bounded retries and health reporting.
   **(first version: optional in-process interval, no retries)**
 - UniFi ports, zones, rule ordering and configuration snapshots.
-  **(done: equipment uplinks, each network's VLAN and address range, and devices
-  placed on a network by address, labelled inferred)**
+  **(done: equipment uplinks, each network's VLAN and address range, the gateway
+  filed on evidence when the console does not list it as one, and devices placed
+  on a network by address, labelled inferred)**
 - UniFi Fabric's Site Manager discovery/health channel, separately scoped from
   organizational policy capabilities that require verified APIs.
 - UniFi firewall/CEF event receiver within the UniFi integration.

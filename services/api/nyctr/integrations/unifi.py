@@ -6,8 +6,15 @@ Guest access state and hotspot vouchers are read here; changing them lives in
 `actions.py` behind the operator's explicit permission.
 
 A network's address range and a device's uplink come from one detail read each.
-Which network a client is on is never stated by this source; `nyctr.links`
-works that out at read time.
+A device is filed as the gateway on the first of three kinds of evidence: the
+source lists it with that feature; its own address is the gateway address the
+source gives for a network it says the gateway manages; or, with every
+gateway-managed range collected, it is the only equipment whose address is
+outside every range, the source reports nothing above it, and other equipment reports
+it as its uplink. The last two are
+Nyctr's deduction and are recorded as such in `kind_basis`. Nothing else makes
+a gateway. Which network a client is on is never stated by this source;
+`nyctr.links` works that out at read time.
 """
 
 from __future__ import annotations
@@ -81,7 +88,8 @@ def _network_addresses(detail: dict[str, Any]) -> dict[str, Any]:
                  [f"{ipv4['hostIpAddress']}/{ipv4['prefixLength']}", *extra]]
     except ValueError:
         raise IntegrationError("UniFi returned an invalid network address configuration.") from None
-    return {"gateway_ip": str(hosts[0].ip), "subnets": list(dict.fromkeys(str(host.network) for host in hosts))}
+    return {"gateway_ip": str(hosts[0].ip), "subnets": list(dict.fromkeys(str(host.network) for host in hosts)),
+            "gateway_ips": [str(host.ip) for host in hosts]}
 
 
 def _device_uplink(detail: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +100,33 @@ def _device_uplink(detail: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(uplink, dict):
         raise IntegrationError("UniFi returned an invalid device uplink.")
     return {"uplink": source_id(uplink.get("deviceId"))}
+
+
+def _gateway_by_position(devices: list, routed: list, detail: dict[str, dict[str, Any]]) -> Any:
+    """Name the one device that sits outside every network range at the top of the equipment, or nobody.
+
+    Runs only when the range of every gateway-managed network was collected. Every
+    piece of equipment must report an IPv4 address, the family the ranges are read
+    in; exactly one may be outside every collected range. Its own detail read must
+    have reported no uplink device, and at least one other piece of equipment must
+    report it as its uplink, so a device nothing hangs off is never the gateway.
+    """
+    if not routed or any("subnets" not in detail.get(f"networks/{row.get('id')}", {}) for row in routed):
+        return None
+    ranges = [ipaddress.ip_network(subnet) for key, found in detail.items() if key.startswith("networks/")
+              for subnet in found.get("subnets", [])]
+    outside = []
+    for row in devices:
+        try:
+            address = ipaddress.IPv4Address(row["ipAddress"] if isinstance(row.get("ipAddress"), str) else "")
+        except ValueError:
+            return None
+        if not any(address in subnet for subnet in ranges):
+            outside.append(row.get("id"))
+    read = detail.get(f"devices/{outside[0]}") if len(outside) == 1 else None
+    below = len(outside) == 1 and any(
+        found.get("uplink") == outside[0] for key, found in detail.items() if key.startswith("devices/"))
+    return outside[0] if read is not None and "uplink" not in read and below else None
 
 
 async def _detail(reader: ReadClient, path: str, remote_id: str, parse, gap: str) -> dict[str, Any] | None:
@@ -196,6 +231,22 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                         reader, f"{base}/{kind}/{remote_id}", remote_id, parse, f"unifi_{kind}_details_unavailable")
                     if found is not None:
                         detail[f"{kind}/{remote_id}"] = found
+            # The gateway's address on each network the source says its gateway manages.
+            routed = [row for row in networks if row.get("management") == "GATEWAY"]
+            gateway_ips = {ip for row in routed
+                           for ip in detail.get(f"networks/{row.get('id')}", {}).get("gateway_ips", [])}
+            declared = any(isinstance(row.get("features"), list) and "gateway" in row["features"] for row in devices)
+            holders = [row.get("id") for row in devices
+                       if isinstance(row.get("ipAddress"), str) and row["ipAddress"] in gateway_ips]
+            # One device holding a gateway address is the gateway. None or several is not evidence,
+            # and only then is the device's position among the collected ranges considered.
+            evident = basis = None
+            if not declared and len(holders) == 1:
+                evident, basis = holders[0], "gateway_address"
+            elif not declared and not holders:
+                evident, basis = _gateway_by_position(devices, routed, detail), "outside_network_ranges"
+            if routed and not declared and evident is None:
+                core.record_gap("unifi_gateway_not_identified")
             uplinks: list[tuple[str, str]] = []
             for row in devices:
                 remote_id = source_id(row.get("id"))
@@ -212,6 +263,11 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                     attributes={**selected(row, ("model", "state", "firmwareVersion", "firmwareUpdatable", "features")),
                                 **_renamed(row, {"ipAddress": "ip", "macAddress": "mac"}), **found},
                 )
+                if remote_id == evident:
+                    # The identifier stays the one the feature list gives, so a device already
+                    # collected is refiled in place instead of appearing a second time.
+                    node["kind"] = "gateway"
+                    node["attributes"]["kind_basis"] = basis
                 device_map[remote_id] = node["id"]
                 snapshot.resources.append(node)
                 if "uplink" in found:
@@ -391,6 +447,11 @@ PROVIDER = Provider(
             "More networks and equipment than one collection reads in detail",
             "Detail reads stop before the collection reaches the source's request limit. "
             "Some address ranges or uplinks are missing; narrow the connection to one site."),
+        "unifi_gateway_not_identified": (
+            "No device could be shown to be the gateway",
+            "The source says a gateway manages some networks, but lists no device as a gateway, no single "
+            "device holds a gateway address, and no single device sits outside every network range at the "
+            "top of the other equipment. Nyctr files nothing as the gateway rather than guess."),
         "unifi_no_visible_sites": (
             "No sites were visible to the credential",
             "Site discovery returned an empty list. Device, network, client, and policy reads were not exercised."),

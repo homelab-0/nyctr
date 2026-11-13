@@ -31,6 +31,26 @@ const FACTS: [string, string][] = [
   ['port', 'Port'],
 ];
 
+/**
+ * Why a device is filed as what it is, when Nyctr worked that out instead of the source saying it.
+ * The keys are the `kind_basis` values in the integration contract.
+ */
+const KIND_BASIS: Record<string, string> = {
+  gateway_address:
+    'Worked out by Nyctr: the source does not list this as a gateway, but its address is the gateway address of a network the source says its gateway runs.',
+  outside_network_ranges:
+    'Worked out by Nyctr: the source does not say which device is the gateway. This is the only equipment with an address outside every network range, the source reports nothing above it, and other equipment is attached to it.',
+};
+
+/** The sentence for a device whose kind is Nyctr's deduction, or nothing when the source named it. */
+export function kindBasis(resource: Resource): string | undefined {
+  const basis = resource.attributes.kind_basis;
+  if (typeof basis !== 'string') return undefined;
+  return (
+    KIND_BASIS[basis] ?? 'Worked out by Nyctr: the source does not say what kind of device this is.'
+  );
+}
+
 function facts(resource: Resource): [string, string][] {
   const rows: [string, string][] = [];
   for (const [key, name] of FACTS) {
@@ -194,6 +214,11 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
                     </div>
                   </a>
                 ))}
+              {kindBasis(node) && (
+                <p className="aside">
+                  <i className="ev inferred" /> {kindBasis(node)}
+                </p>
+              )}
               <KV
                 items={[
                   ...facts(node),
