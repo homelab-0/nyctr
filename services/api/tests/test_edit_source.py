@@ -1,9 +1,16 @@
 """Editing a saved source: same validation as a new one, with every refusal leaving the row untouched."""
 
+import asyncio
+import os
+
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 from test_collection import live_client
 
+from nyctr.collection import collect_integration
+from nyctr.diagnostics import DiagnosticReport
+from nyctr.integrations import Snapshot
 from nyctr.main import _settled_status
 from nyctr.models import Audit, Integration, Resource, User, utcnow
 
@@ -206,3 +213,91 @@ def test_edit_during_a_running_collection_is_refused_in_plain_words(source):
                                          "Try again when that has finished.")
     row = stored(client, id_)
     assert (row["status"], row["config"]["base_url"], row["name"]) == ("syncing", ADDRESS + "/api", "Resolver")
+
+
+NEW_ADDRESS = {"config": {"base_url": "https://second.example.net"}, "secret_ref": "NYCTR_CONNECTOR_SECRET_SECOND"}
+
+
+def edit_once(client, headers, id_):
+    """Return a callable that saves a new address and secret name the first time it runs, as a second browser would."""
+    done = []
+
+    def run():
+        if not done:
+            done.append(True)
+            other = TestClient(client.app, cookies=dict(client.cookies))
+            assert edit(other, headers, id_, **NEW_ADDRESS).status_code == 200
+        return bool(done)
+    return run
+
+
+def collect_with_an_edit_before_the_lease(source, monkeypatch):
+    """Run one collection in which an edit lands after the settings were read and before the lease is taken.
+
+    Collection resolves the secret between those two steps, so the edit is made from there.
+    """
+    client, headers, id_ = source
+    land_edit, used = edit_once(client, headers, id_), []
+
+    class Environment:
+        @staticmethod
+        def get(name, default=None):
+            land_edit()
+            return os.environ.get(name, default)
+
+    async def collect(provider, integration_id, config, api_key):
+        used.append((config["base_url"], api_key))
+        return Snapshot(resources=[{"id": f"{integration_id}:client:two", "name": config["base_url"], "kind": "client",
+                                    "provider": provider, "source_id": "two", "evidence_kind": "observed",
+                                    "attributes": {}}])
+    monkeypatch.setattr("nyctr.collection.os", type("os", (), {"environ": Environment}))
+    monkeypatch.setattr("nyctr.integrations.collect", collect)
+    app = client.app
+    result = asyncio.run(collect_integration(app.state.session_factory, app.state.settings, id_, None))
+    return result, used
+
+
+def test_collection_never_runs_on_settings_an_edit_replaced_before_its_lease(source, monkeypatch):
+    """The collection reads with the saved address and secret, so nothing from the old ones is stored as current."""
+    client, _, id_ = source
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_SECOND", "SECOND_SECRET_SENTINEL")
+    (snapshot, error), used = collect_with_an_edit_before_the_lease(source, monkeypatch)
+    assert error is None and snapshot is not None
+    assert used == [("https://second.example.net/api", "SECOND_SECRET_SENTINEL")]
+    names = {item["name"] for item in client.get("/api/resources").json()}
+    assert "https://second.example.net/api" in names and ADDRESS + "/api" not in names
+    # A finished read of the new address is the test the edit asked for.
+    assert stored(client, id_)["status"] == "connected"
+
+
+def test_collection_stops_and_source_still_needs_a_test_when_the_new_secret_is_not_set(source, monkeypatch):
+    """With no value for the new secret name nothing is read, the lease is given back and the edit's mark stays."""
+    client, _, id_ = source
+    (snapshot, error), used = collect_with_an_edit_before_the_lease(source, monkeypatch)
+    assert (snapshot, error, used) == (None, "secret", [])
+    row = stored(client, id_)
+    assert row["status"] == "configured" and row["secret_ref"] == NEW_ADDRESS["secret_ref"]
+    assert [item["name"] for item in client.get("/api/resources").json()] == ["Tablet"]
+
+
+def test_diagnostics_never_probe_or_restore_what_an_edit_replaced_before_the_lease(source, monkeypatch):
+    """A test that started just before an edit probes the saved settings and leaves the source needing a test."""
+    client, headers, id_ = source
+    land_edit, probed = edit_once(client, headers, id_), []
+
+    def clock():
+        land_edit()
+        return utcnow()
+
+    async def diagnose(provider, integration_id, config, secret_ref):
+        probed.append((config["base_url"], secret_ref))
+        return DiagnosticReport(integration_id=integration_id, provider=provider, checked_at=utcnow(), duration_ms=1,
+                                outcome="verified", summary="Fabricated.", checks=[], capabilities=[],
+                                evidence_gaps=[], snapshot_counts=None)
+    # The route reads the clock between loading the source and taking the lease.
+    monkeypatch.setattr("nyctr.main.utcnow", clock)
+    monkeypatch.setattr("nyctr.main.diagnose_integration", diagnose)
+    assert client.post(f"/api/integrations/{id_}/diagnostics", headers=headers).status_code == 200
+    assert probed == [("https://second.example.net/api", NEW_ADDRESS["secret_ref"])]
+    row = stored(client, id_)
+    assert row["status"] == "configured" and row["config"]["base_url"] == "https://second.example.net/api"

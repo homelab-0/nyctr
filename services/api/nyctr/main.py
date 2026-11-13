@@ -425,6 +425,12 @@ def create_app(settings: Settings | None = None):
             db.rollback()
             raise HTTPException(409, "A collection or diagnostic is already running")
         db.commit()
+        read = (integration.config, integration.secret_ref)
+        db.refresh(integration)
+        if (integration.config, integration.secret_ref) != read:
+            # An edit was saved just before the lease: probe what is saved now, and afterwards
+            # hand back the status that edit left, not the one read before it.
+            previous_status, previous_started_at = _settled_status(db, integration), None
         try:
             report = await diagnose_integration(integration.provider, integration_id,
                                                 integration.config, integration.secret_ref)

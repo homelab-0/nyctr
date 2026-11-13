@@ -192,6 +192,17 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             db.rollback()
             return None, "busy"
         db.commit()
+        # An edit may have been saved after the read above and before the lease. None can be while
+        # the lease is held, so read the source again and use only the settings saved now.
+        read_ref = integration.secret_ref
+        db.refresh(integration)
+        if integration.secret_ref != read_ref:
+            api_key = os.environ.get(integration.secret_ref)
+            if not api_key:
+                # A new secret name always leaves the source "configured"; give the lease back as that.
+                integration.status, integration.sync_started_at = "configured", None
+                db.commit()
+                return None, "secret"
         try:
             snapshot = await asyncio.wait_for(
                 collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
