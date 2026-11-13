@@ -8,6 +8,7 @@ from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from nyctr import access
 from nyctr.collection import apply_snapshot
 from nyctr.integrations import Snapshot
 from nyctr.models import (
@@ -32,8 +33,8 @@ TABLES = (Integration, Resource, Relationship, Observation, DeviceGrant, DeviceL
           GuestPass, Lease, AccessRequest, Finding, Insight, Audit)
 
 
-def item(id_, integration_id, kind, name, **extra):
-    return Resource(id=id_, integration_id=integration_id, name=name, kind=kind, provider="fabricated",
+def item(id_, integration_id, kind, name, provider="fabricated", **extra):
+    return Resource(id=id_, integration_id=integration_id, name=name, kind=kind, provider=provider,
                     source_id=id_, observed_at=utcnow(), evidence_kind="observed", **extra)
 
 
@@ -254,3 +255,25 @@ def test_a_new_source_for_the_same_place_starts_from_nothing(world):
     member = TestClient(app)
     live_signin(member, LIVE_MEMBER)
     assert member.get("/api/devices").json() == [] and member.get("/api/blocks").json() == []
+
+
+def test_a_link_to_a_device_removed_before_it_is_stored_is_refused_in_plain_words(world, monkeypatch):
+    """A label link whose device goes with its source between the read and the commit stores nothing: 404."""
+    app, client, headers = world
+    with app.state.session_factory() as db:
+        db.add_all([item("dns:client:spare-label", "dns", "client", "spare", provider="nextdns"),
+                    item("unifi:client:spare", "unifi", "client", "Spare", provider="unifi_network")])
+        db.commit()
+    real = access.audit
+
+    def remove_device_first(db, *args, **details):
+        with app.state.session_factory() as other:
+            other.delete(other.get(Resource, "unifi:client:spare"))
+            other.commit()
+        return real(db, *args, **details)
+    monkeypatch.setattr("nyctr.access.audit", remove_device_first)
+    response = client.put("/api/device-links", headers=headers,
+                          json={"source_id": "dns:client:spare-label", "device_id": "unifi:client:spare"})
+    assert response.status_code == 404 and "no longer in your inventory" in response.json()["detail"]
+    with app.state.session_factory() as db:
+        assert db.get(DeviceLink, "dns:client:spare-label") is None

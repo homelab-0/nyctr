@@ -889,6 +889,8 @@ describe('removing a saved source', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     const sent = fetchMock.mock.calls.find(([, options]) => options?.method === 'DELETE')!;
     expect(JSON.parse(String(sent[1]?.body))).toEqual({ name: connection.name });
+    // Its card is gone, so the keyboard lands on Add connection.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Add connection/ }));
   });
 
   it('says why a source cannot be removed yet and offers no way to confirm', async () => {
@@ -905,5 +907,7 @@ describe('removing a saved source', () => {
       'disabled',
       true,
     );
+    await interaction.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove' }));
   });
 });

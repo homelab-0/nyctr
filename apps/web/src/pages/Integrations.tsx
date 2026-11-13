@@ -408,6 +408,13 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const [add, setAdd] = useState<string | null>(null);
   const [edit, setEdit] = useState<Integration | null>(null);
   const [removing, setRemoving] = useState<Integration | null>(null);
+  // Where the keyboard goes when the removal dialog closes: its Remove button, or, once the
+  // source and its card are gone, the Add connection button.
+  const removeButton = useRef<HTMLButtonElement | null>(null);
+  const addButton = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!removing) removeButton.current?.focus();
+  }, [removing]);
   const editButton = useRef<HTMLButtonElement | null>(null);
   // Per source: 'pending' while an edit of it is being saved, then the list as it was when that
   // save succeeded. Its form would open on the values from before the save and could undo it, so
@@ -463,6 +470,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
         description="Nyctr is the same product whatever you run. Each source you connect adds what its integration can read or change."
         actions={
           <button
+            ref={addButton}
             className="button primary"
             disabled={providers.length === 0}
             onClick={() => setAdd(providers[0].id)}
@@ -639,7 +647,10 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <button
                       className="button secondary small"
                       disabled={pending !== null || demo}
-                      onClick={() => setRemoving(integration)}
+                      onClick={(event) => {
+                        removeButton.current = event.currentTarget;
+                        setRemoving(integration);
+                      }}
                       title={demo ? 'Demo sources cannot be removed.' : 'Remove this source'}
                     >
                       <Trash2 size={14} />
@@ -754,6 +765,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           integration={removing}
           onClose={() => setRemoving(null)}
           onRemoved={() => {
+            removeButton.current = addButton.current;
             setRemoving(null);
             result.reload();
             setError(null);

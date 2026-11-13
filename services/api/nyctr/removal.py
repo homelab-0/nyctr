@@ -92,7 +92,9 @@ def held_message(held: dict) -> str | None:
     ) if count]
     if not parts:
         return None
-    return (f"Not removed. Nyctr still has {', '.join(parts)} at this source. End them first, then remove it. "
+    one = sum(held.values()) == 1
+    return (f"Not removed. Nyctr still has {', '.join(parts)} at this source. "
+            f"End {'it' if one else 'them'} first, then remove the source. "
             "Nothing at the source itself is changed by removing it.")
 
 
