@@ -10,11 +10,13 @@ import {
   Switch,
   kindIcon,
 } from '../components/ui';
-import { span, writeText } from '../lib/format';
+import { span, useNow, writeText } from '../lib/format';
+import { nextCollection, useSchedule } from '../lib/schedule';
 import type {
   AccessRule,
   AssistantConfig,
   AuthConfig,
+  CollectionSchedule,
   DeviceLabel,
   Person,
   Resource,
@@ -276,6 +278,85 @@ function PeoplePanel() {
   );
 }
 
+/** The one collection schedule for every source. Saved on change, like the rules. */
+function SchedulePanel() {
+  const schedule = useSchedule();
+  const now = useNow();
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  if (!schedule.data)
+    return schedule.error ? (
+      <ErrorState message={schedule.error} retry={schedule.reload} />
+    ) : (
+      <Loading text="Loading the schedule…" />
+    );
+  const { enabled, interval_seconds, source, choices } = schedule.data;
+  const minutes = Math.round(interval_seconds / 60);
+  const demo = source === 'demo';
+  // A deployment value may sit between the choices; saving moves to the nearest one.
+  const nearest = choices.reduce((a, b) => (Math.abs(b - minutes) < Math.abs(a - minutes) ? b : a));
+  const save = async (next: Pick<CollectionSchedule, 'enabled'> & { minutes: number }) => {
+    setError(null);
+    setSaving(true);
+    try {
+      await put('/collection', next);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setSaving(false);
+    schedule.reload();
+  };
+  return (
+    <Panel
+      title="Collection schedule"
+      hint="How often Nyctr reads every source on its own. A change applies within a minute."
+    >
+      <div className="stack">
+        <div className="bar">
+          <Switch
+            label="Scheduled collection"
+            checked={enabled}
+            disabled={demo || saving}
+            onChange={(on) => void save({ enabled: on, minutes: nearest })}
+          />
+          <select
+            aria-label="How often to collect"
+            value={minutes}
+            disabled={demo || saving || !enabled}
+            onChange={(e) => void save({ enabled, minutes: Number(e.target.value) })}
+          >
+            {!choices.includes(minutes) && <option value={minutes}>Every {span(minutes)}</option>}
+            {choices.map((choice) => (
+              <option key={choice} value={choice}>
+                Every {span(choice)}
+              </option>
+            ))}
+          </select>
+          <span className="aside">{nextCollection(schedule.data, now, 'Next collection ')}</span>
+        </div>
+        <InlineError message={error} />
+        {source === 'default' && (
+          <p className="aside">Nobody has changed this yet, so Nyctr collects every 15 minutes.</p>
+        )}
+        {source === 'deployment' && (
+          <p className="aside">
+            This starting value was set on the server with NYCTR_COLLECT_INTERVAL_SECONDS. What you
+            save here replaces it.
+          </p>
+        )}
+        {demo ? (
+          <p className="aside">Demo mode uses sample data and never collects.</p>
+        ) : (
+          <p className="aside">
+            The guest cut-off rule and lock-out act at every collection. With the schedule on, a
+            rule you wrote can cut a guest off when nobody is at the console.
+          </p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 /** What this installation is configured to do. All of it is set on the server, not here. */
 function SystemPanel({ rules }: { rules: Rules }) {
   const auth = useApi<AuthConfig>('/auth/config');
@@ -299,13 +380,6 @@ function SystemPanel({ rules }: { rules: Rules }) {
         writeText(source.write_mode as WriteMode),
         'NYCTR_PROVIDER_WRITES',
       ]),
-    [
-      'Automatic collection',
-      rules.collect_interval_seconds
-        ? `Every ${span(Math.round(rules.collect_interval_seconds / 60))}`
-        : 'Only when you press Collect',
-      'NYCTR_COLLECT_INTERVAL_SECONDS',
-    ],
     [
       'Assistant',
       assistant.data?.provider === 'model'
@@ -375,7 +449,12 @@ export default function Setup({ params }: { params: URLSearchParams }) {
       </header>
       {tab === 'rule' && <RulePanel rules={rules.data} reload={rules.reload} />}
       {tab === 'people' && <PeoplePanel />}
-      {tab === 'system' && <SystemPanel rules={rules.data} />}
+      {tab === 'system' && (
+        <div className="stack">
+          <SchedulePanel />
+          <SystemPanel rules={rules.data} />
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,8 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
-import type { Integration, Overview } from '../types';
+import { scheduleFixture, scheduleOff } from '../test/schedule';
+import type { CollectionSchedule, Integration, Overview } from '../types';
 import Briefing from './Briefing';
 
 const overview: Overview = {
@@ -29,8 +30,13 @@ const source = (id: string, status: string, last_error: string | null = null): I
 });
 
 /** Renders the landing screen over fabricated sources and returns each source's row. */
-async function open(sources: Integration[]) {
-  mockApi({ 'GET /overview': overview, 'GET /leases': [], 'GET /integrations': sources });
+async function open(sources: Integration[], schedule: CollectionSchedule = scheduleFixture()) {
+  mockApi({
+    'GET /overview': overview,
+    'GET /leases': [],
+    'GET /integrations': sources,
+    'GET /collection': schedule,
+  });
   render(<Briefing attention={[]} loading={false} />);
   const rows = new Map<string, HTMLElement>();
   for (const item of sources) {
@@ -70,5 +76,18 @@ describe('briefing sources', () => {
     expect(failed.querySelector('.dot')!.className).toBe('dot red');
     expect(rows.get('silent')!.textContent).toContain('Last collection failed');
     expect(rows.get('silent')!.querySelector('.dot')!.className).toBe('dot red');
+  });
+
+  it('says when each source is next collected, failed ones included', async () => {
+    const rows = await open([source('fine', 'connected'), source('failed', 'error')]);
+    await screen.findAllByText('Next collection in 12 min');
+    expect(rows.get('fine')!.textContent).toContain('Next collection in 12 min');
+    expect(rows.get('failed')!.textContent).toContain('Next collection in 12 min');
+  });
+
+  it('promises no next collection while the schedule is off', async () => {
+    const rows = await open([source('fine', 'connected')], scheduleOff());
+    await screen.findByText('Only when you press Collect');
+    expect(rows.get('fine')!.textContent).not.toContain('Next collection');
   });
 });

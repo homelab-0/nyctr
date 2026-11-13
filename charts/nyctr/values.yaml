@@ -77,11 +77,12 @@ connectors:
 providerWrites: []
 
 collection:
-  # The collection schedule is on by default: a live installation collects every
-  # 15 minutes until an administrator changes it with PUT /api/collection (a
-  # console control is planned). This value is only the starting interval in
-  # seconds, 60 to 86400, used until a schedule is saved that way. 0 gives no
-  # value, so the product default applies; it does not turn the schedule off.
+  # The collection schedule is set by an administrator in the Console (Setup,
+  # This installation) and is on by default: a live installation collects every
+  # 15 minutes until someone changes it there. This value is only the starting
+  # interval in seconds, 60 to 86400, used until a schedule is saved in the
+  # Console. 0 gives no value, so the product default applies; it does not turn
+  # the schedule off.
   # The guest cut-off rule and lock-out act at every collection, whatever
   # started it: the schedule, an administrator, or a nudge. With the schedule
   # on, a rule an administrator wrote can therefore act with nobody at the

@@ -4,6 +4,7 @@ import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { ago, left, plural, useNow, word } from '../lib/format';
 import { askNyctr, hrefFor } from '../lib/links';
+import { nextCollection, useSchedule } from '../lib/schedule';
 import type { AttentionItem, Integration, Lease, Overview } from '../types';
 
 const KIND: Record<AttentionItem['kind'], string> = {
@@ -37,6 +38,7 @@ export default function Briefing({
   const overview = useApi<Overview>('/overview');
   const leases = useApi<Lease[]>('/leases');
   const sources = useApi<Integration[]>('/integrations');
+  const schedule = useSchedule();
   const [question, setQuestion] = useState('');
   const now = useNow();
   const urgent = attention.filter((item) => item.severity !== 'low');
@@ -157,6 +159,11 @@ export default function Briefing({
                           ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
                           : `Collected ${ago(source.last_sync, now)}`}
                     </span>
+                    {schedule.data && (
+                      <span className="d">
+                        {nextCollection(schedule.data, now, 'Next collection ')}
+                      </span>
+                    )}
                   </span>
                   <i
                     className={`dot ${source.status === 'error' ? 'red' : source.status === 'partial' ? 'yellow' : source.last_sync ? 'green' : ''}`}

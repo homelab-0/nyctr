@@ -242,7 +242,19 @@ export interface Rules {
     changes: string[];
     write_mode: FeatureMode;
   }[];
-  collect_interval_seconds: number;
+}
+/** What any signed-in person may know about the schedule: on or off, how often, and when next. */
+export interface ScheduleSummary {
+  enabled: boolean;
+  interval_seconds: number;
+  next_at: string | null;
+}
+/** The one collection schedule for every source, as an administrator sees it. */
+export interface CollectionSchedule extends ScheduleSummary {
+  /** Where the value came from: saved in the Console, a deployment value, the product default, or demo. */
+  source: 'console' | 'deployment' | 'default' | 'demo';
+  /** Minutes an administrator may pick. */
+  choices: number[];
 }
 export interface GuestPass {
   id: string;

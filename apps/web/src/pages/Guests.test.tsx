@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../api';
 import { AuthProvider } from '../auth';
 import { mockApi } from '../test/mock-api';
+import { scheduleFixture, scheduleOff } from '../test/schedule';
 import type { GuestOverview, User } from '../types';
 import Guests from './Guests';
 
@@ -88,6 +89,21 @@ afterEach(() => {
 });
 
 describe('guests', () => {
+  it('says how often the cut-off rule is applied, and promises nothing while the schedule is off', async () => {
+    open('enabled', { 'GET /collection': scheduleFixture() });
+    expect(
+      await screen.findByText(
+        'A rule you write. Nyctr applies it after each collection, every 15 minutes.',
+      ),
+    ).toBeDefined();
+    cleanup();
+    open('enabled', { 'GET /collection': scheduleOff() });
+    expect(
+      await screen.findByText('A rule you write. Nyctr applies it when a source is collected.'),
+    ).toBeDefined();
+    expect(screen.queryByText(/each collection/)).toBeNull();
+  });
+
   it('shows guests but disables every change while Nyctr is read-only for the source', async () => {
     open('disabled');
     expect(await screen.findByText('Nyctr is read-only for Office network.')).toBeDefined();

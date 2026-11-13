@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { label, post, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
+import { nextCollection, useSchedule } from '../lib/schedule';
 import type { Catalog, CatalogProvider, Integration, Rules } from '../types';
 import {
   Badge,
@@ -237,6 +238,7 @@ function CapabilityTable({ catalog, connected }: { catalog: Catalog; connected: 
 export default function Integrations({ sources = [] }: { sources?: Rules['sources'] } = {}) {
   const result = useApi<Integration[]>('/integrations');
   const fetched = useApi<Catalog>('/integrations/catalog');
+  const schedule = useSchedule();
   const catalog = fetched.data;
   const providers = catalog?.providers || [];
   const kind = (id: string) => providers.find((item) => item.id === id);
@@ -372,6 +374,12 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                   <span>Last collected</span>
                   <strong>{relativeTime(integration.last_sync)}</strong>
                 </div>
+                {schedule.data && (
+                  <div className="integration-meta">
+                    <span>Next collection</span>
+                    <strong>{nextCollection(schedule.data)}</strong>
+                  </div>
+                )}
                 {integration.status === 'partial' && <Notice tone="amber">{PARTIAL_NOTE}</Notice>}
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>

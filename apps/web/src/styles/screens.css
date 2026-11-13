@@ -606,6 +606,10 @@ textarea.gql-editor:focus {
   font-size: 12.5px;
   color: var(--fg3);
 }
+.integration-meta + .integration-meta {
+  margin-top: 0;
+  padding-top: 0;
+}
 .integration-meta strong {
   font-weight: 500;
   color: var(--fg2);

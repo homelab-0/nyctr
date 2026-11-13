@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { post, useApi } from '../../api';
+import { everyText, useScheduleSummary } from '../../lib/schedule';
 import { useAuth } from '../../auth';
 import {
   Brand,
@@ -132,6 +133,15 @@ function Home({ data }: { data: Data }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const now = useNow();
+  // How soon a new block can show up here. No wait is promised unless a schedule is on.
+  const { user } = useAuth();
+  const schedule = useScheduleSummary().data;
+  const every = everyText(schedule);
+  const comeBack = every
+    ? `come back here in a while. Nyctr looks for new blocks ${every}.`
+    : schedule && user?.mode !== 'demo'
+      ? 'ask whoever runs Nyctr to collect. New blocks show up here only after that.'
+      : 'come back here later.';
   const here = data.device.data;
   const requestFor = useMemo(
     () => new Map((data.requests.data || []).map((row) => [row.block_id, row])),
@@ -210,7 +220,7 @@ function Home({ data }: { data: Data }) {
         ) : (
           <Empty
             title="Nyctr has not seen that blocked on your devices"
-            text="Try opening the page once more on this device, wait a minute, then look again. Blocks from the last day show up here."
+            text={`Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here.`}
           />
         ))}
       {mine.length > 0 && (
@@ -232,7 +242,7 @@ function Home({ data }: { data: Data }) {
       {blocks.length === 0 && found === null && (
         <Empty
           title="Nothing has been blocked on your devices in the last day"
-          text="If a page will not load, open it again and come back here in a minute."
+          text={`If a page will not load, open it again, then ${comeBack}`}
         />
       )}
     </div>

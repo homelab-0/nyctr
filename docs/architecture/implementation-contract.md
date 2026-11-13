@@ -78,9 +78,7 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
 
 ## Access rule, leases and suggestions
 
-- `GET /api/rules` (admin) -> `{access,guest,writes,sources,collect_interval_seconds}`.
-  The last is the interval in force (0 when the schedule is off), kept for the
-  current Setup page.
+- `GET /api/rules` (admin) -> `{access,guest,writes,sources}`.
 - `GET /api/collection` (any signed-in user). A member gets
   `{enabled,interval_seconds,next_at}`. An administrator gets
   `{enabled,interval_seconds,next_at,source,choices}`; `source` says where the

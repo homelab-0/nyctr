@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 import { post, useApi } from '../api';
+import { everyText, useSchedule } from '../lib/schedule';
 import { Empty, ErrorState, InlineError, Loading, Panel, Seg, kindIcon } from '../components/ui';
 import { askNyctr } from '../lib/links';
 import type { Finding, Insight, Resource } from '../types';
@@ -96,6 +97,7 @@ function Read({ finding }: { finding: Finding }) {
 export default function Findings({ params }: { params: URLSearchParams }) {
   const findings = useApi<Finding[]>('/findings');
   const resources = useApi<Resource[]>('/resources');
+  const every = everyText(useSchedule().data);
   const [show, setShow] = useState<'open' | 'resolved'>('open');
   const [selected, setSelected] = useState<string | null>(params.get('id'));
   useEffect(() => {
@@ -146,7 +148,11 @@ export default function Findings({ params }: { params: URLSearchParams }) {
       {!finding ? (
         <Empty
           title={show === 'open' ? 'No open findings' : 'Nothing resolved yet'}
-          text="Findings are re-checked after every collection."
+          text={
+            every
+              ? `Findings are re-checked after every collection, ${every}.`
+              : 'Findings are re-checked when a source is collected.'
+          }
         />
       ) : (
         <div className="split wide-side">
