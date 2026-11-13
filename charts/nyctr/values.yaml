@@ -69,16 +69,23 @@ connectors:
     existingSecret: ""
     key: ca-bundle.crt
 
-# Everything below is off by default: a default installation only reads.
+# Changes and the assistant are off by default: a default installation only reads.
+# Scheduled collection, which also only reads, is on by default.
 # Integration ids Nyctr may change, for example [nextdns, unifi_network]. Only
 # integrations that can change their source are accepted; the application refuses
 # to start on any other name. Collection stays read-only either way.
 providerWrites: []
 
 collection:
-  # Seconds between automatic collections, 60 to 86400. 0 means no schedule.
+  # The collection schedule is on by default: a live installation collects every
+  # 15 minutes until an administrator changes it with PUT /api/collection (a
+  # console control is planned). This value is only the starting interval in
+  # seconds, 60 to 86400, used until a schedule is saved that way. 0 gives no
+  # value, so the product default applies; it does not turn the schedule off.
   # The guest cut-off rule and lock-out act at every collection, whatever
-  # started it: this interval, an administrator, or a nudge.
+  # started it: the schedule, an administrator, or a nudge. With the schedule
+  # on, a rule an administrator wrote can therefore act with nobody at the
+  # console.
   intervalSeconds: 0
   nudge:
     # Existing Secret holding a shared token of at least 32 characters. With it a

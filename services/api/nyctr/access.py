@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import risk
+from . import risk, schedule
 from .collection import SECRET_REF
 from .config import Settings
 from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
@@ -332,11 +332,52 @@ def rules(request: Request, _user=Depends(admin), db: Session = Depends(get_db))
                         "changes": provider.changes if provider else [],
                         "write_mode": settings.write_mode(row.provider) if provider and provider.changes
                         else "none"})
+    in_force = schedule.in_force(db, settings)
     return {"access": get_rule(db, "access_rule").model_dump(), "guest": get_rule(db, "guest_rule").model_dump(),
             "writes": {"access": feature_mode(db, settings, "dns.exceptions"),
                        "guests": feature_mode(db, settings, "guest.control")},
             "sources": sources,
-            "collect_interval_seconds": settings.collect_interval_seconds}
+            # For the console's current Setup page, until it reads /api/collection: the interval in force.
+            "collect_interval_seconds": in_force["interval_seconds"] if in_force["enabled"] else 0}
+
+
+def _schedule_json(db: Session, settings: Settings) -> dict:
+    """Describe the schedule in force, the intervals on offer and when the next collection is due."""
+    now = schedule.in_force(db, settings)
+    return {**now, "choices": list(schedule.CHOICES), "next_at": schedule.next_run(db, now)}
+
+
+@router.get("/collection")
+def collection_schedule(request: Request, auth=Depends(identity), db: Session = Depends(get_db)):
+    """Tell any signed-in person whether Nyctr collects on its own, how often, and when next.
+
+    Screens use it so that nothing promises a collection that will not happen.
+    A member gets only those three facts. Where the value came from and the
+    intervals on offer are for administrators.
+    """
+    full = _schedule_json(db, request.app.state.settings)
+    if auth[0].role == "admin":
+        return full
+    return {key: full[key] for key in ("enabled", "interval_seconds", "next_at")}
+
+
+@router.put("/collection")
+def put_collection_schedule(body: schedule.Schedule, request: Request, user=Depends(admin),
+                            db: Session = Depends(get_db)):
+    """Turn scheduled collection on or off and set its interval. Audited with the old and new value.
+
+    Turning it on lets the written guest rule and lock-out act at every
+    scheduled collection, so only an administrator can change it.
+    """
+    settings: Settings = request.app.state.settings
+    if settings.mode == "demo":
+        raise HTTPException(409, "Live collection is disabled in demo mode")
+    old = schedule.in_force(db, settings)
+    put_rule(db, schedule.KEY, body, user.id)
+    audit(db, user.id, "collection.schedule_changed", schedule.KEY, old=old,
+          new={"enabled": body.enabled, "interval_seconds": body.minutes * 60})
+    db.commit()
+    return _schedule_json(db, settings)
 
 
 @router.put("/rules/access")

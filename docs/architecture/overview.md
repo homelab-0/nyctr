@@ -22,9 +22,13 @@ Python service. SQLite supports local development and isolated tests. Provider
 adapters are independent Python modules, not separate microservices.
 
 The API owns identity, authorization and persistence. The frontend cannot choose
-its role or widen a query's member scope. Read-only collection is currently
-initiated by an administrator and bounded per request, or run on an optional
-interval inside the API process. Moving scheduled collection and background
+its role or widen a query's member scope. Read-only collection is
+initiated by an administrator and bounded per request, or run on the schedule an
+administrator sets with `PUT /api/collection` (on by default, every 15 minutes), by an
+upkeep loop inside the API process. The schedule and the time of its last run
+are stored in the database, so a change applies within one upkeep pass on every
+running copy, a restart does not reset the clock, and only one copy performs a
+given run. Moving scheduled collection and background
 analysis to a separate worker process is future work.
 
 Saved-integration diagnostics reuse the bounded, verified read transport under

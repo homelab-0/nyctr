@@ -122,7 +122,14 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   inbox events is not equivalent to deleting stored observations.
 - Multi-process-safe throttling and job concurrency if scaling beyond one process.
   Lease reconciliation, scheduled collection and the assistant's rate limit run
-  inside the single API process.
+  inside the API process. A scheduled run is claimed in the database so two
+  copies do not both perform it; the nudge and the assistant's limit are still
+  per process.
+- Scheduled collection is on by default and only an administrator can change it
+  (`PUT /api/collection`); every change is audited with the old and new
+  value. Collection only reads, but the guest cut-off rule and lock-out act at
+  every collection, so with the schedule on a rule an administrator wrote and
+  switched on acts with nobody at the console.
 - The NextDNS allowlist calls follow the documented rule for nested array
   endpoints and the UniFi calls follow the 11.0.97 contract. Neither has been
   exercised against the live service.
