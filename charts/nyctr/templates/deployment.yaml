@@ -124,8 +124,10 @@ spec:
             # Stated even when empty, so a read-only installation is explicit in the manifest.
             - name: NYCTR_PROVIDER_WRITES
               value: {{ join "," .Values.providerWrites | quote }}
+            {{- if .Values.collection.intervalSeconds }}
             - name: NYCTR_COLLECT_INTERVAL_SECONDS
               value: {{ .Values.collection.intervalSeconds | quote }}
+            {{- end }}
             {{- with .Values.collection.nudge.existingSecret }}
             - name: NYCTR_NUDGE_TOKEN
               valueFrom:

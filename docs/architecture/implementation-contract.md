@@ -78,7 +78,13 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
 
 ## Access rule, leases and suggestions
 
-- `GET /api/rules` (admin) -> `{access,guest,writes,collect_interval_seconds}`.
+- `GET /api/rules` (admin) -> `{access,guest,writes,sources,collect_interval_seconds}`.
+  The last is the interval in force (0 when the schedule is off), kept for the
+  current Setup page.
+- `GET /api/collection` (any signed-in user) ->
+  `{enabled,interval_seconds,source,choices,next_at}`; `source` is console,
+  deployment, default or demo. `PUT /api/collection` (admin) with
+  `{enabled,minutes}` where minutes is one of `choices`; 409 in demo mode.
   `writes` maps `nextdns` and `unifi_network` to simulated, enabled or disabled.
 - `PUT /api/rules/access` with `{enabled,max_score 0–60,max_minutes 15–240,per_day 1–20}`.
 - `PUT /api/rules/guest` with `{enabled,hits 1–50,minutes 1–120}`.

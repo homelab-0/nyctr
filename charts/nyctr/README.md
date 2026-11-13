@@ -8,7 +8,7 @@ TLS termination, PostgreSQL, identity-provider setup, credentials, and Gateway
 infrastructure remain separately managed.
 
 The chart does not install a database operator, separate worker, AI service or
-model gateway. A default installation is read-only, collects only on request and
+model gateway. A default installation is read-only, collects every 15 minutes and
 has the assistant off; [three explicit settings](#what-nyctr-may-change-and-do-on-its-own)
 change that. Validation covers offline rendering and isolated test fixtures; it
 does not establish compatibility with a private homelab, real gateway, or real
@@ -263,7 +263,10 @@ their own `NYCTR_CONNECTOR_SECRET_*` entry.
 
 ### What Nyctr may change and do on its own
 
-All of this is off by default. Demo mode rejects every setting in this section.
+Changes and the assistant are off by default. Scheduled collection is on: a
+live installation collects every 15 minutes until an administrator changes the
+schedule in the Console. Demo mode rejects every setting in this section and
+never collects.
 
 ```yaml
 # Integrations Nyctr may change. Only integrations that can change their source
@@ -272,7 +275,8 @@ All of this is off by default. Demo mode rejects every setting in this section.
 providerWrites: [nextdns]
 
 collection:
-  # 60 to 86400. 0 means no schedule.
+  # Optional starting interval, 60 to 86400 seconds, used until an administrator
+  # saves a schedule in the Console. 0 or unset leaves the product default.
   intervalSeconds: 300
   nudge:
     # Optional. A Secret holding a token of 32 or more characters lets a network
@@ -293,10 +297,12 @@ The pod cannot start if a referenced Secret lacks the named key, so set
 `tokenKey` or `apiKeyKey` when your Secret uses a different one.
 
 The guest cut-off rule and lock-out act at every collection, whatever started
-it: the interval, an administrator pressing Collect, or a nudge. With no interval
-and no nudge they act only when an administrator collects. A nudge can therefore
-cut a guest off without anyone at the console, exactly as a scheduled collection
-can.
+it: the schedule, an administrator pressing Collect, or a nudge. The schedule is
+on unless an administrator turns it off in the Console (Setup, This
+installation), so once the cut-off rule is written and switched on it can cut a
+guest off without anyone at the console. A nudge can do the same. With the
+schedule off and no nudge, the rule and lock-out act only when an administrator
+collects. The chart cannot turn the schedule off; that is done in the Console.
 
 Turn changes on one integration at a time, after a read-only collection from it
 looks right. With `providerWrites` set, Nyctr acts only on an administrator's

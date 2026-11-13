@@ -173,7 +173,7 @@ that can change their source are accepted there (today `nextdns` and
 | --- | --- |
 | `NYCTR_PROVIDER_WRITES=nextdns` | The access rule and approvals may add and later remove a NextDNS allowlist entry. An exception applies to the whole profile, and the console says so before approval. |
 | `NYCTR_PROVIDER_WRITES=unifi_network` | Administrators may issue and end guest passes and cut off, restore or lock out a guest device; the cut-off rule may unauthorise a guest. |
-| `NYCTR_COLLECT_INTERVAL_SECONDS=300` | Collect every five minutes. Without it, collection happens only when an administrator presses Collect, so the cut-off rule only runs then. |
+| `NYCTR_COLLECT_INTERVAL_SECONDS=300` | Optional starting interval for scheduled collection. The schedule itself is set in the console (Setup, This installation), is on by default at 15 minutes, and a value saved there replaces this one. The cut-off rule and lock-out act at every collection, so with the schedule on a written rule can act with nobody at the console. |
 | `NYCTR_NUDGE_TOKEN=<32+ characters>` | Lets the UniFi console call `/api/hooks/collect/<token>` (for example from an Alarm Manager webhook) so Nyctr collects straight away when a client connects. |
 | `NYCTR_AI_BASE_URL`, `NYCTR_AI_MODEL`, `NYCTR_AI_API_KEY` | An OpenAI-compatible chat endpoint for the assistant, such as a LiteLLM proxy. The model receives a bounded, redacted evidence pack and no credentials. |
 

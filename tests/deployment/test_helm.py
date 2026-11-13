@@ -170,10 +170,11 @@ def test_live_secrets_are_references_and_ca_mount_preserves_read_only_boundary(h
 
 
 def test_a_default_live_installation_is_read_only_with_the_assistant_off(helm_binary, tmp_path):
-    """Nothing Nyctr can do on its own is on unless the operator asked for it."""
+    """No change or model is on unless the operator asked, and the chart leaves the schedule to the product."""
     env = environment(render(helm_binary, tmp_path, fixture("live-values.yaml")))
     assert env["NYCTR_PROVIDER_WRITES"] == {"name": "NYCTR_PROVIDER_WRITES", "value": ""}
-    assert env["NYCTR_COLLECT_INTERVAL_SECONDS"]["value"] == "0"
+    # No interval is given, so the chart must not force "off": the product default applies.
+    assert "NYCTR_COLLECT_INTERVAL_SECONDS" not in env
     assert not any(name.startswith("NYCTR_AI_") or name == "NYCTR_NUDGE_TOKEN" for name in env)
 
 

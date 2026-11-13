@@ -91,7 +91,8 @@ and UniFi's page can carry Nyctr's notice.
 4. In the firewall, block the guest network from reaching the Nyctr host.
 5. In Nyctr, connect UniFi and add `unifi_network` to `NYCTR_PROVIDER_WRITES`
    so it can issue passes and cut devices off.
-6. Optional: set `NYCTR_COLLECT_INTERVAL_SECONDS`, and in UniFi's Alarm Manager
+6. Optional: choose how often Nyctr collects under Setup, This installation
+   (every 15 minutes unless changed), and in UniFi's Alarm Manager
    (Network 9.3 or later) add a webhook on client connected and threat
    detected that calls `https://<nyctr>/api/hooks/collect/<token>`
    ([Ubiquiti: Alarm Manager](https://help.ui.com/hc/en-us/articles/27721287753239)).
@@ -107,8 +108,9 @@ them. None of this has been run against a real console by this project.
 - The nudge puts its token in the address when the sender cannot set headers,
   so it can appear in access logs. It can only start a read-only collection.
 - Ubiquiti does not document the Alarm Manager webhook body. Nyctr ignores it.
-- Without the nudge or a collection interval, Nyctr sees a new guest only when
-  an administrator presses Collect.
+- With the collection schedule turned off and no nudge, Nyctr sees a new guest
+  only when an administrator presses Collect. With it on, the cut-off rule and
+  lock-out act at every scheduled collection without anyone at the console.
 - A cut-off lasts until the device gets access again. If a cut guest signs in
   with another pass, or is let on in the UniFi console, the next collection shows
   it as online and the cut-off rule looks at it again. Use lock out to keep a
