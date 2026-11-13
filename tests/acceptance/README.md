@@ -53,7 +53,7 @@ refuses to overwrite an unexpected configuration.
 
 | Connection | Synthetic behavior | Expected result |
 | --- | --- | --- |
-| Acceptance - UniFi Network | One site, gateway, network, client, and configured policy | Supported reads verified; firewall-event and reachability gaps remain |
+| Acceptance - UniFi Network | One site; a gateway, a switch and an access point; three networks with address ranges; three clients; one configured policy | Supported reads verified; firewall-event and reachability gaps remain |
 | Acceptance - NextDNS | Full profile configuration and one block for `photos.example.test` | Supported reads verified; user attribution remains unverified |
 | Acceptance - rejected credential | Ordinary provider HTTP 401 | Authentication check fails; a valid TLS exchange remains distinct |
 | Acceptance - invalid TLS hostname | Allowed host absent from the certificate SANs | TLS verification fails before authentication is established |
@@ -66,8 +66,12 @@ or mark a connection collected. It also checks unauthenticated access, missing
 CSRF rejection, and sanitized diagnostic audit events.
 
 Only after these checks does it explicitly collect the two positive fixtures.
-The expected saved result is **13 resources, 14 relationships, and one fresh DNS
-block**. Both provider-reported clients stay unassigned. The DNS observation has
+The expected saved result is **19 resources, 28 relationships, and one fresh DNS
+block**. Four of those relationships are worked out when the graph is read and
+are labelled inferred: the laptop and the camera are each placed on the one
+network whose range holds their address, and the two gateway-managed networks
+are linked to the only gateway. The visitor reports no address and is placed
+nowhere. All provider-reported clients stay unassigned. The DNS observation has
 no trusted device ID and no score, because the fixture's block reason is one the
 scorer does not recognise. No source writes or exceptions are created.
 
@@ -76,7 +80,9 @@ The isolated HTTPS fixture routes are:
 ```text
 https://fixture/proxy/network/integration/v1/sites
 https://fixture/proxy/network/integration/v1/sites/site-one/devices
+https://fixture/proxy/network/integration/v1/sites/site-one/devices/{device}
 https://fixture/proxy/network/integration/v1/sites/site-one/networks
+https://fixture/proxy/network/integration/v1/sites/site-one/networks/{network}
 https://fixture/proxy/network/integration/v1/sites/site-one/clients
 https://fixture/proxy/network/integration/v1/sites/site-one/firewall/policies
 https://api.nextdns.io/profiles/aaaaaa

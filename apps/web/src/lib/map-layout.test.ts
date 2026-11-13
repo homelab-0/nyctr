@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SHARED, assignLanes, layoutMap } from './map-layout';
+import { SHARED, UNPLACED, assignLanes, layoutMap } from './map-layout';
 import type { Graph, Relationship, Resource } from '../types';
 
 const node = (
@@ -88,6 +88,35 @@ describe('map layout', () => {
     expect(placed.vm.band).toBe('work');
     expect(placed.pve.band).toBe('hyp');
     expect(placed.vm.y).toBeGreaterThan(placed.pve.y);
+  });
+
+  it('puts a device on the network a link places it on, and one with no network in its own column', () => {
+    const site: Graph = {
+      nodes: [
+        node('gw', 'gateway', 'unifi_network'),
+        node('sw', 'switch', 'unifi_network'),
+        node('lan', 'network', 'unifi_network', { vlan: 10 }),
+        node('tv', 'client', 'unifi_network', { ip: '192.0.2.20' }),
+        node('roamer', 'client', 'unifi_network'),
+      ],
+      edges: [
+        edge('tv', 'lan', 'member_of', 'inferred'),
+        edge('lan', 'gw', 'managed_by', 'inferred'),
+        edge('sw', 'gw', 'connects_to', 'observed'),
+      ],
+    };
+    const layout = layoutMap(site);
+    const placed = Object.fromEntries(layout.nodes.map((item) => [item.id, item]));
+    expect(placed.tv.lane).toBe('lan');
+    expect(placed.roamer.lane).toBe(UNPLACED);
+    expect(placed.gw).toMatchObject({ lane: SHARED, band: 'net' });
+    expect(placed.sw.lane).toBe(SHARED);
+    expect(layout.lanes.at(-1)).toMatchObject({ id: UNPLACED, name: 'Network not reported' });
+    expect(layout.lanes.at(-1)!.x).toBeGreaterThan(layout.lanes[1].x);
+    expect(layout.edges.find((item) => item.kind === 'managed_by')?.evidence).toBe('inferred');
+    expect(layout.edges.find((item) => item.source === 'sw')?.evidence).toBe('observed');
+    // The column appears only when a device needs it.
+    expect(layoutMap(graph).lanes.some((lane) => lane.id === UNPLACED)).toBe(false);
   });
 
   it('never draws sites, domains or containment, and keeps each link evidence kind', () => {

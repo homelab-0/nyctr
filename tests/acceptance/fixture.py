@@ -16,32 +16,40 @@ UNIFI_PREFIX = "/proxy/network/integration/v1"
 # Stable for this fixture process so repeated collection does not synthesize new events.
 OBSERVED_AT = datetime.now(UTC).isoformat()
 
+
+
+def device(id_: str, name: str, feature: str, address: str, number: int) -> dict:
+    """One adopted device as the documented list read returns it."""
+    return {
+        "id": id_,
+        "name": name,
+        "features": [feature],
+        "model": "Acceptance fixture",
+        "state": "ONLINE",
+        "ipAddress": address,
+        "macAddress": f"02:00:00:00:00:{number:02d}",
+        "firmwareVersion": "fixture-1.0",
+    }
+
+
+def lan(id_: str, name: str, vlan: int, management: str, **extra: str) -> dict:
+    """One network as the documented list read returns it: no address range."""
+    return {"id": id_, "name": name, "vlanId": vlan, "enabled": True, "management": management, "default": vlan == 10, **extra}
+
+
 UNIFI_ROWS = {
     f"{UNIFI_PREFIX}/sites": [{"id": "site-one", "name": "Synthetic lab"}],
     f"{UNIFI_PREFIX}/sites/site-one/devices": [
-        {
-            "id": "gateway-one",
-            "name": "Synthetic gateway",
-            "features": ["gateway"],
-            "model": "Acceptance fixture",
-            "state": "ONLINE",
-            "ipAddress": "192.0.2.1",
-            "macAddress": "02:00:00:00:00:01",
-            "firmwareVersion": "fixture-1.0",
-        }
+        device("gateway-one", "Synthetic gateway", "gateway", "192.0.2.1", 1),
+        device("switch-one", "Synthetic switch", "switching", "192.0.2.2", 3),
+        device("ap-one", "Synthetic access point", "accessPoint", "192.0.2.3", 4),
     ],
     f"{UNIFI_PREFIX}/sites/site-one/networks": [
-        {
-            "id": "network-one",
-            "name": "Synthetic LAN",
-            "vlanId": 10,
-            "enabled": True,
-            "management": False,
-            "default": False,
-            "zoneId": "zone-lan",
-            "deviceId": "gateway-one",
-        }
+        lan("network-one", "Synthetic LAN", 10, "GATEWAY", zoneId="zone-lan"),
+        lan("network-two", "Synthetic IoT", 20, "GATEWAY", zoneId="zone-iot"),
+        lan("network-three", "Synthetic workshop", 30, "SWITCH", deviceId="switch-one"),
     ],
+    # The laptop and camera each sit inside one network's range. The visitor reports no address.
     f"{UNIFI_PREFIX}/sites/site-one/clients": [
         {
             "id": "client-one",
@@ -50,8 +58,25 @@ UNIFI_ROWS = {
             "ipAddress": "192.0.2.20",
             "macAddress": "02:00:00:00:00:02",
             "connectedAt": OBSERVED_AT,
-            "uplinkDeviceId": "gateway-one",
-        }
+            "uplinkDeviceId": "switch-one",
+        },
+        {
+            "id": "client-two",
+            "name": "Synthetic camera",
+            "type": "WIRELESS",
+            "ipAddress": "198.51.100.20",
+            "macAddress": "02:00:00:00:00:05",
+            "connectedAt": OBSERVED_AT,
+            "uplinkDeviceId": "ap-one",
+        },
+        {
+            "id": "client-three",
+            "name": "Synthetic visitor",
+            "type": "WIRELESS",
+            "macAddress": "02:00:00:00:00:06",
+            "connectedAt": OBSERVED_AT,
+            "uplinkDeviceId": "ap-one",
+        },
     ],
     f"{UNIFI_PREFIX}/sites/site-one/firewall/policies": [
         {
@@ -71,6 +96,25 @@ UNIFI_ROWS = {
         {"id": "wifi-one", "name": "Synthetic Wi-Fi", "enabled": True, "network": {"type": "NATIVE"}},
     ],
 }
+
+
+def unifi_details() -> dict[str, dict]:
+    """Build the per-record detail reads: a network's address range and a device's uplink."""
+    site = f"{UNIFI_PREFIX}/sites/site-one"
+    ranges = {"network-one": ("192.0.2.1", 26), "network-two": ("198.51.100.1", 24), "network-three": ("203.0.113.1", 24)}
+    above = {"switch-one": "gateway-one", "ap-one": "switch-one"}
+    details = {}
+    for row in UNIFI_ROWS[f"{site}/networks"]:
+        host, prefix = ranges[row["id"]]
+        details[f"{site}/networks/{row['id']}"] = {
+            **row, "ipv4Configuration": {"autoScaleEnabled": False, "hostIpAddress": host, "prefixLength": prefix}}
+    for row in UNIFI_ROWS[f"{site}/devices"]:
+        uplink = {"uplink": {"deviceId": above[row["id"]]}} if row["id"] in above else {}
+        details[f"{site}/devices/{row['id']}"] = {**row, "features": {}, **uplink}
+    return details
+
+
+UNIFI_DETAILS = unifi_details()
 
 
 def profile(logging_enabled: bool) -> dict:
@@ -113,6 +157,8 @@ def response_for(target: str, api_key: str | None) -> tuple[int, bytes]:
         rows = UNIFI_ROWS[parsed.path]
         page = rows[offset : offset + limit]
         payload = {"data": page, "offset": offset, "count": len(page), "totalCount": len(rows)}
+    elif parsed.path in UNIFI_DETAILS:
+        payload = UNIFI_DETAILS[parsed.path]
     elif parsed.path == "/profiles/aaaaaa":
         payload = profile(True)
     elif parsed.path == "/profiles/bbbbbb":

@@ -4,10 +4,15 @@ The API contract's client uplinkDeviceId is observed attachment evidence. A
 firewall policy or zone association is configured evidence, never a flow log.
 Guest access state and hotspot vouchers are read here; changing them lives in
 `actions.py` behind the operator's explicit permission.
+
+A network's address range and a device's uplink come from one detail read each.
+Which network a client is on is never stated by this source; `nyctr.links`
+works that out at read time.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Any
 
@@ -26,6 +31,13 @@ from .registry import ConfigField, Provider
 
 ID = "unifi_network"
 MAX_GUEST_DETAILS = 40
+# The vendor's Site Manager API description limits its cloud pass-through to 100 requests
+# a minute for each console. A collection takes seconds, so the optional per-network and
+# per-device reads stop while the whole collection is still under this many requests,
+# leaving room for the reads that must follow.
+REQUEST_CEILING = 96
+SITE_LIST_READS = 6
+_MANAGERS = {"GATEWAY": "gateway", "SWITCH": "switch", "UNMANAGED": "unmanaged"}
 READS = (
     ("sites:read", "Site discovery"),
     ("devices:read", "Network device inventory"),
@@ -53,6 +65,52 @@ def _guest_authorization(detail: dict[str, Any]) -> dict[str, Any] | None:
             "authorized_at": grant.get("authorizedAt"), "expires_at": grant.get("expiresAt"),
             "data_limit_mb": grant.get("dataUsageLimitMBytes"),
             "bytes": usage.get("bytes"), "seconds": usage.get("durationSec")}
+
+
+def _network_addresses(detail: dict[str, Any]) -> dict[str, Any]:
+    """Read a network's configured IPv4 gateway address and ranges, rejecting anything malformed."""
+    ipv4 = detail.get("ipv4Configuration")
+    if ipv4 is None:
+        return {}
+    extra = ipv4.get("additionalHostIpSubnets", []) if isinstance(ipv4, dict) else None
+    if (not isinstance(extra, list) or len(extra) > 64 or type(ipv4.get("prefixLength")) is not int
+            or not all(isinstance(item, str) for item in [ipv4.get("hostIpAddress"), *extra])):
+        raise IntegrationError("UniFi returned an invalid network address configuration.")
+    try:
+        hosts = [ipaddress.IPv4Interface(item) for item in
+                 [f"{ipv4['hostIpAddress']}/{ipv4['prefixLength']}", *extra]]
+    except ValueError:
+        raise IntegrationError("UniFi returned an invalid network address configuration.") from None
+    return {"gateway_ip": str(hosts[0].ip), "subnets": list(dict.fromkeys(str(host.network) for host in hosts))}
+
+
+def _device_uplink(detail: dict[str, Any]) -> dict[str, Any]:
+    """Read the device a piece of gear is attached to; none is the top of the chain, not an error."""
+    uplink = detail.get("uplink")
+    if uplink is None:
+        return {}
+    if not isinstance(uplink, dict):
+        raise IntegrationError("UniFi returned an invalid device uplink.")
+    return {"uplink": source_id(uplink.get("deviceId"))}
+
+
+async def _detail(reader: ReadClient, path: str, remote_id: str, parse, gap: str) -> dict[str, Any] | None:
+    """Make one optional detail read and return the neutral fields parsed from it, or None.
+
+    A read the key may not make, or an answer that is malformed or about another
+    record, keeps nothing and records the gap. A rate limit, timeout, broken
+    connection or spent budget still fails the collection.
+    """
+    try:
+        detail = await reader.get(path)
+        if detail.get("id") != remote_id:
+            raise IntegrationError("UniFi answered a detail read with a different record.")
+        return parse(detail)
+    except IntegrationError as error:
+        if core.must_stop(error):
+            raise
+        core.record_gap(gap)
+        return None
 
 
 def _renamed(row: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
@@ -106,7 +164,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
         # Detail reads are capped for the whole collection, not per site, so many sites
         # cannot spend the request budget on guests.
         guest_details = 0
-        for site in sites:
+        for position, site in enumerate(sites):
             sid = source_id(site.get("id"))
             site_resource = resource(integration_id, ID, "site", sid, site.get("name", sid), now)
             site_resource["site_id"] = site_resource["id"]
@@ -119,6 +177,26 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
             policies = await offset_pages(reader, base + "/firewall/policies")
             device_map: dict[str, str] = {}
             network_map: dict[str, str] = {}
+            # Requests this collection must still be able to make after the optional detail
+            # reads: this site's guest details and two closing lists, then every later site.
+            guests = sum(isinstance(row.get("access"), dict) and row["access"].get("type") == "GUEST"
+                         for row in clients)
+            later = len(sites) - position - 1
+            reserved = 2 + later * SITE_LIST_READS + (
+                MAX_GUEST_DETAILS - guest_details if later else min(guests, MAX_GUEST_DETAILS - guest_details))
+            detail: dict[str, dict[str, Any]] = {}
+            for kind, rows, parse in (("networks", networks, _network_addresses),
+                                      ("devices", devices, _device_uplink)):
+                for row in rows:
+                    remote_id = source_id(row.get("id"))
+                    if reader.requests + reserved >= REQUEST_CEILING:
+                        core.record_gap("unifi_detail_limit")
+                        break
+                    found = await _detail(
+                        reader, f"{base}/{kind}/{remote_id}", remote_id, parse, f"unifi_{kind}_details_unavailable")
+                    if found is not None:
+                        detail[f"{kind}/{remote_id}"] = found
+            uplinks: list[tuple[str, str]] = []
             for row in devices:
                 remote_id = source_id(row.get("id"))
                 features = row.get("features", [])
@@ -127,21 +205,34 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
                 if not any(feature in features for feature in ("gateway", "accessPoint", "switching")):
                     raise IntegrationError("UniFi returned a device with an unsupported capability classification.")
                 kind = "gateway" if "gateway" in features else "access_point" if "accessPoint" in features else "switch"
+                found = detail.get(f"devices/{remote_id}", {})
                 node = resource(
                     integration_id, ID, kind, remote_id, row.get("name", remote_id), now,
                     site_id=site_resource["id"], evidence_kind="observed",
                     attributes={**selected(row, ("model", "state", "firmwareVersion", "firmwareUpdatable", "features")),
-                                **_renamed(row, {"ipAddress": "ip", "macAddress": "mac"})},
+                                **_renamed(row, {"ipAddress": "ip", "macAddress": "mac"}), **found},
                 )
                 device_map[remote_id] = node["id"]
                 snapshot.resources.append(node)
+                if "uplink" in found:
+                    uplinks.append((remote_id, found["uplink"]))
+            for remote_id, above in uplinks:
+                if above in device_map and above != remote_id:
+                    snapshot.relationships.append(relationship(
+                        integration_id, ID, device_map[remote_id], device_map[above], "connects_to", now,
+                        evidence_kind="observed",
+                        attributes={"source_field": "device.uplink.deviceId", "meaning": "Attachment; not proof of end-to-end reachability."},
+                    ))
             for row in networks:
                 remote_id = source_id(row.get("id"))
+                found = detail.get(f"networks/{remote_id}", {})
+                manager = _MANAGERS.get(row.get("management")) if isinstance(row.get("management"), str) else None
                 node = resource(
                     integration_id, ID, "network", remote_id, row.get("name", remote_id), now,
                     site_id=site_resource["id"],
                     attributes={**selected(row, ("enabled", "management", "default", "zoneId", "deviceId", "metadata")),
-                                **_renamed(row, {"vlanId": "vlan"})},
+                                **_renamed(row, {"vlanId": "vlan"}), **({"managed_by": manager} if manager else {}),
+                                **selected(found, ("gateway_ip", "subnets"))},
                 )
                 network_map[remote_id] = node["id"]
                 snapshot.resources.append(node)
@@ -290,6 +381,16 @@ PROVIDER = Provider(
         "unifi_guest_detail_limit": (
             "More guests than one collection reads in detail",
             "Only the first 40 guest devices carry authorisation details in each collection."),
+        "unifi_networks_details_unavailable": (
+            "Some network address ranges could not be read",
+            "A network's detail was refused or unusable. Devices cannot be placed on a network whose range is unknown."),
+        "unifi_devices_details_unavailable": (
+            "Some equipment uplinks could not be read",
+            "A device's detail was refused or unusable. The Map cannot show what that equipment is attached to."),
+        "unifi_detail_limit": (
+            "More networks and equipment than one collection reads in detail",
+            "Detail reads stop before the collection reaches the source's request limit. "
+            "Some address ranges or uplinks are missing; narrow the connection to one site."),
         "unifi_no_visible_sites": (
             "No sites were visible to the credential",
             "Site discovery returned an empty list. Device, network, client, and policy reads were not exercised."),

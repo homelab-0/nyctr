@@ -32,6 +32,8 @@ const HIDDEN = new Set(['site', 'domain']);
 /** Relationships the grid already expresses, or that would only add noise. */
 const UNDRAWN = new Set(['contains', 'member_of', 'blocked_dns_query']);
 export const SHARED = '__shared__';
+/** Devices no source places on a network. Never the same as belonging to the whole site. */
+export const UNPLACED = '__unplaced__';
 
 export interface MapNode {
   id: string;
@@ -155,11 +157,22 @@ export function layoutMap(graph: Graph, view: MapView = 'all', perCell = 6): Map
       w: LANE_W,
     })),
   ];
+  // A device with no network is unknown, not site-wide: it gets its own last column.
+  const homeOf = (node: Resource) =>
+    laneOf.get(node.id) ?? (node.kind === 'client' ? UNPLACED : SHARED);
+  if (shown.some((node) => homeOf(node) === UNPLACED))
+    lanes.push({
+      id: UNPLACED,
+      name: 'Network not reported',
+      sub: 'No source says which network',
+      x: LABEL_W + lanes.length * LANE_W,
+      w: LANE_W,
+    });
   const laneX = new Map(lanes.map((lane) => [lane.id, lane.x]));
   const cells = new Map<string, Resource[]>();
   for (const node of shown) {
     const band = BANDS.find((item) => (item.kinds as readonly string[]).includes(node.kind))!;
-    const lane = laneOf.get(node.id) ?? SHARED;
+    const lane = homeOf(node);
     const key = `${band.id}|${laneX.has(lane) ? lane : SHARED}`;
     cells.set(key, [...(cells.get(key) || []), node]);
   }

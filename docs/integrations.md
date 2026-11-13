@@ -57,8 +57,34 @@ per guest client, for at most 40 guests per collection across all sites. If the
 voucher list is not available to the key, collection continues and reports the
 gap. A rate limit, a broken connection or a spent request budget during one of
 these optional reads fails the collection instead, so an incomplete snapshot is
-never stored under the wrong explanation. The local
-integration base URL has this shape:
+never stored under the wrong explanation.
+
+Each network's address range and each device's uplink come from one detail read
+per network and per device. These are optional reads too: a read the key may not
+make, or an answer that is malformed or about a different record, keeps nothing
+from that read and reports the gap. The vendor's Site Manager API description
+limits its cloud pass-through to 100 requests a minute for each console (and 25
+seconds for a request, 10 MB for a response). These detail reads therefore stop
+once the collection has made 96 requests, after setting aside the guest and
+closing reads. That is not a ceiling on the whole collection: lists long enough
+to need several pages, or many sites, can take a collection past 100, and a
+second collection or connection test in the same minute counts against the same
+limit. The source then answers with its rate-limit error and the collection
+fails, as it does for any rate limit. A site with 10 networks, 13 pieces of
+equipment and 67 devices costs 30 requests, plus one for each guest device up
+to 40.
+
+What the adapter states and what Nyctr works out are kept apart:
+
+| Fact | Where it comes from | Shown as |
+| --- | --- | --- |
+| A network's address range and gateway address | The network's detail read | Configured |
+| The switch that runs a switch-managed network | The network's `deviceId` | Configured |
+| The equipment above a piece of equipment | The device's detail read (`uplink.deviceId`) | Observed |
+| Which network a client is on | Not reported by this API. Worked out when the graph is read, from the client's address and the collected ranges. Nothing in a site is placed while a network there that a gateway or switch manages has no collected range | Inferred, never stored |
+| Which gateway runs a gateway-managed network | Worked out when the graph is read, when the site has exactly one gateway | Inferred, never stored |
+
+The local integration base URL has this shape:
 
 ```text
 https://console.example.internal/proxy/network/integration

@@ -332,7 +332,7 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
         """Route source-contract fixtures only through the approved UniFi integration path."""
         assert request.url.host == "unifi.example"
         path = request.url.path.removeprefix("/proxy/network/integration")
-        return httpx.Response(200, json=unifi_page(pages[path]))
+        return httpx.Response(200, json=unifi_page(pages[path])) if path in pages else httpx.Response(404)
     mock_client(monkeypatch, handler)
     snapshot = asyncio.run(collect("unifi_network", "u-one", {"base_url": "https://unifi.example/proxy/network/integration"}, KEY))
     assert len(snapshot.resources) == 5

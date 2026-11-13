@@ -85,8 +85,8 @@ it keeps is source detail for people to read and query.
 | --- | --- |
 | `client` | `ip`, `mac`, `uplink` (source id of the device it is attached to), `connected_at` |
 | `client` on guest access | `guest: {authorized, method, authorized_at, expires_at, bytes, seconds}` where `method` is `pass`, `console`, `other` or absent |
-| `gateway`, `switch`, `access_point` | `ip`, `mac` |
-| `network` | `vlan` |
+| `gateway`, `switch`, `access_point` | `ip`, `mac`, `uplink` (source id of the equipment above it) |
+| `network` | `vlan`, `subnets` (the address ranges the source configured, as `["192.0.2.0/24"]`), `gateway_ip`, `managed_by` (`gateway`, `switch` or `unmanaged`) |
 | `workload` | `nics: [{bridge, mac, vlan, firewall}]`, `firewall_enabled` |
 | `host` | `addresses` |
 | `site` | `wifi: [{name, enabled, captive_portal, network_id}]` |
@@ -100,6 +100,26 @@ are left alone; a list is treated as the complete current set.
 Blocks go in `Snapshot.blocks` with `source` set to the integration id, the
 provider's own reason text and `reason_codes`, `device_id` left `None`, and
 `risk_score` left `None`. Scoring happens in the core and uses your `classify`.
+
+## What the adapter states and what Nyctr works out
+
+An adapter writes only what its source said. A network's `subnets` are
+configured evidence. A `connects_to` link from a client or a piece of equipment
+to the equipment above it, taken from the source's uplink, is observed. A
+`managed_by` link from a network to the device the source names is configured.
+
+When a source reports addresses and ranges but not membership, the adapter does
+not write a `member_of` link. `nyctr/links.py` places a client on a network when
+the graph is read, if its `ip` falls inside the `subnets` of exactly one network
+from the same connection and site, and links a network whose `managed_by` is
+`gateway` to that site's gateway when there is exactly one. Both links are
+labelled inferred, carry their basis, and are never stored. A client with no
+address, or an address in no range or in more than one network's range, gets no
+link and the console shows its network as not reported. A network whose
+`managed_by` is `gateway` or `switch` has a range; while one such network of a
+site has no `subnets`, no client of that site is placed, because its address
+could belong there. An `unmanaged` network has no range to miss and does not
+block placement.
 
 ## Rules every integration follows
 
