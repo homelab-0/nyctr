@@ -165,11 +165,19 @@ def after_collection(db, settings):
     return evaluate_rule(db, settings)
 
 
+def _still_holds(db, integration_id: str, started) -> bool:
+    """Lock the source row and say whether the lease taken at `started` is still this caller's."""
+    return db.execute(update(Integration).where(
+        Integration.id == integration_id, Integration.status == "syncing", Integration.sync_started_at == started
+    ).values(name=Integration.name).execution_options(synchronize_session=False)).rowcount == 1
+
+
 async def collect_integration(factory, settings, integration_id: str, actor: str | None):
     """Collect one live integration under a database lease and store its snapshot atomically.
 
     Returns (snapshot, error message). A second caller during a running
-    collection gets ("busy"). A snapshot that kept only the most recent rows is
+    collection gets ("busy"); a read whose lease was taken over or ended by an
+    edit stores nothing and gets ("replaced"). A snapshot that kept only the most recent rows is
     stored and audited as partial, not as an error. Failure rolls back the snapshot, records a
     sanitized error and releases the lease. Never performs a provider change.
     """
@@ -184,17 +192,35 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
         api_key = os.environ.get(integration.secret_ref)
         if not api_key:
             return None, "secret"
+        started = utcnow()
         locked = db.execute(update(Integration).where(
             Integration.id == integration.id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
-        ).values(status="syncing", sync_started_at=utcnow()).execution_options(synchronize_session="fetch"))
+            or_(Integration.status != "syncing", Integration.sync_started_at < started - timedelta(minutes=5))
+        ).values(status="syncing", sync_started_at=started).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             return None, "busy"
         db.commit()
+        # An edit may have been saved after the read above and before the lease. None can be while
+        # the lease is held, so read the source again and use only the settings saved now.
+        read_ref = integration.secret_ref
+        db.refresh(integration)
+        if integration.secret_ref != read_ref:
+            api_key = os.environ.get(integration.secret_ref)
+            if not api_key:
+                # A new secret name always leaves the source "configured"; give the lease back as that.
+                integration.status, integration.sync_started_at = "configured", None
+                db.commit()
+                return None, "secret"
         try:
             snapshot = await asyncio.wait_for(
                 collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
+            # Lock the source row before any other row, and store only while this lease is still ours.
+            # A lease older than five minutes can be taken over, and an edit can then move the source;
+            # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
+            if not _still_holds(db, integration.id, started):
+                db.rollback()
+                return None, "replaced"
             apply_snapshot(db, integration, snapshot, settings)
             partial = snapshot.partial_rows is not None
             audit(db, actor, "integration.collected", integration.id,
@@ -203,6 +229,9 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             db.commit()
         except Exception as exc:
             db.rollback()
+            if not _still_holds(db, integration_id, started):
+                db.rollback()
+                return None, "replaced"
             integration = db.get(Integration, integration_id)
             integration.status = "error"
             integration.last_error = (str(exc) if isinstance(exc, IntegrationError)
