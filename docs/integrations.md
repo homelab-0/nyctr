@@ -46,6 +46,29 @@ diagnostic of that source is running, and in demo mode. Overlapping edits are
 applied one after the other. The audit history records who changed which fields
 of which source, never the values.
 
+## Removing a source
+
+**Remove** on a source's card shows, with counts, what goes and what stays, and
+asks for the source's name to be typed. Removal sends nothing to the source and
+changes nothing there; it cannot be undone.
+
+What goes: everything collected from the source (devices and other inventory,
+networks, rules, relationships, blocked lookups, sightings, guest history and
+passes read from it that are still live), findings that rest only on its items,
+each of its devices' assignments to people, and links between its items and DNS
+labels. Another source's lookups that were tied to one of its devices stay, no
+longer tied to that device. What stays: requests, exceptions and guest passes
+Nyctr recorded (any still open but not Nyctr's at the source are ended), and the
+whole activity history. The removal's own record keeps the source's name and kind
+and the counts removed, so requests still name it.
+
+Removal is refused while Nyctr still has something of its own at the source: an
+open exception it applied, a guest pass it issued that is still live, or a guest
+it cut off or locked out. The refusal says how many and where to end them. It is
+also refused while a collection or diagnostic of the source is running, and in
+demo mode. Adding a source again, for the same place or another, starts from
+nothing: no device, assignment, label link, guest state or finding comes back.
+
 ## Connection diagnostics
 
 On a saved live-mode integration, **Run diagnostics** performs the same bounded

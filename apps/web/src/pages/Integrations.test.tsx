@@ -276,6 +276,7 @@ async function openIntegrations({
   schedule = scheduleFixture(),
   save = async () => jsonResponse(source),
   others = [],
+  removal = async (method: string) => jsonResponse(method === 'GET' ? plan : {}),
 }: {
   mode?: Mode;
   role?: Role;
@@ -285,6 +286,7 @@ async function openIntegrations({
   schedule?: CollectionSchedule;
   save?: (path: string) => Promise<Response>;
   others?: Integration[];
+  removal?: (method: string) => Promise<Response>;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -302,6 +304,10 @@ async function openIntegrations({
     if (path === '/api/collection') return jsonResponse(schedule);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
     if (path.startsWith('/api/integrations/') && options?.method === 'PUT') return save(path);
+    if (path === `/api/integrations/${source.id}/removal`) return removal('GET');
+    if (path === `/api/integrations/${source.id}` && options?.method === 'DELETE') {
+      return removal('DELETE');
+    }
     if (path === `/api/integrations/${connection.id}/sync`) {
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
     }
@@ -837,11 +843,67 @@ describe('editing a saved source', () => {
     await waitFor(() => expect(shut()).toEqual(['false', 'false']));
   });
 
-  it('hides Edit from members and disables it in the demo workspace', async () => {
+  it('hides Edit and Remove from members and disables them in the demo workspace', async () => {
     await openIntegrations({ role: 'member' });
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
     cleanup();
     await openIntegrations({ mode: 'demo' });
     expect(screen.getByRole('button', { name: 'Edit' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Remove' })).toHaveProperty('disabled', true);
+  });
+});
+
+/** Server counts for removing the fabricated source. */
+const plan = {
+  name: connection.name,
+  remove: {
+    devices: 2,
+    networks: 1,
+    rules: 0,
+    other_items: 0,
+    lookups: 5,
+    assignments: 1,
+    links: 0,
+  },
+  keep: { requests: 1, exceptions: 0, passes: 0 },
+  refusal: null,
+};
+
+describe('removing a saved source', () => {
+  it('states what goes and stays, and removes only once the name is typed', async () => {
+    const { fetchMock, interaction } = await openIntegrations();
+    await interaction.click(screen.getByRole('button', { name: 'Remove' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove source' });
+    expect(
+      await within(dialog).findByText(
+        /2 devices, 1 network, 5 blocked lookups, 1 device assignment to a person/,
+      ),
+    ).toBeDefined();
+    expect(within(dialog).getByText(/1 request, the activity history/)).toBeDefined();
+    const confirm = within(dialog).getByRole('button', { name: 'Remove source' });
+    expect(confirm).toHaveProperty('disabled', true);
+    await interaction.type(within(dialog).getByLabelText(/^Type/), connection.name);
+    await interaction.click(confirm);
+    await screen.findByText(`${connection.name} was removed.`);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const sent = fetchMock.mock.calls.find(([, options]) => options?.method === 'DELETE')!;
+    expect(JSON.parse(String(sent[1]?.body))).toEqual({ name: connection.name });
+  });
+
+  it('says why a source cannot be removed yet and offers no way to confirm', async () => {
+    const refusal =
+      'Not removed. Nyctr still has 1 open exception (end under Open now) at this source.';
+    const { interaction } = await openIntegrations({
+      removal: async () => jsonResponse({ ...plan, refusal }),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Remove' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove source' });
+    expect(await within(dialog).findByText(refusal)).toBeDefined();
+    expect(within(dialog).queryByLabelText(/^Type/)).toBeNull();
+    expect(within(dialog).getByRole('button', { name: 'Remove source' })).toHaveProperty(
+      'disabled',
+      true,
+    );
   });
 });

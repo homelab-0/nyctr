@@ -165,6 +165,9 @@ export default function Requests({
                   items={[
                     ['Who', names.get(row.requester_id) || 'Unknown'],
                     ['Device', row.device_name],
+                    ...(row.source_name
+                      ? ([['Source', row.source_name]] as [string, string][])
+                      : []),
                     ['Their reason', row.reason],
                     ['Asked for', span(row.duration_minutes)],
                     ...(row.review_note
