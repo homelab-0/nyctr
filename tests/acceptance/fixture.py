@@ -39,8 +39,10 @@ def lan(id_: str, name: str, vlan: int, management: str, **extra: str) -> dict:
 
 UNIFI_ROWS = {
     f"{UNIFI_PREFIX}/sites": [{"id": "site-one", "name": "Synthetic lab"}],
+    # As a real console can: the gateway is listed with the switching feature only and reports
+    # its internet-side address, which is outside every network range of the site.
     f"{UNIFI_PREFIX}/sites/site-one/devices": [
-        device("gateway-one", "Synthetic gateway", "gateway", "192.0.2.1", 1),
+        device("gateway-one", "Synthetic gateway", "switching", "192.0.2.200", 1),
         device("switch-one", "Synthetic switch", "switching", "192.0.2.2", 3),
         device("ap-one", "Synthetic access point", "accessPoint", "192.0.2.3", 4),
     ],

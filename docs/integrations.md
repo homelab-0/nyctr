@@ -81,8 +81,38 @@ What the adapter states and what Nyctr works out are kept apart:
 | A network's address range and gateway address | The network's detail read | Configured |
 | The switch that runs a switch-managed network | The network's `deviceId` | Configured |
 | The equipment above a piece of equipment | The device's detail read (`uplink.deviceId`) | Observed |
+| Which device is the gateway | The device's feature list. Failing that, Nyctr's deduction from the collected addresses and ranges (below) | Observed device. A deduced gateway carries `kind_basis`, and its panel says Nyctr worked it out and from what |
 | Which network a client is on | Not reported by this API. Worked out when the graph is read, from the client's address and the collected ranges. Nothing in a site is placed while a network there that a gateway or switch manages has no collected range | Inferred, never stored |
 | Which gateway runs a gateway-managed network | Worked out when the graph is read, when the site has exactly one gateway | Inferred, never stored |
+
+A console can list its gateway with the switching feature only. Nyctr files a
+device as the gateway on the first of these that names one:
+
+1. The source lists the device with the gateway feature. This is the source's
+   own statement and carries no `kind_basis`.
+2. Exactly one device's own address is the gateway address of a network the
+   source says its gateway manages (`kind_basis: gateway_address`).
+3. No device holds a gateway address, as when the gateway reports its
+   internet-side address. Then, if the range of every gateway-managed network
+   was collected, every piece of equipment reports an IPv4 address (the family
+   the ranges are read in), exactly one of them is outside every collected
+   range of the site, that device's detail read reports nothing above it, and
+   at least one other piece of equipment reports it as its uplink, that device
+   is the gateway (`kind_basis: outside_network_ranges`). Client devices
+   attached to it do not count: a lone access point has clients too.
+
+The second and third are Nyctr's deduction, not the source naming a gateway, and
+the device's panel on the Map says so. If none holds, nothing is filed as a
+gateway and the connection test reports that gap.
+
+The third rule can be wrong in one shape, and this source's data cannot tell it
+apart from a real gateway: the site's router is another vendor's, the source
+still holds a gateway-managed network, and the core switch has equipment below
+it and a management address outside every collected range. That switch would be
+filed as the gateway. It is why this stays a labelled deduction and is never
+shown as the source's statement. A device with nothing attached, a site with a
+single piece of equipment, and equipment reporting an IPv6 address are never
+filed by this rule.
 
 The local integration base URL has this shape:
 

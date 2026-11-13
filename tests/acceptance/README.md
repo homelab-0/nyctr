@@ -53,7 +53,7 @@ refuses to overwrite an unexpected configuration.
 
 | Connection | Synthetic behavior | Expected result |
 | --- | --- | --- |
-| Acceptance - UniFi Network | One site; a gateway, a switch and an access point; three networks with address ranges; three clients; one configured policy | Supported reads verified; firewall-event and reachability gaps remain |
+| Acceptance - UniFi Network | One site; a gateway listed with switching only, a switch and an access point; three networks with address ranges; three clients; one configured policy | Supported reads verified; firewall-event and reachability gaps remain |
 | Acceptance - NextDNS | Full profile configuration and one block for `photos.example.test` | Supported reads verified; user attribution remains unverified |
 | Acceptance - rejected credential | Ordinary provider HTTP 401 | Authentication check fails; a valid TLS exchange remains distinct |
 | Acceptance - invalid TLS hostname | Allowed host absent from the certificate SANs | TLS verification fails before authentication is established |
@@ -71,7 +71,11 @@ block**. Four of those relationships are worked out when the graph is read and
 are labelled inferred: the laptop and the camera are each placed on the one
 network whose range holds their address, and the two gateway-managed networks
 are linked to the only gateway. The visitor reports no address and is placed
-nowhere. All provider-reported clients stay unassigned. The DNS observation has
+nowhere. The gateway is listed with the switching feature only and reports an
+address outside every network range, as a real one can. It is filed as the
+gateway because it is the only equipment outside every range, has nothing
+above it and has the switch attached to it, and is marked as worked out by
+Nyctr. All provider-reported clients stay unassigned. The DNS observation has
 no trusted device ID and no score, because the fixture's block reason is one the
 scorer does not recognise. No source writes or exceptions are created.
 

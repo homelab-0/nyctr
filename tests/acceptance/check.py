@@ -365,7 +365,12 @@ def verify_placement(client: Client, graph: dict) -> None:
         kinds.get("Synthetic gateway") == "gateway"
         and [kind for kind in kinds.values() if kind == "gateway"] == ["gateway"]
         and kinds.get("Synthetic switch") == "switch",
-        "The gateway, switch and access point were not each filed as what the source lists them as.",
+        "The device outside every network range, with nothing above it, was not filed as the only gateway.",
+    )
+    require(
+        [node["attributes"].get("kind_basis") for node in graph["nodes"] if node["kind"] == "gateway"]
+        == ["outside_network_ranges"],
+        "The gateway was not marked as Nyctr's deduction from where it sits.",
     )
     ranges = {node["name"]: node["attributes"].get("subnets") for node in graph["nodes"] if node["kind"] == "network"}
     require(

@@ -136,6 +136,12 @@ class FixtureContractCase(unittest.TestCase):
             (len(snapshot.resources), len(snapshot.relationships), len(snapshot.blocks)), (11, 17, 0)
         )
         self.assertIn("source_zone_policy", {edge["kind"] for edge in snapshot.relationships})
+        # The gateway is listed with switching only and reports an address outside every range.
+        # It is filed because it is the only such gear and has nothing above it, and is marked so.
+        self.assertEqual(
+            [(node["name"], node["attributes"]["kind_basis"]) for node in snapshot.resources if node["kind"] == "gateway"],
+            [("Synthetic gateway", "outside_network_ranges")],
+        )
         # Which network a device is on is never something the source said, so it is never collected.
         self.assertNotIn("member_of", {edge["kind"] for edge in snapshot.relationships})
 
