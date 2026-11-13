@@ -7,6 +7,7 @@ analysis refreshes findings and the administrator-written guest rule is checked.
 import asyncio
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, or_, select, update
@@ -156,6 +157,34 @@ def _record_sightings(db, integration, snapshot, now):
             db.add(Sighting(device_id=data["id"], uplink_id=uplink, first_seen=now, last_seen=now))
 
 
+# Failures that may pass by waiting: a broken connection, a timeout, a rate limit.
+# A server error at the source is marked transient on the error itself.
+PASSING = {"transport", "timeout", "rate_limit"}
+
+
+@dataclass(frozen=True)
+class Failure:
+    """Why one collection failed, as the scheduled retry needs it: may it pass, and when to come back."""
+    message: str
+    may_pass: bool
+    retry_after: int | None = None
+
+
+def classify(exc: BaseException, message: str) -> Failure:
+    """Sort a collection failure by its typed category, never by its text.
+
+    A refused key, an address that is not allowed, a setting the integration
+    rejects, a certificate problem or an unknown fault will not pass by waiting.
+    """
+    from .integrations import IntegrationError
+
+    if isinstance(exc, IntegrationError):
+        may_pass = exc.category in PASSING or exc.transient
+        wait = exc.retry_after if exc.category == "rate_limit" else None
+        return Failure(message, may_pass, wait)
+    return Failure(message, isinstance(exc, TimeoutError))
+
+
 def after_collection(db, settings):
     """Run deterministic analysis on stored evidence and return guest devices the written rule cuts off."""
     from .analysis import refresh_findings
@@ -172,7 +201,8 @@ def _still_holds(db, integration_id: str, started) -> bool:
     ).values(name=Integration.name).execution_options(synchronize_session=False)).rowcount == 1
 
 
-async def collect_integration(factory, settings, integration_id: str, actor: str | None):
+async def collect_integration(factory, settings, integration_id: str, actor: str | None, *,
+                              attempt: int | None = None, hold=None):
     """Collect one live integration under a database lease and store its snapshot atomically.
 
     Returns (snapshot, error message). A second caller during a running
@@ -180,6 +210,11 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
     edit stores nothing and gets ("replaced"). A snapshot that kept only the most recent rows is
     stored and audited as partial, not as an error. Failure rolls back the snapshot, records a
     sanitized error and releases the lease. Never performs a provider change.
+
+    A scheduled collection passes `attempt` (0 for the run, 1-3 for retries) and
+    `hold(db, failure)`, which may stage a retry in the same transaction and return
+    when it is due. While one is due the source keeps its previous status; the
+    error is still recorded and the attempt audited.
     """
     from .integrations import IntegrationError, collect
 
@@ -193,6 +228,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
         if not api_key:
             return None, "secret"
         started = utcnow()
+        previous = integration.status
         locked = db.execute(update(Integration).where(
             Integration.id == integration.id,
             or_(Integration.status != "syncing", Integration.sync_started_at < started - timedelta(minutes=5))
@@ -225,7 +261,8 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             partial = snapshot.partial_rows is not None
             audit(db, actor, "integration.collected", integration.id, name=integration.name,
                   resources=len(snapshot.resources), observations=len(snapshot.blocks),
-                  partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}))
+                  partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}),
+                  **({"attempt": attempt} if attempt is not None else {}))
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -233,11 +270,15 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 db.rollback()
                 return None, "replaced"
             integration = db.get(Integration, integration_id)
-            integration.status = "error"
             integration.last_error = (str(exc) if isinstance(exc, IntegrationError)
                                       else "Collection failed. Check provider reachability and configuration.")
+            retry_at = hold(db, classify(exc, integration.last_error)) if hold else None
+            integration.status = previous if retry_at and previous != "syncing" else "error"
             integration.sync_started_at = None
-            audit(db, actor, "integration.collection_failed", integration.id, name=integration.name)
+            details = {} if attempt is None else {"attempt": attempt}
+            if retry_at:
+                details["retry_at"] = retry_at.isoformat()
+            audit(db, actor, "integration.collection_failed", integration.id, name=integration.name, **details)
             db.commit()
             return None, integration.last_error
         return snapshot, None

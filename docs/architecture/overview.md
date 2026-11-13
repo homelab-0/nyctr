@@ -28,7 +28,13 @@ administrator sets with `PUT /api/collection` (on by default, every 15 minutes),
 upkeep loop inside the API process. The schedule and the time of its last run
 are stored in the database, so a change applies within one upkeep pass on every
 running copy, a restart does not reset the clock, and only one copy performs a
-given run. Moving scheduled collection and background
+given run. A source whose scheduled collection fails for a reason that may pass
+(a broken connection, a timeout, a rate limit, a server error at the source) is
+tried again after about 1, 2 and 4 minutes, never at or after the next run, and
+keeps its previous status until the last retry fails. A refused key or a rejected
+setting is shown at once. Each pending retry is a row in the settings table that
+one copy claims the same way as a run. A Collect pressed by a person and a
+connection test are not retried. Moving scheduled collection and background
 analysis to a separate worker process is future work.
 
 Saved-integration diagnostics reuse the bounded, verified read transport under

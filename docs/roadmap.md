@@ -66,7 +66,8 @@ UniFi console, NextDNS profile and Proxmox node, with differences fixed.
 ## 2. Collection and network posture
 
 - Durable background collection, scheduling, bounded retries and health reporting.
-  **(first version: optional in-process interval, no retries)**
+  **(first version: in-process schedule set in the console; a failed scheduled
+  collection is retried up to three times before the source is shown as failed)**
 - UniFi ports, zones, rule ordering and configuration snapshots.
   **(done: equipment uplinks, each network's VLAN and address range, the gateway
   filed on evidence when the console does not list it as one, and devices placed

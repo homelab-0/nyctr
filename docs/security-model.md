@@ -122,8 +122,9 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   inbox events is not equivalent to deleting stored observations.
 - Multi-process-safe throttling and job concurrency if scaling beyond one process.
   Lease reconciliation, scheduled collection and the assistant's rate limit run
-  inside the API process. A scheduled run is claimed in the database so two
-  copies do not both perform it; the nudge and the assistant's limit are still
+  inside the API process. A scheduled run, and each retry of a source that
+  failed it, is claimed in the database so two copies do not both perform it;
+  a restart may drop a claimed retry, and the next run covers the source. The nudge and the assistant's limit are still
   per process.
 - Scheduled collection is on by default and only an administrator can change it
   (`PUT /api/collection`); every change is audited with the old and new
