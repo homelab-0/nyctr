@@ -1,16 +1,17 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowRight,
   Check,
   Layers2,
   LockKeyhole,
   Minus,
+  Pencil,
   Plus,
   RefreshCw,
   ScanLine,
   Settings2,
 } from 'lucide-react';
-import { label, post, relativeTime, useApi } from '../api';
+import { label, post, put, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
 import type { Catalog, CatalogProvider, Integration, Rules } from '../types';
 import {
@@ -42,23 +43,34 @@ const PARTIAL_NOTE =
  * The fields come from the integration's own declaration, so a new integration gets a form
  * without any change here. The form never requests the provider key itself; the API validates
  * endpoint and credential-reference restrictions and rejects live connections in demo mode.
+ * Given a saved source it becomes the edit form: the same fields filled in, with the kind of
+ * source fixed. Only the name of the secret is shown; the secret itself never reaches the page.
  */
 function AddIntegration({
   providers,
   provider,
+  editing,
   onClose,
   onSaved,
 }: {
   providers: CatalogProvider[];
   provider: string;
+  editing?: Integration;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const { user } = useAuth();
   const [selected, setSelected] = useState(provider);
-  const [name, setName] = useState('');
-  const [secret, setSecret] = useState('');
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [name, setName] = useState(editing?.name || '');
+  const [secret, setSecret] = useState(editing?.secret_ref || '');
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      Object.entries(editing?.config || {}).map(([key, value]) => [
+        `${provider}.${key}`,
+        String(value ?? ''),
+      ]),
+    ),
+  );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const demo = user?.mode === 'demo';
@@ -74,12 +86,9 @@ function AddIntegration({
       if (value) config[field.key] = field.kind === 'number' ? Number(value) : value;
     }
     try {
-      await post('/integrations', {
-        provider: chosen.id,
-        name: name.trim(),
-        config,
-        secret_ref: secret.trim(),
-      });
+      const saved = { name: name.trim(), config, secret_ref: secret.trim() };
+      if (editing) await put(`/integrations/${encodeURIComponent(editing.id)}`, saved);
+      else await post('/integrations', { provider: chosen.id, ...saved });
       onSaved();
       onClose();
     } catch (e) {
@@ -89,7 +98,7 @@ function AddIntegration({
     }
   };
   return (
-    <Modal title="Connect a source" onClose={onClose}>
+    <Modal title={editing ? 'Edit source' : 'Connect a source'} onClose={onClose}>
       <form className="modal-body form-stack" onSubmit={submit}>
         {demo && (
           <Notice tone="amber">
@@ -97,8 +106,19 @@ function AddIntegration({
             source.
           </Notice>
         )}
-        <Field label="Integration" hint={chosen.summary}>
-          <select value={chosen.id} onChange={(e) => setSelected(e.target.value)}>
+        <Field
+          label="Integration"
+          hint={
+            editing
+              ? 'The kind of source cannot be changed. To use another kind, connect a new source.'
+              : chosen.summary
+          }
+        >
+          <select
+            value={chosen.id}
+            disabled={Boolean(editing)}
+            onChange={(e) => setSelected(e.target.value)}
+          >
             {providers.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
@@ -151,8 +171,9 @@ function AddIntegration({
           />
         </Field>
         <Notice>
-          Collection only reads. Saving records the connection; collect a snapshot afterwards.
-          Whether Nyctr may change this source is a separate server setting.
+          {editing
+            ? 'A new address or secret name means this source must be tested again. What it already collected stays until the next collection replaces it.'
+            : 'Collection only reads. Saving records the connection; collect a snapshot afterwards. Whether Nyctr may change this source is a separate server setting.'}
         </Notice>
         <InlineError message={error} />
         <div className="modal-actions">
@@ -160,7 +181,7 @@ function AddIntegration({
             Cancel
           </button>
           <button className="button primary" disabled={pending || demo} type="submit">
-            {pending ? 'Saving…' : 'Save connection'}
+            {pending ? 'Saving…' : editing ? 'Save changes' : 'Save connection'}
             <ArrowRight size={15} />
           </button>
         </div>
@@ -243,6 +264,12 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const allowed = sources.filter((item) => item.write_mode === 'enabled').map((item) => item.name);
   const connected = new Set((result.data || []).map((item) => item.provider));
   const [add, setAdd] = useState<string | null>(null);
+  const [edit, setEdit] = useState<Integration | null>(null);
+  const editButton = useRef<HTMLButtonElement | null>(null);
+  /** Puts the keyboard back on the card's Edit button once the edit form has closed. */
+  useEffect(() => {
+    if (!edit) editButton.current?.focus();
+  }, [edit]);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -337,6 +364,8 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           {result.data.map((integration) => {
             const item = kind(integration.provider);
             const mode = sources.find((source) => source.id === integration.id)?.write_mode;
+            // Only an edit to the address or secret name leaves a collected source "configured".
+            const changed = integration.status === 'configured' && Boolean(integration.last_sync);
             return (
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">
@@ -370,8 +399,17 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                 </div>
                 <div className="integration-meta">
                   <span>Last collected</span>
-                  <strong>{relativeTime(integration.last_sync)}</strong>
+                  <strong>
+                    {relativeTime(integration.last_sync)}
+                    {changed ? ' · before the change' : ''}
+                  </strong>
                 </div>
+                {changed && (
+                  <Notice tone="amber">
+                    This source was changed and needs testing again. Run diagnostics, then collect a
+                    snapshot. What Nyctr shows from it was collected before the change.
+                  </Notice>
+                )}
                 {integration.status === 'partial' && <Notice tone="amber">{PARTIAL_NOTE}</Notice>}
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>
@@ -389,6 +427,26 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                   </span>
                 </div>
                 <div className="integration-actions">
+                  {admin && (
+                    <button
+                      className="button secondary small"
+                      disabled={pending !== null || demo || !item}
+                      onClick={(event) => {
+                        editButton.current = event.currentTarget;
+                        setEdit(integration);
+                      }}
+                      title={
+                        demo
+                          ? 'Demo sources cannot be changed.'
+                          : !item
+                            ? 'This release has no integration for this source.'
+                            : 'Change the name, settings or secret name'
+                      }
+                    >
+                      <Pencil size={14} />
+                      Edit
+                    </button>
+                  )}
                   {admin && (
                     <button
                       className="button secondary small"
@@ -503,6 +561,19 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
             setSuccess(
               'Connection saved. Run diagnostics to verify supported reads, then collect a snapshot to import evidence.',
             );
+          }}
+        />
+      )}
+      {edit && (
+        <AddIntegration
+          providers={providers}
+          provider={edit.provider}
+          editing={edit}
+          onClose={() => setEdit(null)}
+          onSaved={() => {
+            result.reload();
+            setError(null);
+            setSuccess('Changes saved.');
           }}
         />
       )}

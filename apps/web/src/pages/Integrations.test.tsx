@@ -271,12 +271,14 @@ async function openIntegrations({
   diagnose = async () => jsonResponse(partialReport),
   source = connection,
   partial,
+  save = async () => jsonResponse(source),
 }: {
   mode?: Mode;
   role?: Role;
   diagnose?: () => Promise<Response>;
   source?: Integration;
   partial?: boolean;
+  save?: () => Promise<Response>;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -292,6 +294,7 @@ async function openIntegrations({
     if (path === '/api/integrations') return jsonResponse([source]);
     if (path === '/api/integrations/catalog') return jsonResponse(catalog);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
+    if (path === `/api/integrations/${source.id}` && options?.method === 'PUT') return save();
     if (path === `/api/integrations/${connection.id}/sync`) {
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
     }
@@ -670,5 +673,99 @@ describe('integrations add capabilities', () => {
       config: { base_url: 'https://resolver.example', lookback_hours: 12 },
       secret_ref: 'NYCTR_CONNECTOR_SECRET_BRANCH',
     });
+  });
+});
+
+/** A fabricated saved source of the made-up resolver kind, collected once. */
+const resolver: Integration = {
+  ...connection,
+  provider: 'acme_resolver',
+  provider_name: 'Acme Resolver',
+  status: 'connected',
+  last_sync: '2026-01-01T12:00:00Z',
+  config: { base_url: 'https://resolver.example/api', lookback_hours: 24 },
+  secret_ref: 'NYCTR_CONNECTOR_SECRET_RESOLVER',
+};
+
+/** Covers the edit form: what it shows, what it sends, how a refusal reads, and where focus lands. */
+describe('editing a saved source', () => {
+  it('opens the connect form filled in, keeps the kind fixed, and sends only name, settings and secret name', async () => {
+    const { fetchMock, interaction, user } = await openIntegrations({ source: resolver });
+    const button = screen.getByRole('button', { name: 'Edit' });
+    button.focus();
+    await interaction.keyboard('{Enter}');
+    const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    expect(within(dialog).getByLabelText(/^Integration/)).toHaveProperty('disabled', true);
+    expect(within(dialog).getByLabelText(/^Integration/)).toHaveProperty('value', 'acme_resolver');
+    expect(within(dialog).getByText(/kind of source cannot be changed/)).toBeDefined();
+    expect(within(dialog).getByLabelText(/^Connection name/)).toHaveProperty(
+      'value',
+      resolver.name,
+    );
+    expect(within(dialog).getByLabelText(/^Address/)).toHaveProperty(
+      'value',
+      'https://resolver.example/api',
+    );
+    expect(within(dialog).getByLabelText(/^Credential environment reference/)).toHaveProperty(
+      'value',
+      'NYCTR_CONNECTOR_SECRET_RESOLVER',
+    );
+    const hours = within(dialog).getByLabelText(/^Hours to read/);
+    expect(hours).toHaveProperty('value', '24');
+    await interaction.clear(hours);
+    await interaction.type(hours, '6');
+    await interaction.click(within(dialog).getByRole('button', { name: /Save changes/ }));
+    await screen.findByText('Changes saved.');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const sent = fetchMock.mock.calls.find(([, options]) => options?.method === 'PUT')!;
+    expect(sent[0]).toBe(`/api/integrations/${resolver.id}`);
+    expect(new Headers(sent[1]?.headers).get('X-CSRF-Token')).toBe(user.csrf_token);
+    expect(JSON.parse(String(sent[1]?.body))).toEqual({
+      name: resolver.name,
+      config: { base_url: 'https://resolver.example/api', lookback_hours: 6 },
+      secret_ref: 'NYCTR_CONNECTOR_SECRET_RESOLVER',
+    });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+  });
+
+  it('shows why a change was refused, keeps the form open, and returns focus on cancel', async () => {
+    const { interaction } = await openIntegrations({
+      source: resolver,
+      save: async () =>
+        jsonResponse({ detail: 'Not saved. The hours must be between 1 and 72.' }, 422),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    await interaction.click(within(dialog).getByRole('button', { name: /Save changes/ }));
+    expect(
+      await within(dialog).findByText('Not saved. The hours must be between 1 and 72.'),
+    ).toBeDefined();
+    expect(screen.queryByText('Changes saved.')).toBeNull();
+    await interaction.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+  });
+
+  it('says on the card that a changed source needs testing again and that its data is older', async () => {
+    await openIntegrations({ source: { ...resolver, status: 'configured' } });
+    expect(screen.getByText(/was changed and needs testing again/)).toBeDefined();
+    expect(screen.getByText(/· before the change/)).toBeDefined();
+  });
+
+  it('shows no such note for a source that was never collected or is collected and unchanged', async () => {
+    await openIntegrations();
+    expect(screen.queryByText(/needs testing again/)).toBeNull();
+    cleanup();
+    await openIntegrations({ source: resolver });
+    expect(screen.queryByText(/needs testing again/)).toBeNull();
+    expect(screen.queryByText(/before the change/)).toBeNull();
+  });
+
+  it('hides Edit from members and disables it in the demo workspace', async () => {
+    await openIntegrations({ role: 'member' });
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    cleanup();
+    await openIntegrations({ mode: 'demo' });
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveProperty('disabled', true);
   });
 });

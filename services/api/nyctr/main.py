@@ -90,17 +90,27 @@ def _settled_status(db: Session, integration: Integration) -> str:
         return "error"
     if not integration.last_sync:
         return "configured"
-    last = db.scalar(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == integration.id)
-                     .order_by(Audit.created_at.desc()).limit(1))
-    return "partial" if last is not None and last.details.get("partial") is True else "connected"
+    history = select(Audit).where(Audit.action.in_(("integration.collected", "integration.updated")),
+                                  Audit.target_id == integration.id).order_by(Audit.created_at.desc())
+    for last in db.scalars(history):
+        if last.action == "integration.collected":
+            return "partial" if last.details.get("partial") is True else "connected"
+        if last.details.get("retest") is True:
+            # Its address or secret name changed after the last collection, so it is untested again.
+            return "configured"
+    return "connected"
 
 
-class IntegrationInput(InputModel):
-    """Accept any registered integration and a constrained server-side secret reference."""
-    provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]+$")
+class IntegrationEdit(InputModel):
+    """Accept what may change on a saved source. The kind of source is not among it."""
     name: str = Field(min_length=1, max_length=160)
     config: dict
     secret_ref: str = Field(pattern=r"^NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}$")
+
+
+class IntegrationInput(IntegrationEdit):
+    """Accept any registered integration and a constrained server-side secret reference."""
+    provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]+$")
 
 
 class RequestInput(InputModel):
@@ -326,6 +336,63 @@ def create_app(settings: Settings | None = None):
         db.flush()
         audit(db, user.id, "integration.created", row.id, provider=row.provider)
         db.commit()
+        return integration_json(row)
+
+    @app.put("/api/integrations/{integration_id}")
+    def edit_integration(integration_id: str, body: IntegrationEdit, user=Depends(admin),
+                         db: Session = Depends(get_db)):
+        """Change a saved source's name, settings or secret name, validated as a new source is.
+
+        A refused change leaves the row untouched. Changing anything that says
+        where or as whom Nyctr reads (every declared setting that is not a
+        number, and the secret name) returns the source to "configured": it needs
+        testing again, and what it collected earlier stays until the next
+        collection. A name or a numeric reading setting keeps the status. The
+        audit record names the changed fields, never their values. No credential
+        is read here.
+        """
+        if settings.mode == "demo":
+            raise HTTPException(409, "Sources cannot be changed in the demo workspace")
+        from .integrations import IntegrationError, registry, validate_config
+        row = db.get(Integration, integration_id)
+        if not row:
+            raise HTTPException(404, "Integration not found")
+        provider = registry.find(row.provider)
+        if provider is None:
+            raise HTTPException(422, "This release has no integration for this source, so it cannot be changed")
+        try:
+            config = validate_config(row.provider, body.config)
+        except IntegrationError as error:
+            # The integration's own wording: it states the rule that failed and repeats no value.
+            raise HTTPException(422, f"Not saved. {error}") from None
+        except ValueError:
+            raise HTTPException(422, "Not saved. Check the settings and try again.") from None
+        try:
+            before = validate_config(row.provider, row.config)
+        except (IntegrationError, ValueError):
+            before = row.config
+        settings_changed = sorted(key for key in set(before) | set(config) if before.get(key) != config.get(key))
+        fields = ((["name"] if body.name != row.name else []) + [f"config.{key}" for key in settings_changed]
+                  + (["secret_ref"] if body.secret_ref != row.secret_ref else []))
+        if not fields:
+            return integration_json(row)
+        kinds = {field.key: field.kind for field in provider.fields}
+        retest = "secret_ref" in fields or any(kinds.get(key) != "number" for key in settings_changed)
+        values = {"name": body.name, "config": config, "secret_ref": body.secret_ref}
+        if retest:
+            values.update(status="configured", last_error=None, sync_started_at=None)
+        # The same guard as the collection lease, so a running read never finishes on changed settings.
+        saved = db.execute(update(Integration).where(
+            Integration.id == integration_id,
+            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
+        ).values(**values).execution_options(synchronize_session="fetch"))
+        if saved.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, "This source is being collected or tested right now. "
+                                     "Try again when that has finished.")
+        audit(db, user.id, "integration.updated", integration_id, provider=row.provider, fields=fields, retest=retest)
+        db.commit()
+        db.refresh(row)
         return integration_json(row)
 
     @app.post("/api/integrations/{integration_id}/diagnostics", response_model=DiagnosticReport)

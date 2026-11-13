@@ -27,6 +27,28 @@ Kubernetes, inject these using your secret management system rather than storing
 them in Git. Secret rotation takes effect when the running process receives the
 updated environment; restart the deployment after environment-secret changes.
 
+## Changing a saved source
+
+**Edit** on a source's card opens the connection form filled in. An administrator
+can change the name, any setting the integration declares, and the name of the
+secret. The kind of source cannot be changed; connect a new source instead. The
+form shows only the secret's name, never its value. Demo sources cannot be edited.
+
+A change is checked exactly as a new source is: the integration's own validation
+and the server's `NYCTR_CONNECTOR_HOSTS` allow-list. A refused change leaves the
+saved source as it was and says which rule failed. An edit is also refused while
+a collection or a diagnostic of that source is running.
+
+Changing where or as whom Nyctr reads (the secret name, or any setting that is
+not a number, such as an address, profile or site) marks the source as needing a
+test again. Its status returns to "Configured" and the card says so. What was
+collected before stays, marked on the card as collected before the change, until
+the next collection replaces it. Changing only the name or a numeric reading
+setting such as the hours of lookups to read keeps the status.
+
+Every edit is written to the audit history with who made it, which source, and
+the names of the fields that changed. The values are not recorded.
+
 ## Connection diagnostics
 
 On a saved live-mode integration, **Run diagnostics** performs the same bounded
