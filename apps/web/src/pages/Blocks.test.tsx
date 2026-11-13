@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import type { Block, Integration } from '../types';
@@ -47,5 +47,22 @@ describe('Blocks', () => {
     const note = (await screen.findByText('Busy DNS')).closest('.note')!;
     expect(note.textContent).toContain('only the most recent blocked lookups were read');
     expect(screen.queryByText('Quiet DNS')).toBeNull();
+  });
+
+  it('keeps the lookups and says completeness could not be checked when sources fail to load', async () => {
+    let fail = true;
+    mockApi({
+      'GET /blocks': [block('new', 12)],
+      'GET /integrations': () =>
+        fail ? { __status: 500, detail: 'Unavailable' } : [source('Busy DNS', 'partial')],
+    });
+    render(<Blocks />);
+    const warning = await screen.findByText(/could not be checked/);
+    expect(warning.closest('.note')).toBeTruthy();
+    expect(screen.getByText('new.example')).toBeTruthy();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Busy DNS')).toBeTruthy();
+    expect(screen.queryByText(/could not be checked/)).toBeNull();
   });
 });

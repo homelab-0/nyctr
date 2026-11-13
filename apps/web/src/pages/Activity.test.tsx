@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import type { AuditEvent, Integration } from '../types';
@@ -44,5 +44,32 @@ describe('Activity rows about a source', () => {
     expect(screen.getByText('Tested Lab hypervisor')).toBeTruthy();
     expect(screen.getByText('Could not collect from a source since removed')).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/source-[abcd]/);
+  });
+});
+
+describe('Activity when source names are unavailable', () => {
+  it('never calls a source removed until the list loads, and offers to try again', async () => {
+    let fail = true;
+    mockApi({
+      'GET /audit': [
+        event('c', 'integration.diagnosed', {}),
+        event('d', 'integration.collected', {}),
+      ],
+      'GET /users': [],
+      'GET /integrations': () =>
+        fail
+          ? { __status: 500, detail: 'Unavailable' }
+          : [{ id: 'source-c', name: 'Lab hypervisor' } as Integration],
+    });
+    render(<Activity />);
+    expect(await screen.findByText('Source names could not be loaded.')).toBeTruthy();
+    expect(screen.getByText('Tested a source')).toBeTruthy();
+    expect(screen.getByText('Collected from a source')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('since removed');
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Tested Lab hypervisor')).toBeTruthy();
+    expect(screen.getByText('Collected from a source since removed')).toBeTruthy();
+    expect(screen.queryByText('Source names could not be loaded.')).toBeNull();
   });
 });

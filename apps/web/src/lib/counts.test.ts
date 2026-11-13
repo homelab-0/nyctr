@@ -10,12 +10,19 @@ describe('named counts', () => {
   it('counts the same groups Inventory lists, and blocked addresses on their own', () => {
     const kinds = { client: 2, access_point: 1, workload: 3, dns_profile: 1, domain: 1, site: 1 };
     expect(namedCounts(kinds)).toBe(
-      '2 devices, 1 piece of network equipment, 3 hosts and workloads, 1 rule and 1 blocked address',
+      '2 devices, 1 piece of network equipment, 3 hosts, bridges and workloads, 1 rule and 1 blocked address',
     );
     // Every kind Inventory lists falls in a named group; sites and blocked addresses are not listed.
     const grouped = Object.values(GROUPS).flatMap((group) => group.kinds || []);
     expect(grouped).not.toContain('domain');
     expect([...UNLISTED]).toEqual(['site', 'domain']);
+  });
+
+  it('names bridges in the group that counts them, as Inventory does', () => {
+    expect(GROUPS.compute.kinds).toContain('bridge');
+    expect(GROUPS.compute.name).toBe('Hosts, bridges and workloads');
+    expect(namedCounts({ bridge: 1 })).toBe('1 host, bridge or workload');
+    expect(namedCounts({ host: 1, bridge: 2 })).toBe('3 hosts, bridges and workloads');
   });
 
   it('says nothing for an empty inventory rather than a zero total', () => {

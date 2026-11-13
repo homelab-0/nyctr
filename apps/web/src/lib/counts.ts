@@ -6,7 +6,7 @@ export const GROUPS = {
   devices: { name: 'Devices', kinds: ['client'] },
   gear: { name: 'Network equipment', kinds: ['gateway', 'switch', 'access_point'] },
   networks: { name: 'Networks', kinds: ['network'] },
-  compute: { name: 'Hosts and workloads', kinds: ['host', 'bridge', 'workload'] },
+  compute: { name: 'Hosts, bridges and workloads', kinds: ['host', 'bridge', 'workload'] },
   rules: { name: 'Rules', kinds: ['policy', 'dns_profile'] },
 } as const;
 export type Group = keyof typeof GROUPS;
@@ -25,7 +25,7 @@ const NOUNS: [Exclude<Group, 'all'> | 'blocked', string, string][] = [
   ['devices', 'device', 'devices'],
   ['gear', 'piece of network equipment', 'pieces of network equipment'],
   ['networks', 'network', 'networks'],
-  ['compute', 'host or workload', 'hosts and workloads'],
+  ['compute', 'host, bridge or workload', 'hosts, bridges and workloads'],
   ['rules', 'rule', 'rules'],
   ['blocked', 'blocked address', 'blocked addresses'],
 ];

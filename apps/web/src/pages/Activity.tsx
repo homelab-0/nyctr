@@ -42,16 +42,19 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
 
 /**
  * What a row says happened. A source is named as the audit record kept it, else by its current
- * name, else as removed; never by its id.
+ * name. It is called removed only when the source list loaded and does not hold it; while the
+ * list is unavailable the row says "a source". Never an id.
  */
-function what(event: AuditEvent, sources: Map<string, string>) {
+function what(event: AuditEvent, sources: Map<string, string> | null) {
   const about = ABOUT_A_SOURCE[event.action];
   if (!about) return WORDS[event.action] || event.action;
   const kept = event.details?.name;
   return about(
     typeof kept === 'string' && kept
       ? kept
-      : sources.get(event.target_id) || 'a source since removed',
+      : sources
+        ? sources.get(event.target_id) || 'a source since removed'
+        : 'a source',
   );
 }
 
@@ -80,9 +83,13 @@ export default function Activity() {
     () => new Map((people.data || []).map((p) => [p.id, p.name])),
     [people.data],
   );
+  // Null while the list is loading or after it failed, so no source is wrongly called removed.
   const sourceNames = useMemo(
-    () => new Map((sources.data || []).map((source) => [source.id, source.name])),
-    [sources.data],
+    () =>
+      sources.data && !sources.error
+        ? new Map(sources.data.map((source) => [source.id, source.name]))
+        : null,
+    [sources.data, sources.error],
   );
   const rows = useMemo(() => {
     const needle = text.trim().toLowerCase();
@@ -109,6 +116,17 @@ export default function Activity() {
           placeholder="Find an action, person or address"
         />
       </header>
+      {sources.error && (
+        <div className="note yellow" role="alert">
+          <span>
+            <b>Source names could not be loaded.</b> Rows about a source say only &ldquo;a
+            source&rdquo; until they load.
+          </span>
+          <button className="button secondary small" onClick={sources.reload}>
+            Try again
+          </button>
+        </div>
+      )}
       {rows.length === 0 ? (
         <Empty title="No activity matches" text="Clear the search to see everything." />
       ) : (

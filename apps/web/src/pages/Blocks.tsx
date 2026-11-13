@@ -52,6 +52,19 @@ export default function Blocks() {
             Lookups your DNS sources refused. {span} The score is rule-based from the block reason;
             no score means unknown, not safe.
           </p>
+          {sources.error && (
+            <div className="note yellow" role="alert">
+              <span>
+                <b>
+                  Whether each source&rsquo;s last collection was complete could not be checked.
+                </b>{' '}
+                Some sources may have sent only their most recent blocked lookups.
+              </span>
+              <button className="button secondary small" onClick={sources.reload}>
+                Try again
+              </button>
+            </div>
+          )}
           {partial.map((source) => (
             <div className="note yellow" key={source.id}>
               <span>
