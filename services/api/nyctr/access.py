@@ -15,7 +15,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,7 @@ from . import risk, schedule
 from .collection import SECRET_REF
 from .config import Settings
 from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
-from .integrations import registry
+from .integrations import IntegrationError, registry
 from .models import AccessRequest, DeviceLink, Integration, Lease, Observation, Resource, User, utc, utcnow
 from .policy import AccessRule, GuestRule, get_list, get_rule, put_list, put_rule
 from .security import audit
@@ -59,6 +59,28 @@ def _opener(integration: Integration | None):
     """Return the source's integration contract if it can open a blocked address, else None."""
     provider = registry.find(integration.provider) if integration else None
     return provider if provider and "dns.exceptions" in provider.provides else None
+
+
+def source_unchanged(db: Session, integration: Integration, used: tuple[dict, str]) -> bool:
+    """After a provider call returns, lock the source row and say whether it is still the source the call used.
+
+    Taken only after the call, never across it. A removal, or an edit that moved the source, then either
+    waits for this transaction (and sees what Nyctr now has there) or has already happened and is seen here.
+    """
+    held = db.execute(update(Integration).where(Integration.id == integration.id)
+                      .values(name=Integration.name).execution_options(synchronize_session=False)).rowcount
+    if held != 1:
+        return False
+    db.refresh(integration)
+    return (integration.config, integration.secret_ref) == used
+
+
+class SourceGone(IntegrationError):
+    """The source was removed or moved while Nyctr was changing it. `record` writes what was done about it."""
+
+    def __init__(self, message: str, record):
+        super().__init__(message, category="configuration")
+        self.record = record
 
 
 def feature_mode(db: Session, settings: Settings, capability: str) -> str:
@@ -101,8 +123,13 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
         shared = db.scalar(select(Lease.id).where(
             Lease.status == "active", Lease.domain == domain, Lease.integration_id == integration.id,
             Lease.execution == "applied", Lease.owned.is_(True)).limit(1))
+        used = (dict(integration.config), integration.secret_ref)
         result = await opener.allow_domain(integration.config, key, domain, allowed=True)
         execution, owned = "applied", bool(result["owned"] or shared)
+        if not source_unchanged(db, integration, used):
+            await _take_back(opener, integration, used, key, domain, owned=bool(result["owned"] and not shared),
+                             decided_by=decided_by, requester_id=requester_id, request_id=request_id,
+                             minutes=minutes, risk_score=risk_score)
     now = utcnow()
     lease = Lease(request_id=request_id, integration_id=integration.id if integration else None, domain=domain,
                   device_name=device_name, requester_id=requester_id,
@@ -114,6 +141,45 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     audit(db, None if decided_by == "rule" else decided_by, "access.opened", lease.id, domain=domain,
           execution=execution, owned=owned, minutes=minutes, decided_by=decided_by)
     return lease
+
+
+async def _take_back(opener, integration: Integration, used: tuple[dict, str], key: str, domain: str, *,
+                     owned: bool, **lease) -> None:
+    """Undo an exception added at a source that went away during the call, at the place the call used.
+
+    Raises SourceGone. Its record says what happened; an undo that failed is kept as an open exception with
+    its error, so it stays listed under Open now and is never shown as done.
+    """
+    # Read now: after a rollback the removed source's row can no longer be loaded.
+    name, iid, scope, undone = integration.name, integration.id, _scope(integration), True
+    if owned:
+        try:
+            await opener.disallow_domain(used[0], key, domain, allowed=True)
+        except IntegrationError:
+            undone = False
+    if undone:
+        message = (f"{name} was removed or changed while Nyctr was opening {domain} there, so Nyctr took that "
+                   "exception back out. Nothing was opened.")
+    else:
+        message = (f"{name} was removed or changed while Nyctr was opening {domain} there, and Nyctr could not "
+                   f"take it back out. Remove the exception for {domain} at that source by hand.")
+    actor = None if lease["decided_by"] == "rule" else lease["decided_by"]
+
+    def record(db: Session) -> None:
+        target = None
+        if not undone:
+            now, minutes = utcnow(), lease["minutes"]
+            row = Lease(integration_id=iid, domain=domain, execution="applied", owned=True,
+                        kind="temporary" if minutes else "permanent", scope=scope, last_error=message,
+                        decided_by=lease["decided_by"], requester_id=lease["requester_id"],
+                        request_id=lease["request_id"], risk_score=lease["risk_score"], created_at=now,
+                        expires_at=now + timedelta(minutes=minutes) if minutes else None)
+            db.add(row)
+            db.flush()
+            target = row.id
+        audit(db, actor, "access.open_undone", target, domain=domain, source=name,
+              execution="applied" if undone else "failed")
+    raise SourceGone(message, record)
 
 
 async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, actor: str | None = None) -> bool:
@@ -210,6 +276,9 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             row.status, row.decided_by, row.duration_minutes = "auto_approved", "rule", minutes
             row.decision_note = f"Opened for {minutes} minutes by the access rule."
             return
+        except SourceGone as error:
+            error.record(db)
+            why = f"{error} A person decides."
         except IntegrationError:
             why = f"Nyctr could not change {integration.name} just now, so a person decides."
     row.decision_note = why
@@ -311,6 +380,10 @@ async def act_on_suggestion(body: SuggestionInput, request: Request, user=Depend
                                  decided_by=user.id, risk_score=item["risk_score"])
     except IntegrationError as error:
         db.rollback()
+        if isinstance(error, SourceGone):
+            error.record(db)
+            db.commit()
+            raise HTTPException(409, str(error)) from None
         raise HTTPException(502, str(error)) from None
     db.commit()
     return lease_json(lease, _names(db))

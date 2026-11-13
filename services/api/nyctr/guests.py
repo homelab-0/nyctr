@@ -452,6 +452,7 @@ async def issue_pass(body: PassInput, request: Request, user=Depends(admin), db:
         integration, site, key = _target(db, integration)
         if not key:
             raise HTTPException(409, f"The secret for {integration.name} is not configured on the server.")
+        used = (dict(integration.config), integration.secret_ref)
         try:
             issued = await provider.issue_pass(integration.config, key, site, name=body.name,
                                                minutes=body.minutes, guest_limit=body.guest_limit,
@@ -459,12 +460,41 @@ async def issue_pass(body: PassInput, request: Request, user=Depends(admin), db:
         except IntegrationError as error:
             raise HTTPException(502, str(error)) from None
         row.voucher_id, row.code, row.execution = issued["id"], issued["code"][:64], "applied"
+        from .access import source_unchanged
+        if not source_unchanged(db, integration, used):
+            await _take_back_pass(db, provider, integration.name, used[0], key, site, row, user.id)
     db.add(row)
     db.flush()
     audit(db, user.id, "guest.pass_issued", row.id, minutes=body.minutes, guest_limit=body.guest_limit,
           execution=row.execution)
     db.commit()
     return pass_json(row, {user.id: user.name})
+
+
+async def _take_back_pass(db: Session, provider, name: str, config: dict, key: str, site: str,
+                          row: GuestPass, actor: str) -> None:
+    """End a pass issued at a source that was removed or moved during the call, at the place the call used.
+
+    Always raises 409. A pass that could not be ended is kept as live, so it stays listed, and the
+    record says the undo failed.
+    """
+    from .integrations import IntegrationError
+
+    try:
+        await provider.end_pass(config, key, site, row.voucher_id, allowed=True)
+        undone, target = True, None
+    except IntegrationError:
+        undone = False
+        db.add(row)
+        db.flush()
+        target = row.id
+    audit(db, actor, "guest.pass_undone", target, source=name, execution="applied" if undone else "failed")
+    db.commit()
+    if undone:
+        raise HTTPException(409, f"{name} was removed or changed while the pass was being issued, so Nyctr "
+                                 "ended that pass again. No pass was issued.")
+    raise HTTPException(409, f"{name} was removed or changed while the pass was being issued, and Nyctr could "
+                             "not end that pass. End it at that source by hand; it stays listed here.")
 
 
 @router.post("/guests/passes/{pass_id}/end")
