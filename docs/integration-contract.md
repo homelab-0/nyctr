@@ -18,6 +18,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | Field | Purpose |
 | --- | --- |
 | `id`, `name`, `summary`, `letter`, `tone` | Identity and how the console shows it. `tone` is one of `blue`, `teal`, `orange`, `rose`, `violet`, `grey` |
+| `logo` | Optional. The file name of the source's own logo in `integrations/logos/`. See below |
 | `status` | `stable` or `experimental`. Say `experimental` until it has run against the real thing |
 | `fields`, `secret_hint` | The connection form. Secrets are never fields; the form only takes the name of a server environment variable |
 | `validate(config)` | Reject unknown keys, unapproved hosts and unbounded settings before any credential is used. Use `core.validated_host` for every address |
@@ -31,6 +32,25 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 
 The registry refuses to start if a provider declares a write capability without
 its actions, or actions without the capability.
+
+## Logos
+
+A source's chip shows its logo where the integration declares one and its `letter`
+on its `tone` where it does not. To declare one, save the vendor's own file in
+`services/api/nyctr/integrations/logos/` as a lower-case `.svg` or `.png` name,
+unedited, add a row to `SOURCES.md` in that folder saying where it came from, and
+set `logo="<file name>"`. Prefer the symbol to the wordmark, a vector file where
+the vendor publishes one, and the variant made for dark backgrounds.
+
+The registry reads the file once and puts the picture itself in the catalog as an
+image `data:` address, so no route serves logo files. It refuses to start if a
+declared file is missing, is larger than 96 KB, is not the type its name says, or
+is an SVG containing script, event handlers or embedded pages. The console shows a
+logo only through an image element, where a browser runs nothing the file
+contains, and ignores any value that is not an embedded PNG or SVG. The chip
+falls back to the letter when there is no logo or the picture does not load.
+`tone` still colours the source on lines, on the Map and in status, so declare
+both.
 
 ## Capabilities
 

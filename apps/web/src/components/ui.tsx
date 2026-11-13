@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode, type ComponentType, type SVGProps } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type ComponentType, type SVGProps } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -470,7 +470,11 @@ interface SourceKind {
   letter: string;
   tone: string;
   name: string;
+  logo?: string;
 }
+// A logo is the picture itself, carried in the catalog. Anything else, a web address included,
+// is ignored, so a chip never fetches from another site and never shows more than an image.
+const LOGO = /^data:image\/(png|svg\+xml);base64,[A-Za-z0-9+/]+=*$/;
 const TONES = new Set(['blue', 'orange', 'teal', 'rose', 'violet', 'grey']);
 // Only Nyctr itself is known ahead of time. Every other kind of source is described by the
 // server's integration catalog, so a new integration needs no change here.
@@ -479,13 +483,14 @@ const SOURCES = new Map<string, SourceKind>([
 ]);
 /** Teaches chips, colours and names about the integrations this server ships. */
 export function registerSources(
-  kinds: { id: string; name: string; letter: string; tone: string }[],
+  kinds: { id: string; name: string; letter: string; tone: string; logo?: string }[],
 ) {
   for (const kind of kinds)
     SOURCES.set(kind.id, {
       letter: kind.letter.slice(0, 1) || '?',
       tone: `t-${TONES.has(kind.tone) ? kind.tone : 'grey'}`,
       name: kind.name,
+      logo: kind.logo && LOGO.test(kind.logo) ? kind.logo : undefined,
     });
 }
 /** Describes a kind of source for chips, colours and plain names; unknown kinds stay readable. */
@@ -495,7 +500,10 @@ export const sourceOf = (provider: string): SourceKind =>
     tone: 't-grey',
     name: label(provider),
   };
-/** A coloured letter chip naming where a fact came from, optionally with its name. */
+/**
+ * A chip naming where a fact came from, optionally with its name: the source's own logo on a
+ * neutral tile when its integration declared one, otherwise its letter on its colour.
+ */
 export function SourceTag({
   provider,
   named = false,
@@ -506,7 +514,15 @@ export function SourceTag({
   big?: boolean;
 }) {
   const source = sourceOf(provider);
-  const chip = (
+  // A logo that will not draw gives way to the letter, so a chip is never empty or broken.
+  const [broken, setBroken] = useState('');
+  const logo = source.logo !== broken ? source.logo : undefined;
+  const chip = logo ? (
+    <span className={`src logo ${big ? 'big' : ''}`} title={source.name}>
+      {/* Beside its written name the picture is decoration; alone, it is the name. */}
+      <img src={logo} alt={named ? '' : source.name} onError={() => setBroken(logo)} />
+    </span>
+  ) : (
     <span className={`src ${source.tone} ${big ? 'big' : ''}`} title={source.name}>
       {source.letter}
     </span>

@@ -23,10 +23,13 @@ Anything else an adapter keeps is source detail for people to read and query.
 
 from __future__ import annotations
 
+import base64
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from .core import IntegrationError, Snapshot
@@ -43,6 +46,35 @@ CAPABILITIES: dict[str, str] = {
 }
 # Capabilities that change the provider. They work only when an operator allows the provider.
 WRITES = frozenset({"dns.exceptions", "guest.passes", "guest.control"})
+
+# Logo files ship beside the integrations; an integration names one of them and nothing else.
+LOGOS = Path(__file__).parent / "logos"
+_LOGO_TYPES = {"svg": "image/svg+xml", "png": "image/png"}
+_LOGO_LIMIT = 96 * 1024
+# The console shows a logo only as an image, where a browser runs nothing an SVG contains.
+# Refusing active content here as well keeps such a file out of the repository altogether.
+_ACTIVE_SVG = re.compile(rb"<\s*(script|foreignObject|iframe|object|embed)\b|\son[a-z]+\s*=|javascript:", re.I)
+
+
+@lru_cache(maxsize=32)
+def logo_uri(name: str) -> str:
+    """Return a shipped logo file as an image `data:` URI, or raise if it is not a plain image.
+
+    The catalogue carries the picture itself, so no route serves these files
+    and a logo can never be opened as a page of its own.
+    """
+    match = re.fullmatch(r"[a-z0-9_]{1,32}\.(svg|png)", name)
+    if not match:
+        raise ValueError("A logo is a lower-case .svg or .png file name in the logos folder")
+    data = (LOGOS / name).read_bytes()
+    if not data or len(data) > _LOGO_LIMIT:
+        raise ValueError(f"Logo {name} is empty or larger than {_LOGO_LIMIT} bytes")
+    kind = match.group(1)
+    if kind == "png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"Logo {name} is not a PNG image")
+    if kind == "svg" and (b"<svg" not in data or _ACTIVE_SVG.search(data)):
+        raise ValueError(f"Logo {name} is not a plain SVG image")
+    return f"data:{_LOGO_TYPES[kind]};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 @dataclass(frozen=True)
@@ -67,6 +99,8 @@ class Provider:
     validate: Callable[[dict[str, Any]], dict[str, Any]]
     collect: Callable[[str, dict[str, Any], str], Awaitable[Snapshot]]
     status: str = "stable"
+    # Optional: the file name of this source's own logo in `logos/`. Without one the console shows `letter`.
+    logo: str = ""
     secret_hint: str = ""
     fields: tuple[ConfigField, ...] = ()
     # What collection reads, as (id, label). Diagnostics report each one separately.
@@ -105,7 +139,8 @@ class Provider:
         """Serialize for the console. Contains no credential and no destination."""
         return {
             "id": self.id, "name": self.name, "summary": self.summary, "letter": self.letter,
-            "tone": self.tone, "status": self.status, "secret_hint": self.secret_hint,
+            "tone": self.tone, "logo": logo_uri(self.logo) if self.logo else "",
+            "status": self.status, "secret_hint": self.secret_hint,
             "fields": [{"key": f.key, "label": f.label, "hint": f.hint, "placeholder": f.placeholder,
                         "kind": f.kind, "required": f.required} for f in self.fields],
             "provides": [{"id": c, "name": CAPABILITIES[c], "changes_provider": c in WRITES}
@@ -138,6 +173,11 @@ def providers() -> dict[str, Provider]:
                     raise RuntimeError(f"Integration {provider.id} declares {capability} without its actions")
             if not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", provider.id) or not provider.reads:
                 raise RuntimeError(f"Integration {provider.id} declares an invalid contract")
+            if provider.logo:
+                try:
+                    logo_uri(provider.logo)
+                except (OSError, ValueError) as error:
+                    raise RuntimeError(f"Integration {provider.id} declares an unusable logo") from error
             loaded[provider.id] = provider
         _cache = loaded
     return _cache

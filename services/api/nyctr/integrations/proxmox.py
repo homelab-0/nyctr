@@ -184,7 +184,7 @@ async def collect_proxmox(integration_id: str, config: dict[str, Any], api_key: 
 
 
 PROVIDER = Provider(
-    id=ID, name="Proxmox VE", letter="P", tone="orange", status="experimental",
+    id=ID, name="Proxmox VE", letter="P", tone="orange", logo="proxmox.svg", status="experimental",
     summary="Hosts, virtual machines and containers, with the bridges, VLAN tags and firewall switches on their network cards.",
     secret_hint="An API token in the form user@realm!name=value with read (PVEAuditor) rights.",
     fields=(ConfigField("base_url", "Host address", "Any node of the cluster, over HTTPS.",
