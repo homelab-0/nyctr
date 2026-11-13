@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { label, post, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
+import { useNow } from '../lib/format';
 import { nextCollection, useSchedule } from '../lib/schedule';
 import type { Catalog, CatalogProvider, Integration, Rules } from '../types';
 import {
@@ -239,6 +240,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const result = useApi<Integration[]>('/integrations');
   const fetched = useApi<Catalog>('/integrations/catalog');
   const schedule = useSchedule();
+  const now = useNow();
   const catalog = fetched.data;
   const providers = catalog?.providers || [];
   const kind = (id: string) => providers.find((item) => item.id === id);
@@ -377,7 +379,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                 {schedule.data && (
                   <div className="integration-meta">
                     <span>Next collection</span>
-                    <strong>{nextCollection(schedule.data)}</strong>
+                    <strong>{nextCollection(schedule.data, now)}</strong>
                   </div>
                 )}
                 {integration.status === 'partial' && <Notice tone="amber">{PARTIAL_NOTE}</Notice>}

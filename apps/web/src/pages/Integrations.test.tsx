@@ -637,6 +637,19 @@ describe('integrations add capabilities', () => {
     expect(await screen.findByText('Only when you press Collect')).toBeDefined();
   });
 
+  it('counts the next collection down on the source card while the page stays open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await openIntegrations();
+      const card = (await screen.findByText('Next collection')).parentElement!;
+      expect(card.textContent).toBe('Next collectionin 12 min');
+      await act(() => vi.advanceTimersByTimeAsync(5 * 60_000));
+      expect(card.textContent).toBe('Next collectionin 7 min');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows what each integration adds and which features have a connected source', async () => {
     await openIntegrations();
     const table = screen.getByRole('table');

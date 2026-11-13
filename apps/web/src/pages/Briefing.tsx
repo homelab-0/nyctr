@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Sparkles } from 'lucide-react';
 import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
@@ -41,6 +41,12 @@ export default function Briefing({
   const schedule = useSchedule();
   const [question, setQuestion] = useState('');
   const now = useNow();
+  // A schedule read again means a collection was due, so "Collected ... ago" is read again too.
+  const { reads } = schedule;
+  const rereadSources = sources.reload;
+  useEffect(() => {
+    if (reads > 1) rereadSources();
+  }, [reads, rereadSources]);
   const urgent = attention.filter((item) => item.severity !== 'low');
   const open = (leases.data || []).filter((lease) => lease.status === 'active');
   const submit = (event: FormEvent) => {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { put, useApi } from '../api';
+import { useEffect, useRef, useState } from 'react';
+import { ApiError, put, useApi } from '../api';
 import {
   ErrorState,
   InlineError,
@@ -11,7 +11,7 @@ import {
   kindIcon,
 } from '../components/ui';
 import { span, useNow, writeText } from '../lib/format';
-import { nextCollection, useSchedule } from '../lib/schedule';
+import { UNREACHABLE, nextCollection, useSchedule } from '../lib/schedule';
 import type {
   AccessRule,
   AssistantConfig,
@@ -278,15 +278,39 @@ function PeoplePanel() {
   );
 }
 
-/** The one collection schedule for every source. Saved on change, like the rules. */
+/** How long the list waits after an arrow key before saving, so stepping through it is one change. */
+const KEY_PAUSE_MS = 700;
+/** Keys that move through a closed list one choice at a time. */
+const STEP_KEYS = [
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+];
+
+/**
+ * The one collection schedule for every source. Saved on change, like the rules.
+ * The controls are never disabled for a save: a disabled control drops keyboard focus to the
+ * page. Input is ignored instead until the schedule in force is back on screen.
+ */
 function SchedulePanel() {
   const schedule = useSchedule();
   const now = useNow();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // A choice reached with the keyboard and not saved yet.
+  const [picked, setPicked] = useState<number | null>(null);
+  const busy = useRef(false);
+  const byKey = useRef(false);
+  const pause = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(pause.current), []);
   if (!schedule.data)
     return schedule.error ? (
-      <ErrorState message={schedule.error} retry={schedule.reload} />
+      <ErrorState message={schedule.error} retry={() => void schedule.reload()} />
     ) : (
       <Loading text="Loading the schedule…" />
     );
@@ -296,15 +320,43 @@ function SchedulePanel() {
   // A deployment value may sit between the choices; saving moves to the nearest one.
   const nearest = choices.reduce((a, b) => (Math.abs(b - minutes) < Math.abs(a - minutes) ? b : a));
   const save = async (next: Pick<CollectionSchedule, 'enabled'> & { minutes: number }) => {
+    if (busy.current) return;
+    busy.current = true;
+    window.clearTimeout(pause.current);
     setError(null);
     setSaving(true);
     try {
-      await put('/collection', next);
+      // The answer is the full schedule in force, so it goes on screen as it is.
+      schedule.replace(await put<CollectionSchedule>('/collection', next));
     } catch (e) {
-      setError((e as Error).message);
+      // With no answer the save may still have landed, so read what is in force before going on.
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : `${UNREACHABLE} Check the schedule shown here before you try again.`,
+      );
+      await schedule.reload();
     }
+    setPicked(null);
+    busy.current = false;
     setSaving(false);
-    schedule.reload();
+  };
+  /** Saves the choice the keyboard stopped on, if it is a change. */
+  const commit = (value: number | null) => {
+    window.clearTimeout(pause.current);
+    byKey.current = false;
+    if (value === null) return;
+    if (value === minutes) setPicked(null);
+    else void save({ enabled, minutes: value });
+  };
+  const pick = (value: number) => {
+    if (busy.current) return;
+    if (!byKey.current) return void save({ enabled, minutes: value });
+    // Arrow keys change a closed list at every step. Wait for the keys to stop, or for focus
+    // to leave, so that going from 15 minutes to 6 hours is saved and recorded once.
+    setPicked(value);
+    window.clearTimeout(pause.current);
+    pause.current = window.setTimeout(() => commit(value), KEY_PAUSE_MS);
   };
   return (
     <Panel
@@ -312,18 +364,25 @@ function SchedulePanel() {
       hint="How often Nyctr reads every source on its own. A change applies within a minute."
     >
       <div className="stack">
-        <div className="bar">
+        <div className="bar" aria-busy={saving}>
           <Switch
             label="Scheduled collection"
             checked={enabled}
-            disabled={demo || saving}
-            onChange={(on) => void save({ enabled: on, minutes: nearest })}
+            disabled={demo}
+            onChange={(on) => void save({ enabled: on, minutes: picked ?? nearest })}
           />
           <select
             aria-label="How often to collect"
-            value={minutes}
-            disabled={demo || saving || !enabled}
-            onChange={(e) => void save({ enabled, minutes: Number(e.target.value) })}
+            aria-disabled={saving || undefined}
+            value={picked ?? minutes}
+            disabled={demo || !enabled}
+            onKeyDown={(e) => {
+              if (STEP_KEYS.includes(e.key)) byKey.current = true;
+              else if (e.key === 'Enter') commit(picked);
+            }}
+            onPointerDown={() => (byKey.current = false)}
+            onBlur={() => commit(picked)}
+            onChange={(e) => pick(Number(e.target.value))}
           >
             {!choices.includes(minutes) && <option value={minutes}>Every {span(minutes)}</option>}
             {choices.map((choice) => (
@@ -334,6 +393,11 @@ function SchedulePanel() {
           </select>
           <span className="aside">{nextCollection(schedule.data, now, 'Next collection ')}</span>
         </div>
+        {schedule.error && (
+          <InlineError
+            message={`${schedule.error} Nyctr could not read the schedule again, so what is shown here may be out of date.`}
+          />
+        )}
         <InlineError message={error} />
         {source === 'default' && (
           <p className="aside">Nobody has changed this yet, so Nyctr collects every 15 minutes.</p>

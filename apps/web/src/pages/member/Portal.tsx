@@ -139,7 +139,7 @@ function Home({ data }: { data: Data }) {
   const every = everyText(schedule);
   const comeBack = every
     ? `come back here in a while. Nyctr looks for new blocks ${every}.`
-    : schedule && user?.mode !== 'demo'
+    : schedule && !schedule.enabled && user?.mode !== 'demo'
       ? 'ask whoever runs Nyctr to collect. New blocks show up here only after that.'
       : 'come back here later.';
   const here = data.device.data;

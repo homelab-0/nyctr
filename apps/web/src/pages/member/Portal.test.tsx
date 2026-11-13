@@ -122,6 +122,18 @@ describe('member portal', () => {
     expect(screen.queryByText(/in a minute|in a while/)).toBeNull();
   });
 
+  it('names no interval when the schedule is on but the answer carries none', async () => {
+    open({ 'GET /collection': { enabled: true, next_at: null } });
+    expect(
+      await screen.findByText('If a page will not load, open it again, then come back here later.'),
+    ).toBeDefined();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText(/NaN|ask whoever runs Nyctr/)).toBeNull();
+    expect(
+      screen.getByText('If a page will not load, open it again, then come back here later.'),
+    ).toBeDefined();
+  });
+
   it('offers the console only to an administrator who opened the portal address', async () => {
     open({});
     await screen.findByRole('heading', { name: /blocked/i, level: 1 });
