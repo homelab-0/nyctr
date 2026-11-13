@@ -206,7 +206,7 @@ async def collect_pihole(integration_id: str, config: dict[str, Any], api_key: s
 
 
 PROVIDER = Provider(
-    id=ID, name="Pi-hole", letter="H", tone="rose", status="experimental",
+    id=ID, name="Pi-hole", letter="H", tone="rose", logo="pihole.svg", status="experimental",
     summary="A Pi-hole v6 resolver: the lookups it blocked recently and the client each came from.",
     secret_hint="The Pi-hole web password, or better an application password made for Nyctr.",
     fields=(

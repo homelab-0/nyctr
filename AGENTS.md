@@ -3,7 +3,9 @@
 Read README.md, docs/architecture/overview.md, docs/security-model.md and
 docs/roadmap.md before changing architectural behavior. Preserve the Nyctr console
 design: near-black ground, layered panels, one blue accent, Geist type. Colour
-names the source (each integration declares its tone). Line style names the
+names the source (each integration declares its tone). A source's chip may show
+that source's own logo on a neutral tile; colour still names the source on lines
+and the Map. Line style names the
 evidence (solid observed, dashed configured, dotted inferred). Hatching means
 unknown or not collected. Tokens live in `apps/web/src/styles/base.css`. Write
 interface text in plain words a non-technical member can read.

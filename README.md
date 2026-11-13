@@ -317,5 +317,6 @@ feature proposals. Report vulnerabilities using [SECURITY.md](SECURITY.md).
 ## License
 
 Nyctr's source code is licensed under [Apache-2.0](LICENSE). Third-party product
-names and marks belong to their respective owners. Nyctr is an independent project
-and is not affiliated with the vendors it integrates with.
+names and logos, including those shown for each source in the console, belong to
+their respective owners. Nyctr is an independent project and is not affiliated
+with the vendors it integrates with.

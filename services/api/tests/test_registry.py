@@ -1,5 +1,7 @@
 """The integration contract: the core asks for capabilities and never names a vendor."""
 
+import base64
+import dataclasses
 import re
 from pathlib import Path
 
@@ -61,6 +63,73 @@ def test_the_console_never_names_a_vendor():
             if VENDOR.search(line):
                 offenders.append(f"{path.relative_to(WEB)}:{number}: {line.strip()[:80]}")
     assert offenders == []
+
+
+def test_every_shipped_integration_declares_its_own_logo_file():
+    """Each logo is a file in the folder beside the integrations, listed with where it came from."""
+    listed = (registry.LOGOS / "SOURCES.md").read_text()
+    declared = {provider.logo for provider in registry.providers().values()}
+    assert "" not in declared and len(declared) == len(registry.providers())
+    assert declared == {path.name for path in registry.LOGOS.iterdir()} - {"SOURCES.md"}
+    for provider in registry.providers().values():
+        kind, _, encoded = provider.describe("none")["logo"].partition(";base64,")
+        assert kind == {"png": "data:image/png", "svg": "data:image/svg+xml"}[provider.logo[-3:]]
+        assert base64.b64decode(encoded, validate=True) == (registry.LOGOS / provider.logo).read_bytes()
+        assert f"`{provider.logo}`" in listed
+    assert _fake_resolver().describe("none")["logo"] == ""  # no declaration means the letter
+
+
+@pytest.mark.parametrize("name, content", [
+    ("mark.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+    ("mark.svg", b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'),
+    ("mark.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)"/></svg>'),
+    ("mark.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><p/></foreignObject></svg>'),
+    ("mark.svg", b"<html><body>not a picture</body></html>"),
+    ("mark.png", b'<svg xmlns="http://www.w3.org/2000/svg"/>'),
+    ("mark.png", b""),
+    ("mark.svg", b'<svg xmlns="http://www.w3.org/2000/svg">' + b" " * 100_000 + b"</svg>"),
+    ("mark.html", b"<script>alert(1)</script>"),
+    ("../mark.svg", b'<svg xmlns="http://www.w3.org/2000/svg"/>'),
+    ("https://logos.example/mark.svg", b""),
+    ("missing.svg", None),
+])
+def test_a_logo_must_be_a_plain_image_file_in_the_logos_folder(tmp_path, monkeypatch, name, content):
+    """Script, markup, other file types, other folders and web addresses are refused before anything is sent."""
+    folder = tmp_path / "logos"
+    folder.mkdir()
+    if content is not None and "/" not in name:
+        (folder / name).write_bytes(content)
+    (tmp_path / "mark.svg").write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+    monkeypatch.setattr(registry, "LOGOS", folder)
+    registry.logo_uri.cache_clear()
+    with pytest.raises((ValueError, OSError)):
+        registry.logo_uri(name)
+    registry.logo_uri.cache_clear()
+
+
+def test_an_integration_with_an_unusable_logo_stops_the_registry(monkeypatch):
+    """A declaration naming a logo that cannot be shown is a broken contract, not a silent gap."""
+    import nyctr.integrations.pihole as module
+
+    monkeypatch.setattr(module, "PROVIDER", dataclasses.replace(module.PROVIDER, logo="nowhere.svg"))
+    monkeypatch.setattr(registry, "_cache", None)
+    with pytest.raises(RuntimeError, match="unusable logo"):
+        registry.providers()
+
+
+def test_logos_reach_the_console_only_inside_the_signed_in_catalog(client):
+    """No address serves a logo file: the picture travels in the administrator's catalog and nowhere else."""
+    assert client.get("/api/integrations/catalog").status_code == 401
+    for path in ("/api/integrations/logos/pihole.svg", "/api/logos/pihole.svg", "/logos/pihole.svg",
+                 "/integrations/logos/pihole.svg"):
+        response = client.get(path)
+        assert response.status_code in (401, 404) and "image" not in response.headers.get("content-type", "")
+    client.post("/api/auth/login", json={"email": "admin@nyctr.demo", "password": "nyctr-demo"})
+    response = client.get("/api/integrations/catalog")
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    for row in response.json()["providers"]:
+        assert re.fullmatch(r"data:image/(png|svg\+xml);base64,[A-Za-z0-9+/]+=*", row["logo"])
 
 
 def test_catalog_lists_what_each_integration_adds(client, admin_headers, member_headers):

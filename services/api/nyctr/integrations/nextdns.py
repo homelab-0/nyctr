@@ -239,7 +239,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
 
 
 PROVIDER = Provider(
-    id=ID, name="NextDNS", letter="N", tone="teal",
+    id=ID, name="NextDNS", letter="N", tone="teal", logo="nextdns.png",
     summary="One DNS profile: its filtering settings and the lookups it blocked recently.",
     secret_hint="A NextDNS API key from your account page.",
     fields=(

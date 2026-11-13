@@ -252,7 +252,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
 
 
 PROVIDER = Provider(
-    id=ID, name="UniFi Network", letter="U", tone="blue",
+    id=ID, name="UniFi Network", letter="U", tone="blue", logo="unifi.png",
     summary="Gateways, switches, access points, clients, networks, firewall rules and guest Wi-Fi.",
     secret_hint="A UniFi Network API key. Read access is enough unless you allow changes.",
     fields=(

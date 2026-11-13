@@ -87,6 +87,8 @@ export interface CatalogProvider {
   summary: string;
   letter: string;
   tone: string;
+  /** The source's own logo as an image `data:` address; empty when it declared none. */
+  logo?: string;
   status: string;
   secret_hint: string;
   fields: {
