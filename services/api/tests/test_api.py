@@ -281,3 +281,28 @@ def test_concurrent_password_attempts_cannot_bypass_atomic_quota(tmp_path):
             statuses = list(workers.map(attempt, range(24)))
         assert statuses.count(401) == 10
         assert statuses.count(429) == 14
+
+
+def test_overview_names_what_it_counts_and_the_span_of_stored_blocks(client, admin_headers):
+    """Counts come per kind and agree with the inventory; blocked lookups carry the span they cover."""
+    overview = client.get("/api/overview").json()
+    resources = client.get("/api/resources").json()
+    kinds = {}
+    for row in resources:
+        kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
+    assert overview["kind_counts"] == kinds
+    assert sum(overview["kind_counts"].values()) == overview["resource_count"] == len(resources)
+    times = sorted(block["observed_at"] for block in client.get("/api/blocks").json())
+    assert overview["recent_block_count"] == len(times) > 1
+    assert (overview["oldest_block_at"], overview["newest_block_at"]) == (times[0], times[-1])
+
+
+def test_overview_span_is_empty_when_no_blocked_lookup_is_stored(client, app, admin_headers):
+    """With nothing stored the span is absent rather than a made-up window."""
+    with app.state.session_factory() as db:
+        db.query(AccessRequest).delete()
+        db.query(Observation).delete()
+        db.commit()
+    overview = client.get("/api/overview").json()
+    assert overview["recent_block_count"] == 0
+    assert overview["oldest_block_at"] is None and overview["newest_block_at"] is None

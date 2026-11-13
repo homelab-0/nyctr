@@ -244,13 +244,23 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/overview")
     def overview(_user=Depends(admin), db: Session = Depends(get_db)):
-        """Return administrator workspace counts, excluding expired blocks from the recent total."""
+        """Return administrator workspace counts, excluding expired blocks from the recent total.
+
+        Inventory is counted per kind so the console can name what it counts, and
+        the stored blocked lookups carry the span they cover: the oldest and newest
+        lookup kept, not a fixed window.
+        """
         def count(model):
             """Count all persisted rows of one overview model within the current session."""
             return db.scalar(select(func.count()).select_from(model))
-        return {"resource_count": count(Resource), "relationship_count": count(Relationship),
-                "finding_count": count(Finding), "recent_block_count": db.scalar(
-                    select(func.count()).select_from(Observation).where(Observation.expires_at > utcnow())),
+        live = Observation.expires_at > utcnow()
+        blocks, oldest, newest = db.execute(select(func.count(), func.min(Observation.observed_at),
+                                                   func.max(Observation.observed_at)).where(live)).one()
+        kinds = dict(db.execute(select(Resource.kind, func.count()).group_by(Resource.kind)).all())
+        return {"resource_count": count(Resource), "kind_counts": kinds,
+                "relationship_count": count(Relationship), "finding_count": count(Finding),
+                "recent_block_count": blocks, "oldest_block_at": oldest and utc(oldest),
+                "newest_block_at": newest and utc(newest),
                 "integration_count": count(Integration), "mode": settings.mode}
 
     @app.get("/api/resources")
@@ -324,7 +334,7 @@ def create_app(settings: Settings | None = None):
                           secret_ref=body.secret_ref, capabilities=capabilities_for(body.provider))
         db.add(row)
         db.flush()
-        audit(db, user.id, "integration.created", row.id, provider=row.provider)
+        audit(db, user.id, "integration.created", row.id, provider=row.provider, name=row.name)
         db.commit()
         return integration_json(row)
 
@@ -361,7 +371,7 @@ def create_app(settings: Settings | None = None):
         try:
             report = await diagnose_integration(integration.provider, integration_id,
                                                 integration.config, integration.secret_ref)
-            audit(db, user.id, "integration.diagnosed", integration_id, outcome=report.outcome,
+            audit(db, user.id, "integration.diagnosed", integration_id, name=integration.name, outcome=report.outcome,
                   failures=[check.category for check in report.checks if check.status == "failed"],
                   snapshot_counts=report.snapshot_counts.model_dump() if report.snapshot_counts else None,
                   imported=False)

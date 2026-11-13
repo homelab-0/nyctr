@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useApi } from '../api';
 import { Empty, ErrorState, Loading, Panel, SearchInput } from '../components/ui';
-import type { AuditEvent, Person } from '../types';
+import { counted } from '../lib/counts';
+import type { AuditEvent, Integration, Person } from '../types';
 
 const WORDS: Record<string, string> = {
   'auth.login': 'Signed in',
@@ -23,17 +24,36 @@ const WORDS: Record<string, string> = {
   'guest.lock': 'Locked a guest out',
   'device.assignment_changed': 'Changed who a device belongs to',
   'device.link_changed': 'Linked a DNS device label',
-  'integration.created': 'Added a source',
-  'integration.collected': 'Collected from a source',
-  'integration.collection_failed': 'Collection failed',
   'collection.schedule_changed': 'Changed the collection schedule',
-  'integration.diagnosed': 'Tested a source',
   'suggestion.dismissed': 'Dismissed a suggestion',
   'graph.queried': 'Ran a graph query',
   'assistant.asked': 'Asked the assistant',
   'assistant.insight': 'Asked for a finding insight',
   'demo.guest_activity': 'Simulated guest activity',
 };
+
+/** Rows about one source, worded around its name. */
+const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
+  'integration.created': (name) => `Added the source ${name}`,
+  'integration.collected': (name) => `Collected from ${name}`,
+  'integration.collection_failed': (name) => `Could not collect from ${name}`,
+  'integration.diagnosed': (name) => `Tested ${name}`,
+};
+
+/**
+ * What a row says happened. A source is named as the audit record kept it, else by its current
+ * name, else as removed; never by its id.
+ */
+function what(event: AuditEvent, sources: Map<string, string>) {
+  const about = ABOUT_A_SOURCE[event.action];
+  if (!about) return WORDS[event.action] || event.action;
+  const kept = event.details?.name;
+  return about(
+    typeof kept === 'string' && kept
+      ? kept
+      : sources.get(event.target_id) || 'a source since removed',
+  );
+}
 
 /** Renders the few audit details worth reading, never raw provider text. */
 function summary(event: AuditEvent) {
@@ -43,7 +63,9 @@ function summary(event: AuditEvent) {
   if (typeof d.execution === 'string') parts.push(String(d.execution).replace('_', ' '));
   if (d.by_rule === true || d.decided_by === 'rule') parts.push('by a written rule');
   if (typeof d.minutes === 'number') parts.push(`${d.minutes} min`);
-  if (typeof d.resources === 'number') parts.push(`${d.resources} items`);
+  if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
+  if (typeof d.observations === 'number') parts.push(counted(d.observations, 'blocked lookup'));
+  if (d.partial === true) parts.push('most recent only');
   if (typeof d.reason === 'string' && d.reason) parts.push(d.reason);
   return parts.join(' · ');
 }
@@ -52,18 +74,23 @@ function summary(event: AuditEvent) {
 export default function Activity() {
   const audit = useApi<AuditEvent[]>('/audit');
   const people = useApi<Person[]>('/users');
+  const sources = useApi<Integration[]>('/integrations');
   const [text, setText] = useState('');
   const names = useMemo(
     () => new Map((people.data || []).map((p) => [p.id, p.name])),
     [people.data],
   );
+  const sourceNames = useMemo(
+    () => new Map((sources.data || []).map((source) => [source.id, source.name])),
+    [sources.data],
+  );
   const rows = useMemo(() => {
     const needle = text.trim().toLowerCase();
     return (audit.data || []).filter((event) => {
-      const line = `${WORDS[event.action] || event.action} ${names.get(event.actor_id) || ''} ${summary(event)} ${event.target_id || ''}`;
+      const line = `${what(event, sourceNames)} ${names.get(event.actor_id) || ''} ${summary(event)} ${event.target_id || ''}`;
       return !needle || line.toLowerCase().includes(needle);
     });
-  }, [audit.data, text, names]);
+  }, [audit.data, text, names, sourceNames]);
   if (audit.loading) return <Loading text="Loading activity…" />;
   if (audit.error) return <ErrorState message={audit.error} retry={audit.reload} />;
   return (
@@ -107,7 +134,7 @@ export default function Activity() {
                         <span className="tag">Nyctr</span>
                       )}
                     </td>
-                    <th>{WORDS[event.action] || event.action}</th>
+                    <th>{what(event, sourceNames)}</th>
                     <td className="muted">{summary(event)}</td>
                   </tr>
                 ))}

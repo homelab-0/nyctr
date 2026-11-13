@@ -397,9 +397,14 @@ export interface AuditEvent {
 }
 export interface Overview {
   resource_count: number;
+  /** Stored inventory per kind, so each count can be named. */
+  kind_counts: Record<string, number>;
   relationship_count: number;
   finding_count: number;
   recent_block_count: number;
+  /** The oldest and newest stored blocked lookup: the span the count actually covers. */
+  oldest_block_at: string | null;
+  newest_block_at: string | null;
   integration_count: number;
   mode: Mode;
 }

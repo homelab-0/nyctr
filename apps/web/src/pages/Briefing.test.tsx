@@ -6,11 +6,14 @@ import type { CollectionSchedule, Integration, Overview } from '../types';
 import Briefing from './Briefing';
 
 const overview: Overview = {
-  resource_count: 3,
+  resource_count: 1294,
+  kind_counts: { client: 12, gateway: 1, switch: 2, network: 3, site: 1, policy: 4, domain: 1271 },
   relationship_count: 2,
   finding_count: 0,
-  recent_block_count: 30,
-  integration_count: 3,
+  recent_block_count: 4000,
+  oldest_block_at: new Date(Date.now() - (9 * 60 + 25) * 60_000).toISOString(),
+  newest_block_at: new Date(Date.now() - 12 * 60_000).toISOString(),
+  integration_count: 2,
   mode: 'live',
 };
 
@@ -160,5 +163,18 @@ describe('briefing sources', () => {
     await pass(30);
     expect(count('/collection')).toBe(10);
     expect(screen.getByText('Next collection within a minute')).toBeDefined();
+  });
+});
+
+describe('Briefing counts', () => {
+  it('names each kind with its own count and says the span the stored lookups cover', async () => {
+    await open([source('fine', 'connected')]);
+    const lede = await screen.findByText(/12 devices/);
+    expect(lede.textContent).toBe(
+      '12 devices, 3 pieces of network equipment, 3 networks, 4 rules and 1,271 blocked addresses ' +
+        'from 2 sources. 4,000 blocked lookups stored, going back to 9 hr ago (newest 12 min ago).',
+    );
+    // No mixed total and no fixed window.
+    expect(lede.textContent).not.toMatch(/1,?294|items|last day/);
   });
 });

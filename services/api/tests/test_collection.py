@@ -149,6 +149,8 @@ def test_busy_source_is_stored_and_audited_as_partial_not_as_an_error(tmp_path, 
         action, details = collection_audits(client, id_)[-1]
         assert action == "integration.collected"
         assert details["partial"] is True and details["rows_kept"] == 30 and details["observations"] == 30
+        # The record keeps the name the source had, so Activity can say which source it was after a rename.
+        assert details["name"] == "DNS"
 
 
 def test_complete_collection_is_connected_and_audited_as_not_partial(tmp_path, monkeypatch):
@@ -180,7 +182,10 @@ def test_refused_credential_after_rows_were_read_fails_and_stores_none_of_them(t
         assert source["last_sync"] is None
         assert client.get("/api/blocks").json() == []
         assert client.get("/api/resources").json() == []
-        assert [action for action, _ in collection_audits(client, id_)] == ["integration.collection_failed"]
+        assert collection_audits(client, id_) == [("integration.collection_failed", {"name": "DNS"})]
+        with client.app.state.session_factory() as db:
+            added = db.scalar(select(Audit).where(Audit.action == "integration.created", Audit.target_id == id_))
+            assert added.details == {"provider": "nextdns", "name": "DNS"}
 
 
 def test_sync_requires_configured_secret(tmp_path):

@@ -163,6 +163,7 @@ def test_verified_reads_do_not_persist_snapshot_or_replace_collection_health(sav
     assert KEY not in audit.text and SOURCE_TEXT not in audit.text
     event = next(row for row in audit.json() if row["action"] == "integration.diagnosed")
     assert event["details"]["imported"] is False
+    assert event["details"]["name"] == client.get("/api/integrations").json()[0]["name"]
     assert event["details"]["snapshot_counts"] == report["snapshot_counts"]
     assert len(calls) == 2
 

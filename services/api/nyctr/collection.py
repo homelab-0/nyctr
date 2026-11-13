@@ -197,7 +197,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
             apply_snapshot(db, integration, snapshot, settings)
             partial = snapshot.partial_rows is not None
-            audit(db, actor, "integration.collected", integration.id,
+            audit(db, actor, "integration.collected", integration.id, name=integration.name,
                   resources=len(snapshot.resources), observations=len(snapshot.blocks),
                   partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}))
             db.commit()
@@ -208,7 +208,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             integration.last_error = (str(exc) if isinstance(exc, IntegrationError)
                                       else "Collection failed. Check provider reachability and configuration.")
             integration.sync_started_at = None
-            audit(db, actor, "integration.collection_failed", integration.id)
+            audit(db, actor, "integration.collection_failed", integration.id, name=integration.name)
             db.commit()
             return None, integration.last_error
         return snapshot, None
