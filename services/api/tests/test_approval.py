@@ -9,7 +9,8 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
+from sqlalchemy.orm import Session
 from test_crossing import DOMAIN, Source, ask, claims, console, started
 from test_unconfirmed import Failing, rows, trail
 from test_upkeep import Sources, opened, upkeep
@@ -916,3 +917,91 @@ def test_one_pass_settles_a_record_and_ends_the_exception_it_passed_the_entry_to
 
         asyncio.run(scenario())
         assert words(app) == ["kept_for_another", "removed"] and source.listed == [] and claims(app) == []
+
+
+@pytest.mark.parametrize("fails", ["while the exception is stored", "at the commit"])
+@pytest.mark.parametrize("path", ["approval", "access rule", "suggestion"])
+def test_an_entry_the_source_accepted_stays_on_record_wherever_storing_fails(tmp_path, monkeypatch, path, fails):
+    """The add is accepted and confirmed, and storing the exception then fails, inside the opening or at the
+    commit that follows it, on each of the three ways an exception is opened. The attempt's record is never lost:
+    the entry is removed, at once or by the tick once the hold has run out."""
+    with started(tmp_path, rule=path == "access rule") as (app, _client, member, admin):
+        source, now, real = Source(monkeypatch), [utcnow()], access.audit
+
+        def no_opening(db, actor, action, *more, **details):
+            if action == "access.opened":
+                raise RuntimeError("fabricated storage failure")
+            return real(db, actor, action, *more, **details)
+
+        def no_commit(session):  # The commit that would store the exception.
+            if session.scalar(select(Lease.id).where(Lease.status == "active")):
+                raise RuntimeError("fabricated storage failure")
+
+        async def scenario():
+            Sources(monkeypatch)
+            async with console(app, member) as sam, console(app, admin) as owner:
+                if path == "approval":
+                    made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                elif path == "suggestion":
+                    with app.state.session_factory() as db:  # The rule opened it before, so it is suggested.
+                        db.add(Lease(integration_id="dns", domain=DOMAIN, decided_by="rule", status="ended"))
+                        db.commit()
+                if fails == "at the commit":
+                    event.listen(Session, "before_commit", no_commit)
+                else:
+                    monkeypatch.setattr(access, "audit", no_opening)
+                try:
+                    with pytest.raises(RuntimeError):
+                        if path == "approval":
+                            await review(owner, made)
+                        elif path == "access rule":
+                            await sam.post("/api/requests", json=ask("one"))
+                        else:
+                            await owner.post("/api/suggestions", json={"domain": DOMAIN, "action": "make_permanent"})
+                finally:
+                    if fails == "at the commit":
+                        event.remove(Session, "before_commit", no_commit)
+                assert "POST" in source.calls and [row[0] for row in rows(app) if row[0] == "active"] == []
+                assert [row[0] for row in rows(app)].count("unconfirmed") == (source.listed == [DOMAIN])
+                age(app, "ending:")  # Where the claim was left held, the hold runs out.
+                up, now[0] = upkeep(app, now), utcnow() + access.ENDING_HOLD + timedelta(seconds=1)
+                up.tick()
+                await asyncio.gather(*up.ending.values())
+                await up.stop()
+
+        asyncio.run(scenario())
+        assert source.listed == [] and source.calls.count("DELETE") == 1
+        assert [(row[0], row[1]) for row in rows(app) if row[1] != None] == [("ended", "not_confirmed")]  # noqa: E711
+
+
+def test_an_automatic_opening_whose_turn_was_taken_over_stores_nothing_and_its_entry_is_removed(tmp_path,
+                                                                                               monkeypatch):
+    """It stood still past the hold with its add accepted, and the person's turn went to another attempt: the
+    day's count is no longer its own to rely on. Nothing is stored, a person decides, and the entry it added
+    stays on record and is removed."""
+    with started(tmp_path, rule=True) as (app, _client, member, _admin):
+        source, now = Source(monkeypatch, hold=(2, "after")), [utcnow()]
+
+        async def scenario():
+            Sources(monkeypatch)
+            async with console(app, member) as sam:
+                asking = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
+                await asyncio.wait_for(source.reached.wait(), 5)
+                age(app, "ending:auto:")
+                with app.state.session_factory() as other:  # Another attempt takes the person's turn over.
+                    turn = other.scalar(select(Setting.key).where(Setting.key.startswith("ending:auto:")))
+                    theirs = access._claim(other, turn)
+                    assert theirs
+                    source.go.set()
+                    made = (await asking).json()
+                    access.release_entry(other, theirs)
+                assert made["status"] == "pending" and "took too long" in made["decision_note"]
+                assert rows(app) == [("unconfirmed", None, True)] and source.listed == [DOMAIN]
+                up, now[0] = upkeep(app, now), utcnow() + timedelta(seconds=1)
+                up.tick()
+                await asyncio.gather(*up.ending.values())
+                await up.stop()
+
+        asyncio.run(scenario())
+        assert source.listed == [] and rows(app) == [("ended", "not_confirmed", True)]
+        assert claims(app) == [] and gates(app) == []

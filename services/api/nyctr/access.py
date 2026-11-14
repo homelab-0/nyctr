@@ -176,6 +176,22 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     else:
         mode = settings.write_mode(integration.provider) if opener else "disabled"
     execution, owned, sent, added = "not_applied", False, False, None
+
+    def store() -> Lease:
+        now = utcnow()
+        lease = Lease(request_id=request_id, integration_id=integration.id if integration else None, domain=domain,
+                      device_name=device_name, requester_id=requester_id,
+                      kind="temporary" if minutes else "permanent", execution=execution, owned=owned,
+                      scope=_scope(integration), decided_by=decided_by, risk_score=risk_score, created_at=now,
+                      expires_at=now + timedelta(minutes=minutes) if minutes else None)
+        db.add(lease)
+        db.flush()
+        audit(db, None if decided_by == "rule" else decided_by, "access.opened", lease.id, domain=domain,
+              execution=execution, owned=owned, minutes=minutes, decided_by=decided_by)
+        if claim:
+            db.execute(delete(Lease).where(Lease.id == claim.record))  # The stored lease replaces the record.
+        return lease
+
     if mode == "simulated":
         execution, owned = "simulated", True
     elif mode == "enabled":
@@ -201,24 +217,14 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
             if not _give_back(db, claim):
                 raise TakenOver(f"Nyctr took too long to open {domain} at {about[0]}, and another change to it "
                                 "went ahead. Nothing was opened.", category="configuration")
+            # Stored in here: if storing fails, the add was still accepted, so its record must be kept.
+            return store()
         except BaseException as error:  # Failed, refused or stopped: no lease, and the claim goes back now.
             if claim:
                 db.rollback()
                 await _not_confirmed(db, settings, claim, error, sent, added)
             raise
-    now = utcnow()
-    lease = Lease(request_id=request_id, integration_id=integration.id if integration else None, domain=domain,
-                  device_name=device_name, requester_id=requester_id,
-                  kind="temporary" if minutes else "permanent", execution=execution, owned=owned,
-                  scope=_scope(integration), decided_by=decided_by, risk_score=risk_score, created_at=now,
-                  expires_at=now + timedelta(minutes=minutes) if minutes else None)
-    db.add(lease)
-    db.flush()
-    audit(db, None if decided_by == "rule" else decided_by, "access.opened", lease.id, domain=domain,
-          execution=execution, owned=owned, minutes=minutes, decided_by=decided_by)
-    if claim:
-        db.execute(delete(Lease).where(Lease.id == claim.record))  # The stored lease replaces the record.
-    return lease
+    return store()
 
 
 async def _not_confirmed(db: Session, settings: Settings, claim: Claim, error: BaseException, sent: bool,
@@ -741,10 +747,15 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                                       decision_note=f"Opened for {minutes} minutes by the access rule.")).rowcount != 1:
                     db.rollback()
                     return release_entry(db, claim, unstored=True)
-                _give_back(db, turn)  # With the commit that stores the lease, so the next one counts it.
-                _give_back(db, gate)
-                turn = gate = None
-                return db.refresh(row)
+                if _give_back(db, turn):  # With the commit that stores the lease, so the next one counts it.
+                    _give_back(db, gate)
+                    turn = gate = None
+                    return db.refresh(row)
+                # The turn was taken over while this stood still, so the day's count may have moved on without
+                # it: nothing is stored, and what was added stays on record to be removed.
+                db.rollback()
+                turn = release_entry(db, claim, unstored=True)
+                why = "Nyctr took too long to open this by itself, so a person decides."
         except SourceGone as error:
             error.record(db)
             why = f"{error} A person decides."
@@ -752,6 +763,9 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             why = f"{error} A person decides."
         except IntegrationError:
             why = f"Nyctr could not change {name} just now, so a person decides."
+        except BaseException:  # Unexpected: nothing half done is stored when the claims are given back below.
+            db.rollback()
+            raise
         finally:
             release_entry(db, turn)
             if gate:
