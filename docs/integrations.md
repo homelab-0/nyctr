@@ -72,6 +72,14 @@ also refused while a collection or diagnostic of the source is running, and in
 demo mode. Adding a source again, for the same place or another, starts from
 nothing: no device, assignment, label link, guest state or finding comes back.
 
+If a source is removed while Nyctr is opening an exception or issuing a guest
+pass there, Nyctr takes back what it just added, at the place the call used, and
+says so. If that fails, the exception stays under Open now with what to remove
+by hand; Nyctr cannot reach it any more, so it is not retried, and **I removed
+it by hand** ends it once that is done. A guest let on, cut off or locked out
+during the removal is not undone: the activity history records what was done
+at which source.
+
 ## Connection diagnostics
 
 On a saved live-mode integration, **Run diagnostics** performs the same bounded

@@ -207,6 +207,8 @@ export interface Lease {
   expires_at: string | null;
   ended_at: string | null;
   last_error: string | null;
+  /** Its source was removed, so Nyctr cannot reach the entry; an administrator removes it by hand. */
+  source_removed?: boolean;
 }
 export interface Suggestion {
   domain: string;

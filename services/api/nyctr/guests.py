@@ -249,13 +249,38 @@ def _read_only(name: str) -> str:
     return f"Nyctr is read-only for {name}. An operator must allow changes to it first."
 
 
+class SourceRemoved(Exception):
+    """A guest action's source was removed while the call was in flight. Its audit record is written; the
+    caller commits it and tells the administrator in these words."""
+
+
+def _source_removed(db: Session, device: Resource, action: str, actor: str, reason: str, name: str,
+                    execution: str) -> SourceRemoved:
+    """Record what was done at a source removed during the call, leaving the device row (gone with it) alone.
+
+    A cut or lock-out is not undone: the record and the sentence say where it stands.
+    """
+    device_id, device_name = device.id, device.name
+    db.expunge(device)
+    stands = {"cut": f"{device_name} stays cut off there; let it back on in that source's own console if needed",
+              "lock": f"{device_name} stays locked out there; unlock it in that source's own console if needed",
+              "restore": f"{device_name} stays let on there until its time ends, and Nyctr can no longer cut it off",
+              "admit": f"{device_name} stays let on there until its time ends, and Nyctr can no longer cut it off",
+              }[action] if execution == "applied" else "The change did not go through, so nothing changed there"
+    audit(db, None if actor == "rule" else actor, f"guest.{action}", device_id, execution=execution,
+          by_rule=actor == "rule", reason=reason[:200], source=name, device=device_name, source_removed=True)
+    return SourceRemoved(f"{name} was removed while Nyctr was changing {device_name}'s access there. {stands}.")
+
+
 async def apply_action(db: Session, settings: Settings, device: Resource, action: str, actor: str,
                        reason: str, minutes: int | None = None) -> GuestAction:
     """Carry out one guest action in the current write mode and record exactly what happened.
 
     `admit` authorises a waiting device for a stated time from the management
     side, which ties the grant to that exact device without any page being
-    served to it. The device's own source carries the action out.
+    served to it. The device's own source carries the action out. After the call
+    the source row is locked; if the source was removed meanwhile, SourceRemoved
+    is raised with the record written.
     """
     from .integrations import IntegrationError
 
@@ -278,8 +303,12 @@ async def apply_action(db: Session, settings: Settings, device: Resource, action
         # may reject removing access from a guest that holds none.
         record.execution = "applied"
     elif mode == "enabled":
+        from .access import source_held
+
+        name = None
         try:
             integration, site, key = _target(db, device)
+            name = integration.name
             if not key:
                 raise IntegrationError(f"The secret for {integration.name} is not configured on the server.")
             if action == "restore":
@@ -291,10 +320,13 @@ async def apply_action(db: Session, settings: Settings, device: Resource, action
             await provider.guest_access(integration.config, key, site, device.source_id, allow,
                                         minutes=minutes, allowed=True)
             record.execution = "applied"
-            _set_grant(device, authorized=allow, **(granted(minutes) if action == "admit" else {}))
         except (IntegrationError, HTTPException) as error:
             record.execution = "failed"
             record.error = str(error.detail if isinstance(error, HTTPException) else error)[:300]
+        if name is not None and not source_held(db, device.integration_id):
+            raise _source_removed(db, device, action, actor, reason, name, record.execution)
+        if record.execution == "applied":
+            _set_grant(device, authorized=allow, **(granted(minutes) if action == "admit" else {}))
     else:
         record.execution = "not_applied"
     db.add(record)
@@ -330,17 +362,28 @@ def evaluate_rule(db: Session, settings: Settings) -> list[tuple[str, str]]:
 
 
 async def enforce(db: Session, settings: Settings, due: list[tuple[str, str]]) -> int:
-    """Cut off devices the rule named and re-cut locked devices that were let back on elsewhere."""
+    """Cut off devices the rule named and re-cut locked devices that were let back on elsewhere.
+
+    Each action is committed on its own, so no source or device row is held into the next device's call,
+    and a source removed during one call is recorded and skips only that device.
+    """
+    async def act_on(device_id: str, action: str, reason: str) -> int:
+        device = db.get(Resource, device_id)
+        if not device:
+            return 0
+        try:
+            await apply_action(db, settings, device, action, "rule", reason)
+        except SourceRemoved:
+            pass  # recorded; the rest of the pass goes on
+        db.commit()
+        return 1
+
     count = 0
     for device_id, reason in due:
-        device = db.get(Resource, device_id)
-        if device:
-            await apply_action(db, settings, device, "cut", "rule", reason)
-            count += 1
-    for device in guest_devices(db):
-        if state_of(device, _actions(db, device.id)) == "locked" and _grant(device).get("authorized"):
-            await apply_action(db, settings, device, "lock", "rule", "Locked device was authorised again")
-            count += 1
+        count += await act_on(device_id, "cut", reason)
+    for device_id in [device.id for device in guest_devices(db)
+                      if state_of(device, _actions(db, device.id)) == "locked" and _grant(device).get("authorized")]:
+        count += await act_on(device_id, "lock", "Locked device was authorised again")
     from .analysis import refresh_findings
 
     refresh_findings(db)
@@ -452,7 +495,8 @@ async def issue_pass(body: PassInput, request: Request, user=Depends(admin), db:
         integration, site, key = _target(db, integration)
         if not key:
             raise HTTPException(409, f"The secret for {integration.name} is not configured on the server.")
-        used = (dict(integration.config), integration.secret_ref)
+        from .access import source_unchanged, where_it_reads
+        config, place, name = dict(integration.config), where_it_reads(integration), integration.name
         try:
             issued = await provider.issue_pass(integration.config, key, site, name=body.name,
                                                minutes=body.minutes, guest_limit=body.guest_limit,
@@ -460,9 +504,8 @@ async def issue_pass(body: PassInput, request: Request, user=Depends(admin), db:
         except IntegrationError as error:
             raise HTTPException(502, str(error)) from None
         row.voucher_id, row.code, row.execution = issued["id"], issued["code"][:64], "applied"
-        from .access import source_unchanged
-        if not source_unchanged(db, integration, used):
-            await _take_back_pass(db, provider, integration.name, used[0], key, site, row, user.id)
+        if not source_unchanged(db, integration, place):  # ends the transaction: nothing held during the undo
+            await _take_back_pass(db, provider, name, config, key, site, row, user.id)
     db.add(row)
     db.flush()
     audit(db, user.id, "guest.pass_issued", row.id, minutes=body.minutes, guest_limit=body.guest_limit,
@@ -475,6 +518,7 @@ async def _take_back_pass(db: Session, provider, name: str, config: dict, key: s
                           row: GuestPass, actor: str) -> None:
     """End a pass issued at a source that was removed or moved during the call, at the place the call used.
 
+    Called with no transaction open.
     Always raises 409. A pass that could not be ended is kept as live, so it stays listed, and the
     record says the undo failed.
     """
@@ -490,11 +534,11 @@ async def _take_back_pass(db: Session, provider, name: str, config: dict, key: s
         target = row.id
     audit(db, actor, "guest.pass_undone", target, source=name, execution="applied" if undone else "failed")
     db.commit()
+    went = f"{name} was removed or now reads from somewhere else while the pass was being issued"
     if undone:
-        raise HTTPException(409, f"{name} was removed or changed while the pass was being issued, so Nyctr "
-                                 "ended that pass again. No pass was issued.")
-    raise HTTPException(409, f"{name} was removed or changed while the pass was being issued, and Nyctr could "
-                             "not end that pass. End it at that source by hand; it stays listed here.")
+        raise HTTPException(409, f"{went}, so Nyctr ended that pass again. No pass was issued.")
+    raise HTTPException(409, f"{went}, and Nyctr could not end that pass. End it at that source by hand; it stays "
+                             "listed here.")
 
 
 @router.post("/guests/passes/{pass_id}/end")
@@ -539,8 +583,12 @@ async def act(body: ActionInput, request: Request, user=Depends(admin), db: Sess
         raise HTTPException(409, _read_only(registry.name_of(device.provider)))
     if body.action == "admit" and state_of(device, _actions(db, device.id)) != "waiting":
         raise HTTPException(409, "Only a device that is connected and waiting can be let on from here.")
-    record = await apply_action(db, settings, device, body.action, user.id, body.reason,
-                                body.minutes or 240 if body.action == "admit" else None)
+    try:
+        record = await apply_action(db, settings, device, body.action, user.id, body.reason,
+                                    body.minutes or 240 if body.action == "admit" else None)
+    except SourceRemoved as error:
+        db.commit()
+        raise HTTPException(409, str(error)) from None
     from .analysis import refresh_findings
 
     refresh_findings(db)

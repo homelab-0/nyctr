@@ -61,18 +61,39 @@ def _opener(integration: Integration | None):
     return provider if provider and "dns.exceptions" in provider.provides else None
 
 
-def source_unchanged(db: Session, integration: Integration, used: tuple[dict, str]) -> bool:
-    """After a provider call returns, lock the source row and say whether it is still the source the call used.
+def where_it_reads(integration: Integration) -> tuple[dict, str]:
+    """What says where a source reads: its settings other than numbers, and its secret name.
 
-    Taken only after the call, never across it. A removal, or an edit that moved the source, then either
-    waits for this transaction (and sees what Nyctr now has there) or has already happened and is seen here.
+    A number (how many hours of lookups, say) changes what is read, not where, so it never moves a source.
     """
-    held = db.execute(update(Integration).where(Integration.id == integration.id)
-                      .values(name=Integration.name).execution_options(synchronize_session=False)).rowcount
-    if held != 1:
-        return False
-    db.refresh(integration)
-    return (integration.config, integration.secret_ref) == used
+    provider = registry.find(integration.provider)
+    numbers = {field.key for field in provider.fields if field.kind == "number"} if provider else set()
+    return {key: value for key, value in (integration.config or {}).items() if key not in numbers}, \
+        integration.secret_ref
+
+
+def source_held(db: Session, integration_id: str) -> bool:
+    """Lock the source row until this transaction ends, and say whether it still exists.
+
+    Taken only after a provider call returns, never across one. A removal then either waits for this
+    transaction, and sees what Nyctr now has at the source, or has already happened and is seen here.
+    """
+    return db.execute(update(Integration).where(Integration.id == integration_id).values(name=Integration.name)
+                      .execution_options(synchronize_session=False)).rowcount == 1
+
+
+def source_unchanged(db: Session, integration: Integration, place: tuple[dict, str]) -> bool:
+    """After a provider call returns, say whether the source still exists and reads where the call wrote.
+
+    When it does, its row stays locked until the caller commits. When it does not, the transaction is
+    rolled back before returning, so no lock is held during the undo call that follows.
+    """
+    if source_held(db, integration.id):
+        db.refresh(integration)
+        if where_it_reads(integration) == place:
+            return True
+    db.rollback()
+    return False
 
 
 class SourceGone(IntegrationError):
@@ -123,11 +144,13 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
         shared = db.scalar(select(Lease.id).where(
             Lease.status == "active", Lease.domain == domain, Lease.integration_id == integration.id,
             Lease.execution == "applied", Lease.owned.is_(True)).limit(1))
-        used = (dict(integration.config), integration.secret_ref)
+        # Read before the call: if the source goes meanwhile, its row can no longer be loaded.
+        config, place, about = dict(integration.config), where_it_reads(integration), \
+            (integration.name, integration.id, _scope(integration))
         result = await opener.allow_domain(integration.config, key, domain, allowed=True)
         execution, owned = "applied", bool(result["owned"] or shared)
-        if not source_unchanged(db, integration, used):
-            await _take_back(opener, integration, used, key, domain, owned=bool(result["owned"] and not shared),
+        if not source_unchanged(db, integration, place):
+            await _take_back(opener, about, config, key, domain, owned=bool(result["owned"] and not shared),
                              decided_by=decided_by, requester_id=requester_id, request_id=request_id,
                              minutes=minutes, risk_score=risk_score)
     now = utcnow()
@@ -143,26 +166,28 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     return lease
 
 
-async def _take_back(opener, integration: Integration, used: tuple[dict, str], key: str, domain: str, *,
+async def _take_back(opener, about: tuple[str, str, str], config: dict, key: str, domain: str, *,
                      owned: bool, **lease) -> None:
-    """Undo an exception added at a source that went away during the call, at the place the call used.
+    """Undo an exception added at a source that was removed or moved during the call, at the place the call used.
 
-    Raises SourceGone. Its record says what happened; an undo that failed is kept as an open exception with
-    its error, so it stays listed under Open now and is never shown as done.
+    Called with no transaction open. Only an entry Nyctr itself added is taken out. Raises SourceGone. Its
+    record says what happened; an undo that failed is kept as an open exception with its error, so it stays
+    listed under Open now and is never shown as done.
     """
-    # Read now: after a rollback the removed source's row can no longer be loaded.
-    name, iid, scope, undone = integration.name, integration.id, _scope(integration), True
+    (name, iid, scope), undone = about, True
     if owned:
         try:
-            await opener.disallow_domain(used[0], key, domain, allowed=True)
+            await opener.disallow_domain(config, key, domain, allowed=True)
         except IntegrationError:
             undone = False
-    if undone:
-        message = (f"{name} was removed or changed while Nyctr was opening {domain} there, so Nyctr took that "
-                   "exception back out. Nothing was opened.")
+    went = f"{name} was removed or now reads from somewhere else while Nyctr was opening {domain} there"
+    if not owned:
+        message = f"{went}. The exception was there before Nyctr's, so Nyctr left it as it was. Nothing was opened."
+    elif undone:
+        message = f"{went}, so Nyctr took that exception back out. Nothing was opened."
     else:
-        message = (f"{name} was removed or changed while Nyctr was opening {domain} there, and Nyctr could not "
-                   f"take it back out. Remove the exception for {domain} at that source by hand.")
+        message = (f"{went}, and Nyctr could not take it back out. Remove the exception for {domain} at that "
+                   "source by hand.")
     actor = None if lease["decided_by"] == "rule" else lease["decided_by"]
 
     def record(db: Session) -> None:
@@ -178,8 +203,13 @@ async def _take_back(opener, integration: Integration, used: tuple[dict, str], k
             db.flush()
             target = row.id
         audit(db, actor, "access.open_undone", target, domain=domain, source=name,
-              execution="applied" if undone else "failed")
+              execution="not_applied" if not owned else "applied" if undone else "failed")
     raise SourceGone(message, record)
+
+
+def source_removed(db: Session, lease: Lease) -> bool:
+    """Say whether the source this exception was opened at has since been removed from Nyctr."""
+    return bool(lease.integration_id) and db.get(Integration, lease.integration_id) is None
 
 
 async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, actor: str | None = None) -> bool:
@@ -187,11 +217,19 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
 
     Returns False and keeps the lease active with a visible error when the
     provider could not be changed, so it is retried instead of silently left open.
+    An entry Nyctr added at a source since removed cannot be reached at all: it is
+    neither called nor retried, and its message is kept until a person marks it
+    as removed by hand.
     """
     from .integrations import IntegrationError
 
     if lease.status != "active":
         return True
+    if lease.execution == "applied" and lease.owned and source_removed(db, lease):
+        lease.last_error = lease.last_error or (
+            f"The source was removed, so Nyctr cannot reach it. Remove the exception for {lease.domain} there "
+            "by hand.")
+        return False
     if lease.execution == "applied" and lease.owned:
         others = db.scalar(select(func.count()).select_from(Lease).where(
             Lease.status == "active", Lease.id != lease.id, Lease.domain == lease.domain,
@@ -244,7 +282,7 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
 
     assessment = risk.assess(observation.domain, observation.reason, observation.reason_codes, observation.source)
     row.risk_score, row.risk_category, row.risk_factors = assessment.score, assessment.category, assessment.factors
-    row.integration_id = observation.integration_id
+    row.integration_id = integration_id = observation.integration_id
     rule: AccessRule = get_rule(db, "access_rule")
     integration = db.get(Integration, observation.integration_id)
     why = None
@@ -277,6 +315,10 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             row.decision_note = f"Opened for {minutes} minutes by the access rule."
             return
         except SourceGone as error:
+            # The check rolled back this transaction before the undo call; store the assessment again.
+            row.risk_score, row.risk_category, row.risk_factors = assessment.score, assessment.category, \
+                assessment.factors
+            row.integration_id = integration_id
             error.record(db)
             why = f"{error} A person decides."
         except IntegrationError:
@@ -333,18 +375,41 @@ async def leases(request: Request, auth=Depends(identity), db: Session = Depends
     if auth[0].role != "admin":
         query = query.where(Lease.requester_id == auth[0].id)
         return [lease_json(row) for row in db.scalars(query)]
-    names = _names(db)
-    return [lease_json(row, names) for row in db.scalars(query)]
+    names, known = _names(db), set(db.scalars(select(Integration.id)))
+    return [{**lease_json(row, names), "source_removed": bool(row.integration_id) and row.integration_id not in known}
+            for row in db.scalars(query)]
+
+
+class EndInput(BaseModel):
+    """`by_hand`: the administrator removed the entry at a since-removed source themselves."""
+    model_config = ConfigDict(extra="forbid")
+    by_hand: bool = False
 
 
 @router.post("/leases/{lease_id}/end")
-async def end(lease_id: str, request: Request, user=Depends(admin), db: Session = Depends(get_db)):
-    """Close an active lease now. Reports honestly if the provider entry could not be removed."""
+async def end(lease_id: str, request: Request, body: EndInput | None = None, user=Depends(admin),
+              db: Session = Depends(get_db)):
+    """Close an active lease now. Reports honestly if the provider entry could not be removed.
+
+    Nyctr cannot reach an exception it added at a source since removed. An administrator who removed
+    it there marks it so (`by_hand`); that ends it here, says so in its record and sends nothing.
+    """
     lease = db.get(Lease, lease_id)
     if not lease:
         raise HTTPException(404, "Lease not found")
     if lease.status != "active":
         raise HTTPException(409, "This access has already ended")
+    gone, by_hand = lease.execution == "applied" and lease.owned and source_removed(db, lease), bool(body and body.by_hand)
+    if by_hand and not gone:
+        raise HTTPException(409, "Nyctr can still reach this source, so end the exception here instead.")
+    if gone and not by_hand:
+        raise HTTPException(409, f"{lease.last_error or 'Its source was removed.'} Then mark it as removed by hand.")
+    if gone:
+        lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", "removed_by_hand", utcnow(), None
+        audit(db, user.id, "access.closed", lease.id, domain=lease.domain, reason="removed_by_hand",
+              execution="applied")
+        db.commit()
+        return lease_json(lease, _names(db))
     done = await end_lease(db, request.app.state.settings, lease, "revoked", user.id)
     db.commit()
     if not done:
