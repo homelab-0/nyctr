@@ -300,13 +300,17 @@ class BudgetExceeded(IntegrationError):
 
 
 MAX_RETRY_AFTER = 3600
+RETRY_AFTER_SECONDS = re.compile(r"[0-9]{1,9}")
 
 
 def _retry_after(value: str | None) -> int | None:
-    """Read a Retry-After wait given in seconds, capped at an hour. The date form is ignored."""
-    if value is None or not value.strip().isdigit():
-        return None
-    return min(int(value.strip()), MAX_RETRY_AFTER)
+    """Read a Retry-After wait given in seconds, capped at an hour.
+
+    Never raises: a 429 is a rate limit whatever its header says, and a date,
+    a non-ASCII digit or an overlong number only means no wait is known.
+    """
+    seconds = value.strip() if value is not None else ""
+    return min(int(seconds), MAX_RETRY_AFTER) if RETRY_AFTER_SECONDS.fullmatch(seconds) else None
 
 
 def must_stop(error: IntegrationError) -> bool:
