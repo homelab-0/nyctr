@@ -1,5 +1,6 @@
 """The list of blocked lookups is one bounded page, counted on the server for the caller alone."""
 
+import random
 import time
 from collections import Counter
 from datetime import timedelta
@@ -28,6 +29,8 @@ def store(app, count, device=None, name="Unknown device", start=0, step=2, tag="
                      "expires_at": when + timedelta(hours=24), "evidence_kind": "observed",
                      "attribution": attribution or ("assigned" if device else "unattributed"),
                      "risk_score": None, "risk_explanation": "Fabricated."})
+    # Stored out of order, so nothing a test sees can rest on the order rows were written in.
+    random.Random(count).shuffle(rows)
     with app.state.session_factory() as db:
         db.execute(insert(Observation), rows)
         db.commit()
@@ -66,6 +69,11 @@ def test_page_is_bounded_newest_first_and_older_pages_hold_while_lookups_arrive(
     assert not any(id_.startswith("newer-") for id_ in seen)
     assert client.get("/api/blocks").json()["rows"][0]["id"].startswith("newer-")
     assert client.get("/api/blocks", params={"before": "not a place"}).status_code == 422
+    # Times at the ends of the calendar cannot be moved to UTC; they are refused, not an error.
+    for crafted in ("9999-12-31T23:59:59-23:59~x", "0001-01-01T00:00:00+23:59~x", "2026-01-01T00:00:00+00:00~a\x00b"):
+        refused = client.get("/api/blocks", params={"before": crafted})
+        assert (refused.status_code, refused.json()["detail"]) == (
+            422, "That place in the list is not valid. Load the list again."), crafted
     assert client.get("/api/blocks", params={"band": "severe"}).status_code == 422
 
 
@@ -165,12 +173,49 @@ def test_rights_applied_before_paging_match_the_check_made_on_one_lookup(client,
         assert 0 < len(set(db.scalars(select(Observation.id).where(*block_list.visible(db, member))))) < 117
 
 
+def test_member_opens_a_lookup_from_an_older_page_by_its_address_and_nothing_they_may_not_see(client, app):
+    """A lookup beyond the first page is found by address and opened; hidden, expired and missing are one refusal."""
+    headers = signin(client, member=True)
+    store(app, 250, device="laptop-jamie", name="Jamie's MacBook", tag="mine")
+    store(app, 5, device="workstation", name="Alex's workstation", tag="other")
+    listed = {row["id"] for row in client.get("/api/blocks").json()["rows"]}
+    assert len(listed) == block_list.PAGE and "mine-00240" not in listed
+    found = client.post("/api/blocks/find", headers=headers, json={"domain": "host-00240.mine.example"}).json()
+    assert [row["id"] for row in found] == ["mine-00240"]
+    opened = client.get("/api/blocks/one", params={"id": "mine-00240"})
+    assert opened.status_code == 200 and opened.json() == found[0]
+    asked = client.post("/api/requests", headers=headers,
+                        json={"block_id": "mine-00240", "reason": "Needed for work", "duration_minutes": 30})
+    assert asked.status_code == 201 and asked.json()["domain"] == "host-00240.mine.example"
+    # Another person's, one with no device, an expired one of their own, and one that never existed.
+    refusals = [client.get("/api/blocks/one", params={"id": id_})
+                for id_ in ("other-00001", "block-admin", "block-unattributed", "block-expired", "never-stored", "a\x00b")]
+    assert {(r.status_code, r.text) for r in refusals} == {(404, '{"detail":"Block event not found"}')}
+    assert client.post("/api/blocks/find", headers=headers, json={"domain": "host-00001.other.example"}).json() == []
+    signin(client)
+    assert client.get("/api/blocks/one", params={"id": "other-00001"}).json()["device_name"] == "Alex's workstation"
+    assert client.get("/api/blocks/one", params={"id": "block-expired"}).status_code == 404
+    client.cookies.clear()
+    assert client.get("/api/blocks/one", params={"id": "mine-00240"}).status_code == 401
+
+
+def test_an_expired_lookup_is_neither_listed_nor_counted_before_it_is_removed(client, app):
+    """The list itself leaves out what has expired; it does not rest on the route removing it first."""
+    with app.state.session_factory() as db:
+        assert db.get(Observation, "block-expired") is not None
+        for user_id, expected in (("user-admin", 15), ("user-jamie", 6)):
+            body = block_list.page(db, db.get(User, user_id))
+            assert body["total"] == body["matching"] == sum(body["counts"]["band"].values()) == expected
+            assert "block-expired" not in {row["id"] for row in body["rows"]}
+            assert body["oldest_at"] > utcnow() - timedelta(hours=24)
+
+
 def test_first_page_of_twenty_thousand_does_one_page_of_work_and_other_readers_see_them_all(client, app, admin_headers):
     """With 20,000 lookups stored, only one page of them is read in full and sent; the Briefing still counts all.
 
     What is held here does not depend on how busy the machine is: how many stored lookups are
     loaded whole, how many statements run, and the size of the answer. The measured times are
-    stated in the pull request, not asserted here.
+    stated in the pull request; the one time held here is a wide guard, explained where it is.
     """
     store(app, 20_000, step=4)
     whole, statements = [], []

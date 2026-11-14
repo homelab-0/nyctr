@@ -16,7 +16,7 @@ from sqlalchemy import Text, and_, cast, exists, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from . import risk
-from .deps import device_permitted, observation_json
+from .deps import device_permitted, observation_json, observation_permitted
 from .models import DeviceGrant, Observation, Resource, utc, utcnow
 
 # A stored lookup is about 650 bytes as JSON, so 200 rows stay near 130 KB and are a
@@ -53,12 +53,31 @@ def _codes(stored: str | None) -> list | None:
 
 
 def _cursor(value: str) -> tuple[datetime, str]:
-    """Read the place a previous page ended: the time and identifier of its last lookup."""
+    """Read the place a previous page ended: the time and identifier of its last lookup.
+
+    The value comes from the caller, so anything that is not such a place is refused as
+    invalid input: a time that is not one, a time at the ends of the calendar that cannot
+    be moved to UTC, and a NUL character, which one database engine refuses in text.
+    """
     when, _, id_ = value.partition("~")
     try:
+        if "\x00" in value:
+            raise ValueError
         return utc(datetime.fromisoformat(when)), id_
-    except ValueError:
+    except (ValueError, OverflowError):
         raise HTTPException(422, "That place in the list is not valid. Load the list again.") from None
+
+
+def one(db: Session, user, id_: str) -> dict:
+    """Return one fresh lookup the caller may inspect, whatever page of the list it is on.
+
+    A lookup that does not exist, has expired or that the caller may not see is refused in
+    the same words, so the refusal does not say which.
+    """
+    row = None if "\x00" in id_ else db.get(Observation, id_)
+    if row is None or utc(row.expires_at) <= utcnow() or not observation_permitted(db, row, user):
+        raise HTTPException(404, "Block event not found")
+    return observation_json(row)
 
 
 def page(db: Session, user, band: str | None = None, text: str = "", before: str | None = None) -> dict:

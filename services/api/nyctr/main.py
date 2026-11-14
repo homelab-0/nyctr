@@ -621,6 +621,14 @@ def create_app(settings: Settings | None = None):
         db.commit()
         return block_list.page(db, auth[0], band, q, before)
 
+    @app.get("/api/blocks/one")
+    def one_block(id: str = Query(max_length=255), auth=Depends(identity), db: Session = Depends(get_db)):
+        """Return one event the caller may inspect, so one found by address can be opened from any page.
+
+        Missing, expired and hidden events answer the same 404 as a request for one.
+        """
+        return block_list.one(db, auth[0], id)
+
     @app.get("/api/blocks/coverage")
     def block_coverage(_auth=Depends(identity), db: Session = Depends(get_db)):
         """Tell a signed-in person why their list of blocked sites may be empty or short, and nothing else.
