@@ -65,6 +65,22 @@ recorded. The claim is given back with the record, at once when the change
 fails, or when Nyctr is stopped mid-call, and only by the attempt that holds
 it. One left by a copy that was killed can be taken over after five minutes.
 
+An opening that fails never leaves an entry at the source that nothing on
+record points at. With the claim held and before any add, Nyctr asks the
+source whether the address is already allowed there. If it is, Nyctr adds
+nothing and never removes it. If it is not, the attempt goes on record first:
+a lease with status `unconfirmed`, which is never access and is counted
+nowhere as an open exception. A stored exception replaces the record. If the
+opening fails after its add may have been sent, or Nyctr is killed, the
+record stays: Nyctr reads the source, removes the entry if it is there and
+checks that it is gone, once before the opening answers and then on every
+tick (after a kill, once the claim can be taken over). Until then
+administrators see it under Open now in plain words, the person who asked is
+told nothing was opened, the source cannot be removed, and a new opening of
+that address first settles it or is refused. A source that offers no such
+read gets a record Nyctr never acts on: it says Nyctr cannot tell whether it
+put the entry there, and an administrator checks and ends it.
+
 Every change at a source (opening or removing an exception, issuing or ending
 a pass, letting a guest on or cutting one off, and each undo) has an overall
 limit of 60 seconds for all its requests together. A source that keeps an

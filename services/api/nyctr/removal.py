@@ -11,7 +11,7 @@ could end it afterwards.
 
 from collections import Counter, defaultdict
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 
 from .collection import parsed_date
 from .guests import EFFECTIVE, state_of
@@ -72,8 +72,9 @@ def plan(db, integration: Integration, resources: list[Resource]) -> dict:
     states = Counter(state_of(row, actions[row.id]) for row in resources if row.id in actions)
     now = utcnow()
     held = {
-        "exceptions": _count(db, Lease, Lease.integration_id == iid, Lease.status == "active",
-                             Lease.execution == "applied", Lease.owned.is_(True)),
+        # With the entries of openings not confirmed yet: Nyctr may have put them there and still removes them.
+        "exceptions": _count(db, Lease, Lease.integration_id == iid, Lease.owned.is_(True), or_(
+            and_(Lease.status == "active", Lease.execution == "applied"), Lease.status == "unconfirmed")),
         "passes": _count(db, GuestPass, GuestPass.integration_id == iid, GuestPass.issued_by.is_not(None),
                          GuestPass.execution == "applied", GuestPass.ended_at.is_(None),
                          or_(GuestPass.expires_at.is_(None), GuestPass.expires_at > now)),

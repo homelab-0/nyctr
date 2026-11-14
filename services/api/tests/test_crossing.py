@@ -102,7 +102,7 @@ def ask(block):
 
 def test_two_openings_of_one_address_at_once_share_one_entry_that_goes_with_the_last(tmp_path, monkeypatch):
     """The first has added the entry and not read it back when the second arrives: the second waits, then shares."""
-    source = Source(monkeypatch, hold=(1, "after"))
+    source = Source(monkeypatch, hold=(2, "after"))
 
     async def scenario(app, member, admin):
         async with console(app, member) as sam, console(app, admin) as owner:
@@ -110,10 +110,10 @@ def test_two_openings_of_one_address_at_once_share_one_entry_that_goes_with_the_
             await asyncio.wait_for(source.reached.wait(), 5)
             second = asyncio.create_task(sam.post("/api/requests", json=ask("two")))
             await asyncio.sleep(0.6)
-            assert source.calls == ["GET", "POST"]  # The second is waiting and has sent nothing.
+            assert source.calls == ["GET", "GET", "POST"]  # The second is waiting and has sent nothing.
             source.go.set()
             assert [(await task).json()["status"] for task in (first, second)] == ["auto_approved"] * 2
-            assert source.listed == [DOMAIN] and source.calls == ["GET", "POST", "GET", "GET"]
+            assert source.listed == [DOMAIN] and source.calls == ["GET", "GET", "POST", "GET", "GET", "GET"]
             leases = (await owner.get("/api/leases")).json()
             assert [(row["execution"], row["owned"]) for row in leases] == [("applied", True)] * 2
             for lease, left in zip(leases, ([DOMAIN], []), strict=True):
@@ -144,7 +144,7 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 source.go.set()
                 await up.ending["dns"]
                 assert (await asking).json()["status"] == "auto_approved"
-                assert source.calls == ["GET", "DELETE", "GET", "GET", "POST", "GET"]  # It added its own entry.
+                assert source.calls == ["GET", "DELETE", "GET", "GET", "GET", "POST", "GET"]  # Added its own.
             else:  # The opening has read the list and has not stored its exception yet.
                 asking = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
                 await asyncio.wait_for(source.reached.wait(), 5)
@@ -155,7 +155,7 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 assert (await asking).json()["status"] == "auto_approved"
                 up.tick()
                 await up.ending["dns"]
-                assert source.calls == ["GET"]  # The entry is now the new exception's too, so it stays.
+                assert source.calls == ["GET", "GET"]  # The entry is now the new exception's too, so it stays.
         await up.stop()
         with app.state.session_factory() as db:
             assert [(row.id == old, row.execution, row.owned) for row in db.scalars(select(Lease).where(
@@ -207,7 +207,7 @@ def test_an_approval_takes_the_claim_first_and_gives_it_back_on_every_way_out(tm
             source.stuck.clear()
             source.seen.clear()
             assert (await review(one))[:2] == (200, "approved") and source.listed == [DOMAIN]
-            assert source.seen == [1, 1, 1] and claims(app) == []  # Held for the whole call, then given back.
+            assert source.seen == [1, 1, 1, 1] and claims(app) == []  # Held for the whole call, then given back.
             assert (await review(one))[0] == 409 and claims(app) == []
 
     with started(tmp_path) as (app, _client, member, admin):
