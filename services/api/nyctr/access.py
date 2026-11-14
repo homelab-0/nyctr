@@ -434,8 +434,7 @@ def clear_stale_reviews(db: Session) -> None:
     for gate in db.scalars(select(Setting).where(Setting.key.startswith("review:"),
                                                  Setting.updated_at <= utcnow() - ENDING_HOLD)).all():
         db.execute(update(AccessRequest).where(AccessRequest.id == gate.key[7:], AccessRequest.status == "pending")
-                   .values(decision_note="Nyctr was stopped while this was being decided. Nothing was opened, "
-                                         "so it is waiting again."))
+                   .values(decision_note="Nyctr was stopped while this was being decided. Nothing was opened."))
         db.delete(gate)
     db.commit()
 
