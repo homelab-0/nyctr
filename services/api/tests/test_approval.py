@@ -109,23 +109,30 @@ def test_an_approval_that_cannot_be_stored_or_whose_copy_is_killed_leaves_the_re
         asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("by_rule", [False, True])
+@pytest.mark.parametrize("by_rule", [False, True, "turn"])
 def test_a_source_removed_while_an_opening_waits_is_refused_as_removed_and_leaves_no_claim(tmp_path, monkeypatch,
                                                                                          by_rule):
-    """Another change holds the address; the source is removed during the wait; the claim comes free."""
+    """Another change holds the address (`turn`: the person's turn for automatic openings); the source is removed
+    during the wait; the claim comes free."""
     with started(tmp_path, rule=by_rule) as (app, _client, member, admin):
-        source = Source(monkeypatch)
+        source, real = Source(monkeypatch), access._claim
+
+        def busy_turn(db, name):  # The entry's claim is free; the first tries for the person's turn are refused.
+            if by_rule != "turn" or not name.startswith("ending:auto:") or source.seen.append(0) or len(source.seen) > 4:
+                return real(db, name)
+            db.rollback()  # As a refused try does.
+        monkeypatch.setattr(access, "_claim", busy_turn)
 
         async def scenario():
             async with console(app, member) as sam, console(app, admin) as owner:
                 with app.state.session_factory() as db:
-                    held = access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))
+                    held = by_rule != "turn" and access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))
                     if by_rule:
                         waiting = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
                     else:
                         made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
                         waiting = asyncio.create_task(review(owner, made))
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.4)
                     assert (await owner.request("DELETE", "/api/integrations/dns", json=GONE)).status_code == 200
                     access.release_entry(db, held)
                 answer = await waiting
@@ -203,10 +210,10 @@ def test_the_duty_to_remove_an_entry_nyctr_added_passes_on_and_a_persons_entry_i
 
 
 def test_the_daily_limit_holds_for_requests_sent_at_the_same_moment(tmp_path, monkeypatch):
-    """Eight at once with a limit of four: four open, four wait for a person, and each kept its assessment
-    although it had to wait its turn."""
+    """Eight at once with a limit of four, the first held at the source while the others arrive: four open, four
+    wait for a person, and each kept its assessment although it had to wait its turn."""
     with started(tmp_path, rule=True) as (app, _client, member, _admin):
-        source = Source(monkeypatch)
+        source = Source(monkeypatch, hold=(2, "after"))
         with app.state.session_factory() as db:
             one = db.get(Observation, "dns:block:one")
             db.add_all(Observation(id=f"dns:block:b{n}", **{name: getattr(one, name) for name in (
@@ -216,8 +223,11 @@ def test_the_daily_limit_holds_for_requests_sent_at_the_same_moment(tmp_path, mo
 
         async def scenario():
             async with console(app, member) as sam:
-                return [answer.json() for answer in await asyncio.gather(*(
-                    sam.post("/api/requests", json=ask(f"b{n}")) for n in range(8)))]
+                asking = asyncio.gather(*(sam.post("/api/requests", json=ask(f"b{n}")) for n in range(8)))
+                await asyncio.wait_for(source.reached.wait(), 5)
+                await asyncio.sleep(0.6)  # The other seven are past the first count and waiting their turn.
+                source.go.set()
+                return [answer.json() for answer in await asking]
 
         made = asyncio.run(scenario())
         assert sorted(row["status"] for row in made) == ["auto_approved"] * 4 + ["pending"] * 4
@@ -319,3 +329,30 @@ def test_a_persons_decision_while_the_rule_is_opening_is_refused_and_never_overw
 
         asyncio.run(scenario())
         assert rows(app) == [("active", None, True)] and gates(app) == [] and claims(app) == []
+
+
+@pytest.mark.parametrize("by_rule", [False, True])
+def test_a_decision_stored_just_before_the_requests_claim_is_taken_is_left_alone(tmp_path, monkeypatch, by_rule):
+    """A copy that does not know the claim denies the request in that instant: neither an approval nor the access
+    rule then opens anything or writes over it."""
+    with started(tmp_path, rule=by_rule) as (app, _client, member, admin):
+        source, real = Source(monkeypatch), access.hold_review
+
+        def decided_first(db, request_id):
+            db.execute(update(AccessRequest).where(AccessRequest.id == request_id).values(status="denied"))
+            db.commit()
+            return real(db, request_id)
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                if by_rule:
+                    monkeypatch.setattr(access, "hold_review", decided_first)
+                    return (await sam.post("/api/requests", json=ask("one"))).json()["status"]
+                made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                monkeypatch.setattr(access, "hold_review", decided_first)
+                answer = await review(owner, made)
+                assert answer.status_code == 409 and "already been reviewed" in answer.json()["detail"]
+                return note(app, made)[0]
+
+        assert asyncio.run(scenario()) == "denied"
+        assert source.calls == [] and rows(app) == [] and gates(app) == [] and claims(app) == []
