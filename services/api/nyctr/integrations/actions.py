@@ -21,6 +21,8 @@ Contracts:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import re
 from typing import Any
 
@@ -39,6 +41,25 @@ class WritesDisabled(IntegrationError):
         """Name the provider so the caller can show a precise, credential-free explanation."""
         super().__init__(f"Nyctr is read-only for {provider}. An operator must allow changes first.",
                          category="configuration")
+
+
+# The longest one change at a source may take, all its requests together. Each request has its own
+# limits, but an answer that keeps trickling in passes those for ever. Kept well under the time a
+# claim on a source entry is held (`access.ENDING_HOLD`), so a claim never outlives its call.
+CHANGE_SECONDS = 60.0
+
+
+def _limited(change):
+    """Give one change an overall time limit, after which it has failed and is no longer waited for."""
+    @functools.wraps(change)
+    async def within(*args, **kwargs):
+        try:
+            async with asyncio.timeout(CHANGE_SECONDS):
+                return await change(*args, **kwargs)
+        except TimeoutError:
+            raise IntegrationError("The source took too long to answer, so Nyctr stopped waiting. Check there "
+                                   "whether the change went through.", category="timeout") from None
+    return within
 
 
 def _require(allowed: bool, provider: str) -> None:
@@ -71,6 +92,7 @@ async def _allowlist(reader: ReadClient, profile: str) -> dict[str, bool]:
     return {str(x.get("id", "")).lower(): bool(x.get("active", True)) for x in rows}
 
 
+@_limited
 async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, allowed: bool) -> dict[str, Any]:
     """Allow a domain on the whole profile and verify it. Reports whether Nyctr created the entry.
 
@@ -93,6 +115,7 @@ async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, al
         return {"owned": True, "verified": True}
 
 
+@_limited
 async def nextdns_disallow(config: dict[str, Any], api_key: str, domain: str, *, allowed: bool) -> dict[str, Any]:
     """Remove an allowlist entry Nyctr created and verify it is gone.
 
@@ -121,6 +144,7 @@ def _voucher(row: dict[str, Any]) -> dict[str, Any]:
             "expires_at": row.get("expiresAt"), "expired": row.get("expired") is True}
 
 
+@_limited
 async def unifi_create_voucher(config: dict[str, Any], api_key: str, site: str, *, name: str, minutes: int,
                                guest_limit: int | None, data_limit_mb: int | None,
                                allowed: bool) -> dict[str, Any]:
@@ -140,6 +164,7 @@ async def unifi_create_voucher(config: dict[str, Any], api_key: str, site: str, 
     return _voucher(vouchers[0])
 
 
+@_limited
 async def unifi_delete_voucher(config: dict[str, Any], api_key: str, site: str, voucher: str, *,
                                allowed: bool) -> None:
     """Delete one voucher by its identifier."""
@@ -154,6 +179,7 @@ async def unifi_list_vouchers(reader: ReadClient, site: str) -> list[dict[str, A
     return [_voucher(row) for row in await offset_pages(reader, f"/v1/sites/{_path_id(site)}/hotspot/vouchers")]
 
 
+@_limited
 async def unifi_guest_action(config: dict[str, Any], api_key: str, site: str, client_id: str, action: str, *,
                              minutes: int | None = None, allowed: bool) -> dict[str, Any]:
     """Authorize or unauthorize one guest client and read back its resulting access state."""
