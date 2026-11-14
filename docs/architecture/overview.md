@@ -95,8 +95,9 @@ removes nothing and asks an administrator to check there.
 
 A decision on a request holds nothing unsaved while a source is called. It
 first takes a claim on the request (the same kind of row, always before the
-entry's claim), so a second decision meanwhile is answered at once that the
-request is being approved, and never waits on a database lock. The decision,
+entry's claim), and so does the access rule when it opens one by itself. A
+second decision meanwhile is answered at once that the request is being
+approved, and never waits on a database lock. The decision,
 the exception and both claims are stored together; every failure gives the
 claims back and leaves the request waiting with a note. A claim left by a
 killed copy is cleared by the tick after five minutes. Automatic openings for
