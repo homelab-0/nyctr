@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import type { Block, BlockList } from '../types';
 
+/** A fixed answer, or a function giving one; a function may give a promise to answer later. */
 type Handler = unknown | ((body: unknown) => unknown);
 
 /**
@@ -16,8 +17,9 @@ export function mockApi(routes: Record<string, Handler>) {
     calls.push({ method, path, body });
     const handler = routes[`${method} ${path}`];
     if (handler === undefined) throw new Error(`Unexpected synthetic request: ${method} ${path}`);
-    const value =
-      typeof handler === 'function' ? (handler as (b: unknown) => unknown)(body) : handler;
+    const value = await (typeof handler === 'function'
+      ? (handler as (b: unknown) => unknown)(body)
+      : handler);
     const status =
       value && typeof value === 'object' && '__status' in value
         ? Number((value as { __status: number }).__status)

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App';
@@ -336,6 +336,42 @@ describe('member portal', () => {
     await user.click(screen.getByRole('button', { name: 'Ask to open it' }));
     const sent = calls.find((call) => call.method === 'POST' && call.path === '/requests');
     expect(sent?.body).toEqual({ block_id: 'b9', reason: 'Needed for work', duration_minutes: 60 });
+  });
+
+  it('shows nothing of one older block while the next one opened is still loading', async () => {
+    const first = block('b9', 'first-older.example', 'laptop');
+    const second = block('b8', 'second-older.example', 'laptop');
+    let answerSecond = (_: unknown) => {};
+    const { user } = open(
+      {
+        'GET /blocks/one?id=b9': first,
+        'GET /blocks/one?id=b8': () => new Promise((resolve) => (answerSecond = resolve)),
+      },
+      '/portal?block=b9',
+    );
+    expect(await screen.findByText('first-older.example')).toBeDefined();
+    await user.type(screen.getByLabelText('What do you need it for?'), 'For the first one');
+    // Straight to another older block, without leaving the portal. Every render is looked at,
+    // the first one included: the first block must never stand under the second's address.
+    const shown: string[] = [];
+    const watch = new MutationObserver(() => shown.push(document.body.textContent || ''));
+    watch.observe(document.body, { childList: true, subtree: true, characterData: true });
+    await act(async () => {
+      window.location.hash = '/portal?block=b8';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(screen.queryByText('first-older.example')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Ask to open it' })).toBeNull();
+    await act(async () => answerSecond(second));
+    expect(await screen.findByText('second-older.example')).toBeDefined();
+    watch.disconnect();
+    // What was typed for the first block is not carried into a request for the second.
+    const reason = screen.getByLabelText('What do you need it for?') as HTMLTextAreaElement;
+    expect(reason.value).toBe('');
+    expect(
+      (screen.getByRole('button', { name: 'Ask to open it' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(shown.some((text) => text.includes('first-older.example'))).toBe(false);
   });
 
   it('says the same of a block the member may not see as of one that does not exist', async () => {

@@ -789,7 +789,8 @@ export default function Portal({ page, params }: { page: string; params: URLSear
         ) : request ? (
           <Result data={data} id={request} />
         ) : block ? (
-          <BlockDetail data={data} id={block} />
+          // Keyed by the block: what was read or typed for one never stands under another.
+          <BlockDetail key={block} data={data} id={block} />
         ) : (
           <Home data={data} />
         )}

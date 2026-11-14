@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { blockList, mockApi } from '../test/mock-api';
 import type { Block, Integration } from '../types';
@@ -144,6 +144,60 @@ describe('Blocks', () => {
       '/blocks?before=host-2',
     ]);
     expect((screen.getByRole('searchbox') as HTMLInputElement).maxLength).toBe(120);
+  });
+
+  it('drops an older page that arrives after the same filter was read afresh', async () => {
+    const stored = Array.from({ length: 6 }, (_, index) => block(`host-${index}`, index + 1));
+    const arrived = block('arrived-since', 0);
+    let reads = 0;
+    let answerOlder = (_: unknown) => {};
+    mockApi({
+      // The second read of the unfiltered list holds a lookup collected since the first.
+      'GET /blocks': () =>
+        reads++
+          ? {
+              ...blockList([arrived, ...stored]),
+              rows: [arrived, ...stored.slice(0, 2)],
+              next: 'x',
+            }
+          : { ...blockList(stored), rows: stored.slice(0, 3), next: 'host-2' },
+      'GET /blocks?band=high': { ...blockList(stored), rows: [], matching: 0 },
+      'GET /blocks?before=host-2': () => new Promise((resolve) => (answerOlder = resolve)),
+      'GET /integrations': [],
+      'GET /integrations/catalog': { providers: [] },
+    });
+    render(<Blocks />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show older' }));
+    fireEvent.click(screen.getByRole('button', { name: /^High/ }));
+    expect(await screen.findByText('No blocks match')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: /^All/ }));
+    expect(await screen.findByText('arrived-since.example')).toBeDefined();
+    // Only now does the older page asked for under the first answer arrive.
+    await act(async () => answerOlder({ ...blockList(stored), rows: stored.slice(3) }));
+    expect(screen.getByText('arrived-since.example')).toBeDefined();
+    expect(screen.queryByText('host-5.example')).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the latest 3 of 7 stored lookups.',
+    );
+    expect(screen.getByRole('button', { name: 'Show older' })).toBeDefined();
+  });
+
+  it('draws a row again when the same lookup comes back with other content', async () => {
+    const one = block('one', 5);
+    mockApi({
+      'GET /blocks': blockList([one]),
+      // The same lookup stays on screen through the search, and comes back with another reason.
+      'GET /blocks?q=one': blockList([{ ...one, reason: 'Now on a threat list' }]),
+      'GET /integrations': [],
+      'GET /integrations/catalog': { providers: [] },
+    });
+    render(<Blocks />);
+    const row = (await screen.findByText('On a block list')).closest('tr');
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'one' } });
+    expect(await screen.findByText('Now on a threat list')).toBeDefined();
+    expect(screen.queryByText('On a block list')).toBeNull();
+    // It is the row that was there, drawn again, not a new one put in its place.
+    expect(screen.getByText('Now on a threat list').closest('tr')).toBe(row);
   });
 
   it('says once that a source names no device, and tells not collected from nothing blocked', async () => {
