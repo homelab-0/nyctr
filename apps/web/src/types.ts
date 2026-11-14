@@ -342,6 +342,8 @@ export interface GuestOverview {
 export interface AttentionItem {
   kind: 'guest' | 'lease' | 'request' | 'finding' | 'source' | 'suggestion';
   id: string;
+  /** For a source that stored only part: open its Edit form, or go to its card. */
+  action?: 'edit' | 'card';
   severity: 'high' | 'medium' | 'low';
   title: string;
   detail: string;

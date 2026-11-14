@@ -70,6 +70,9 @@ function summary(event: AuditEvent) {
   if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
   if (typeof d.observations === 'number') parts.push(counted(d.observations, 'blocked lookup'));
   if (d.partial === true) parts.push('most recent only');
+  // Only the count: the codes are for the record, and the source's card says what each means.
+  if (Array.isArray(d.gaps) && d.gaps.length)
+    parts.push(`${counted(d.gaps.length, 'thing')} it could not read`);
   if (typeof d.reason === 'string' && d.reason) parts.push(d.reason);
   return parts.join(' · ');
 }

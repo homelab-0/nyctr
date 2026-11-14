@@ -25,39 +25,12 @@ const NOT_COLLECTED = [
   'Workload firewall rules (only the on/off switches are read)',
 ];
 
-/** One row under "Needs you": something the server ranked, or a source this screen read itself. */
-type Need = Pick<AttentionItem, 'kind' | 'id' | 'severity' | 'title' | 'detail'> & { href: string };
-
-/**
- * Sources whose last collection stored data but not all of it, each with one sentence and a way
- * to act. A read cut short opens the source's Edit form, where a shorter window is the cure; a
- * gap opens the source's card, which says what it means. A failed source is already listed.
- */
-function sourceNeeds(sources: Integration[]): Need[] {
-  const needs: Need[] = [];
-  for (const source of sources) {
-    const id = encodeURIComponent(source.id);
-    if (source.status === 'partial')
-      needs.push({
-        kind: 'source',
-        id: source.id,
-        severity: 'medium',
-        title: `${source.name} was only partly collected`,
-        detail:
-          'Only the most recent blocked lookups were read. Give it a shorter time window to read all of it.',
-        href: `#/sources?edit=${id}`,
-      });
-    if (source.gaps?.length && source.status !== 'error')
-      needs.push({
-        kind: 'source',
-        id: source.id,
-        severity: 'medium',
-        title: `${source.name} could not read everything`,
-        detail: `${source.gaps.map((gap) => gap.title).join('. ')}.`,
-        href: `#/sources?source=${id}`,
-      });
-  }
-  return needs;
+/** Where a "Needs you" row leads. A source that stored only part names its Edit form or its card. */
+function needHref(item: AttentionItem) {
+  const id = encodeURIComponent(item.id);
+  if (item.kind === 'source' && item.action === 'edit') return `#/sources?edit=${id}`;
+  if (item.kind === 'source' && item.action === 'card') return `#/sources?source=${id}`;
+  return hrefFor(item.kind, item.id);
 }
 
 /** What the sources reported, each kind named with its own count, then the span of stored lookups. */
@@ -96,21 +69,14 @@ export default function Briefing({
   useEffect(() => {
     if (reads > 1) rereadSources();
   }, [reads, rereadSources]);
-  const ranked: Need[] = attention.map((item) => ({ ...item, href: hrefFor(item.kind, item.id) }));
-  const later = ranked.findIndex((item) => item.severity === 'low');
-  // Sources that need a look sit with the other medium items, above suggestions.
-  const needs = [...ranked];
-  needs.splice(later < 0 ? ranked.length : later, 0, ...sourceNeeds(sources.data || []));
-  const urgent = needs.filter((item) => item.severity !== 'low');
-  // "Nothing needs you" is said only once the sources have answered too.
-  const ranking = loading || (sources.loading && !sources.data);
+  const urgent = attention.filter((item) => item.severity !== 'low');
   const open = (leases.data || []).filter((lease) => lease.status === 'active');
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (question.trim()) askNyctr(question);
     setQuestion('');
   };
-  const headline = ranking
+  const headline = loading
     ? 'Checking what needs you.'
     : urgent.length
       ? `${word(urgent.length)} thing${urgent.length === 1 ? '' : 's'} need${urgent.length === 1 ? 's' : ''} you.`
@@ -142,28 +108,31 @@ export default function Briefing({
       </form>
       <div className="split">
         <Panel title="Needs you" hint="Most urgent first" flush>
-          {ranking ? (
+          {loading ? (
             <Loading text="Ranking…" />
-          ) : needs.length === 0 ? (
+          ) : attention.length === 0 ? (
             <p className="pad muted">
               No cut-off guests, waiting requests, open findings, or sources that failed or could
               not read everything.
             </p>
           ) : (
             <div className="rows">
-              {needs.map((item) => (
-                <a className="row" key={`${item.kind}:${item.href}:${item.id}`} href={item.href}>
-                  <i className={`dot ${item.severity}`} />
-                  <span>
-                    <span className="t">{item.title}</span>
-                    <span className="d">{item.detail}</span>
-                  </span>
-                  <span className="meta">
-                    <span className="tag">{KIND[item.kind]}</span>
-                    <ArrowRight size={15} />
-                  </span>
-                </a>
-              ))}
+              {attention.map((item) => {
+                const href = needHref(item);
+                return (
+                  <a className="row" key={`${item.kind}:${href}:${item.id}`} href={href}>
+                    <i className={`dot ${item.severity}`} />
+                    <span>
+                      <span className="t">{item.title}</span>
+                      <span className="d">{item.detail}</span>
+                    </span>
+                    <span className="meta">
+                      <span className="tag">{KIND[item.kind]}</span>
+                      <ArrowRight size={15} />
+                    </span>
+                  </a>
+                );
+              })}
             </div>
           )}
         </Panel>

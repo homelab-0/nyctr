@@ -127,6 +127,7 @@ network}],notice,nudge}`. Nyctr has no guest-facing route.
 - `POST /api/graph/query` with `{query,variables?}` (admin) -> GraphQL `{data,errors}`.
   Queries only; at most 6000 characters, 10 levels and 20000 returned objects.
 - `GET /api/attention` (admin) -> ranked `{kind,id,severity,title,detail,at}`[]. No model.
+  A source that stored only part of a collection also carries `action`: `edit` or `card`.
 - `GET /api/assistant` -> `{provider:"model"|"sample"|"off",model}`.
 - `POST /api/assistant/ask` with `{question,finding_id?}` ->
   `{answer,references:[{ref,kind,id,label}],provider,model}`. `[[ref]]` tokens in

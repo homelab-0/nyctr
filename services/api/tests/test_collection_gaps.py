@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from nyctr import worker
+from nyctr.assistant import evidence_pack
 from nyctr.integrations import IntegrationError, Snapshot, core, registry
 from nyctr.models import Audit, Integration, utcnow
 
@@ -137,6 +138,43 @@ def test_nothing_recorded_repeats_the_source_and_a_member_sees_none_of_it(tmp_pa
         live_signin(client, LIVE_MEMBER)
         assert client.get("/api/integrations").status_code == 403
         assert client.get("/api/audit").status_code == 403
+
+
+def test_the_attention_list_names_sources_that_stored_only_part_and_the_assistant_gets_none_of_it(
+        tmp_path, monkeypatch):
+    """A partial source and one with gaps are ranked for every reader of the list; a failed one is listed once.
+
+    The assistant's evidence pack is built apart from this list and says of a source only what it said before.
+    """
+    source_hits(monkeypatch, [{GAP: "source_error", OTHER: None}])
+    app = live_app(tmp_path)
+    with TestClient(app) as client:
+        seed_live_member(app)
+        by_person(app, client, live_signin(client))
+        with app.state.session_factory() as db:
+            db.get(Integration, "unifi").status = "partial"
+            db.commit()
+        about = {(item["id"], item.get("action")): item for item in client.get("/api/attention").json()
+                 if item["kind"] == "source"}
+        assert set(about) == {("dns", "card"), ("unifi", "edit")}
+        assert about["dns", "card"] == {
+            "kind": "source", "id": "dns", "severity": "medium", "at": None, "action": "card",
+            "title": "Home DNS could not read everything", "detail": f"{NOTES[GAP][0]}. {NOTES[OTHER][0]}."}
+        assert "shorter time window" in about["unifi", "edit"]["detail"]
+        with app.state.session_factory() as db:
+            pack, _refs = evidence_pack(db, app.state.settings)
+            dns = next(item for item in pack["sources"] if item["name"] == "Home DNS")
+            assert set(dns) == {"ref", "kind", "name", "provider", "status", "last_collected"}
+            sent = json.dumps(pack)
+            assert all(text not in sent for text in (GAP, OTHER, NOTES[GAP][0], NOTES[GAP][1], "could not read"))
+            # Once it fails, the one "is not collecting" entry covers it.
+            db.get(Integration, "dns").status = "error"
+            db.commit()
+        assert [item["title"] for item in client.get("/api/attention").json() if item["id"] == "dns"] == [
+            "Home DNS is not collecting"]
+        client.post("/api/auth/logout", headers=live_signin(client))
+        live_signin(client, LIVE_MEMBER)
+        assert client.get("/api/attention").status_code == 403
 
 
 def optional_read(status):

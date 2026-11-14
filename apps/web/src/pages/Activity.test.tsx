@@ -33,6 +33,15 @@ describe('Activity rows about a source', () => {
         // Older records hold no name: the current one is used, else the source is said to be gone.
         event('c', 'integration.diagnosed', { outcome: 'verified' }),
         event('d', 'integration.collection_failed', {}),
+        event('e', 'integration.collected', {
+          name: 'Gateway',
+          resources: 3,
+          observations: 0,
+          partial: false,
+          gaps: ['example_passes', 'example_ranges'],
+          gap_causes: { example_passes: ['refused'] },
+        }),
+        event('f', 'integration.collected', { name: 'Whole', resources: 1, gaps: [] }),
       ],
       'GET /users': [{ id: 'admin', name: 'Alex' }],
       'GET /integrations': [{ id: 'source-c', name: 'Lab hypervisor' } as Integration],
@@ -40,6 +49,12 @@ describe('Activity rows about a source', () => {
     render(<Activity />);
     const collected = (await screen.findByText('Collected from Home DNS')).closest('tr')!;
     expect(collected.textContent).toContain('6 items · 4,000 blocked lookups · most recent only');
+    // What it could not read is counted; the codes themselves stay in the record.
+    const gappy = (await screen.findByText('Collected from Gateway')).closest('tr')!;
+    expect(gappy.textContent).toContain('2 things it could not read');
+    expect(gappy.textContent).not.toMatch(/example_|refused/);
+    const whole = screen.getByText('Collected from Whole').closest('tr')!;
+    expect(whole.textContent).not.toContain('could not read');
     expect(screen.getByText('Added the source Old name')).toBeTruthy();
     expect(screen.getByText('Tested Lab hypervisor')).toBeTruthy();
     expect(screen.getByText('Could not collect from a source since removed')).toBeTruthy();
