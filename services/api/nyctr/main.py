@@ -418,7 +418,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Integration not found")
         resources = list(db.scalars(select(Resource).where(Resource.integration_id == integration_id)))
         counts = removal.plan(db, row, resources)
-        return {**counts, "refusal": removal.held_message(counts["held"])}
+        return {**counts, "refusal": removal.held_message(counts["held"]),
+                "notice": removal.let_on_message(counts["let_on"])}
 
     @app.delete("/api/integrations/{integration_id}")
     def remove_integration(integration_id: str, body: RemovalInput, user=Depends(admin),

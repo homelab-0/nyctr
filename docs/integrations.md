@@ -64,7 +64,10 @@ and the counts removed, so requests still name it.
 
 Removal is refused while Nyctr still has something of its own at the source: an
 open exception it applied, a guest pass it issued that is still live, or a guest
-it cut off or locked out. The refusal says how many and where to end them. It is
+it cut off or locked out. The refusal says how many and where to end them. A
+guest Nyctr let on does not hold removal back, because that grant ends by itself
+at the source; the confirmation says, with a count, that those guests stay let on
+until their time ends and that Nyctr can no longer cut them off. It is
 also refused while a collection or diagnostic of the source is running, and in
 demo mode. Adding a source again, for the same place or another, starts from
 nothing: no device, assignment, label link, guest state or finding comes back.

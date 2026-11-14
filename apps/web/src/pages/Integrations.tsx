@@ -288,6 +288,7 @@ interface RemovalPlan {
   remove: Record<string, number>;
   keep: Record<string, number>;
   refusal: string | null;
+  notice: string | null;
 }
 
 const GOES: [string, string, string][] = [
@@ -361,6 +362,7 @@ function RemoveSource({
               <b>Stays:</b> {[...stays, 'the activity history'].join(', ')}, still naming{' '}
               {plan.data.name}.
             </p>
+            {plan.data.notice && <p>{plan.data.notice}</p>}
             {plan.data.refusal ? (
               <InlineError message={plan.data.refusal} />
             ) : (

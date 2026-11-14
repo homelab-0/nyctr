@@ -97,6 +97,26 @@ def test_preview_counts_what_goes_and_what_stays(world):
                                  "assignments": 1, "links": 1}
     assert preview["keep"] == {"requests": 0, "exceptions": 1, "passes": 1}
     assert preview["held"] == {"exceptions": 0, "passes": 0, "cut_off": 0, "locked_out": 0}
+    assert (preview["let_on"], preview["notice"]) == (0, None)
+
+
+def test_preview_says_guests_nyctr_let_on_stay_on_but_do_not_hold_removal_back(world):
+    """Their grant ends by itself at the source, so removal goes ahead, but the administrator is told first that
+    Nyctr can no longer cut them off. A grant already run out, or one only simulated, is not counted."""
+    app, client, headers = world
+    soon, gone = (utcnow() + timedelta(hours=4)).isoformat(), (utcnow() - timedelta(hours=1)).isoformat()
+    with app.state.session_factory() as db:
+        for name, ends, execution in (("on", soon, "applied"), ("over", gone, "applied"), ("sim", soon, "simulated")):
+            db.add(item(f"unifi:client:{name}", "unifi", "client", name,
+                        attributes={"guest": {"authorized": True, "expires_at": ends}}))
+            db.flush()
+            db.add(GuestAction(device_id=f"unifi:client:{name}", action="admit", actor="owner", execution=execution))
+        db.commit()
+    preview = client.get("/api/integrations/unifi/removal").json()
+    assert preview["let_on"] == 1 and preview["refusal"] is None
+    assert preview["notice"] == ("1 guest Nyctr let on stays let on at this source until its time ends. "
+                                 "After removal, Nyctr can no longer cut it off.")
+    assert remove(client, headers).status_code == 200
 
 
 def test_removal_takes_only_this_sources_data_and_keeps_history(world):

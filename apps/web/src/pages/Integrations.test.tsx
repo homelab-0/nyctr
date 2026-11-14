@@ -868,6 +868,7 @@ const plan = {
   },
   keep: { requests: 1, exceptions: 0, passes: 0 },
   refusal: null,
+  notice: null,
 };
 
 describe('removing a saved source', () => {
@@ -909,5 +910,16 @@ describe('removing a saved source', () => {
     );
     await interaction.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove' }));
+  });
+
+  it('warns that guests Nyctr let on stay on, and still lets the source be removed', async () => {
+    const notice = '1 guest Nyctr let on stays let on at this source until its time ends.';
+    const { interaction } = await openIntegrations({
+      removal: async () => jsonResponse({ ...plan, notice }),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Remove' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove source' });
+    expect(await within(dialog).findByText(notice)).toBeDefined();
+    expect(within(dialog).getByLabelText(/^Type/)).toBeDefined();
   });
 });

@@ -13,7 +13,8 @@ from collections import Counter, defaultdict
 
 from sqlalchemy import delete, func, or_, select, update
 
-from .guests import state_of
+from .collection import parsed_date
+from .guests import EFFECTIVE, state_of
 from .models import (
     AccessRequest,
     Audit,
@@ -29,6 +30,7 @@ from .models import (
     Relationship,
     Resource,
     Sighting,
+    utc,
     utcnow,
 )
 
@@ -42,6 +44,20 @@ def _live_read_passes(integration_id: str):
     now = utcnow()
     return (GuestPass.integration_id == integration_id, GuestPass.issued_by.is_(None), GuestPass.ended_at.is_(None),
             or_(GuestPass.expires_at.is_(None), GuestPass.expires_at > now))
+
+
+def _let_on(device: Resource, actions: list[GuestAction], now) -> bool:
+    """A guest Nyctr itself let on at the source whose time there has not run out. It does not hold removal
+    back, because the grant ends by itself at the source, but after removal Nyctr cannot cut it off."""
+    latest = next((a for a in actions if a.execution in EFFECTIVE), None)
+    if not latest or latest.action not in ("admit", "restore") or latest.execution != "applied":
+        return False
+    if state_of(device, actions) != "online":
+        return False
+    try:
+        return parsed_date(device.attributes["guest"]["expires_at"]) > utc(now)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return True
 
 
 def plan(db, integration: Integration, resources: list[Resource]) -> dict:
@@ -76,8 +92,19 @@ def plan(db, integration: Integration, resources: list[Resource]) -> dict:
         "passes": _count(db, GuestPass, GuestPass.integration_id == iid) - _count(db, GuestPass,
                                                                                   *_live_read_passes(iid)),
     }
+    let_on = sum(_let_on(row, actions[row.id], now) for row in resources if row.id in actions)
     return {"id": iid, "name": integration.name, "provider": integration.provider,
-            "remove": remove, "keep": keep, "held": held}
+            "remove": remove, "keep": keep, "held": held, "let_on": let_on}
+
+
+def let_on_message(count: int) -> str | None:
+    """Tell the administrator, before removing, about guests Nyctr let on that stay on at the source."""
+    if not count:
+        return None
+    one = count == 1
+    return (f"{count} guest{'' if one else 's'} Nyctr let on {'stays' if one else 'stay'} let on at this source "
+            f"until {'its' if one else 'their'} time ends. After removal, Nyctr can no longer cut "
+            f"{'it' if one else 'them'} off.")
 
 
 def held_message(held: dict) -> str | None:
