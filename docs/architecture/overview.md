@@ -38,6 +38,24 @@ one copy claims the same way as a run. A Collect pressed by a person and a
 connection test are not retried. Moving scheduled collection and background
 analysis to a separate worker process is future work.
 
+The upkeep loop ticks every 30 seconds, and a tick never waits for a provider.
+It starts ending the exceptions whose time is up, and it starts a collection
+pass (the scheduled run if one is due, then the retries that are due) unless
+this copy's previous pass is still going. So an exception is ended within one
+tick of its expiry plus its own call to the source, and the calls for
+exceptions ahead of it at that same source, however long a collection takes. A
+run or retry that comes due during a pass is not claimed until the pass ends;
+it stays due in the database for the next tick, or for another copy. Ending an
+exception locks no row during the provider call. Afterwards it locks the
+exception's row, reads it again and records the outcome only if it is still
+open, so two copies record one ending. Two copies can still both ask the source
+to remove the entry; a missing entry counts as removed. A collection locks its
+source's row and then the rows it stores, only while storing; ending an
+exception locks only the exception's row, so the two never wait on each other.
+Stopping Nyctr cancels a pass in progress: the source being read stays marked
+as collecting until its lease is five minutes old, and the next run then takes
+it over.
+
 Saved-integration diagnostics reuse the bounded, verified read transport under
 the collection lease. They return an ephemeral report of checked capabilities
 and evidence gaps without importing the examined snapshot or changing the last

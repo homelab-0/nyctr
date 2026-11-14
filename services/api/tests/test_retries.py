@@ -48,7 +48,7 @@ def fail_dns(monkeypatch, errors):
 
 def tick(app, now):
     """Run one upkeep pass of this copy of Nyctr at a chosen time."""
-    return asyncio.run(worker.tick(app.state.session_factory, app.state.settings, now))
+    return asyncio.run(worker.collection_pass(app.state.session_factory, app.state.settings, now))
 
 
 def dns(app):
@@ -151,7 +151,7 @@ def test_two_copies_on_one_database_run_a_retry_once(tmp_path, monkeypatch):
         seed_live_member(one)
 
         async def both(now):
-            return await asyncio.gather(*(worker.tick(copy.state.session_factory, copy.state.settings, now)
+            return await asyncio.gather(*(worker.collection_pass(copy.state.session_factory, copy.state.settings, now)
                                           for copy in (one, two)))
 
         asyncio.run(both(start))
@@ -249,7 +249,7 @@ def test_the_wait_is_counted_from_when_the_attempt_failed(tmp_path, monkeypatch,
     app = live_app(tmp_path)
     with TestClient(app):
         seed_live_member(app)
-        asyncio.run(worker.tick(app.state.session_factory, app.state.settings, clock=lambda: clock[0]))
+        asyncio.run(worker.collection_pass(app.state.session_factory, app.state.settings, clock=lambda: clock[0]))
         with app.state.session_factory() as db:
             failed = db.scalar(select(Audit).where(Audit.action == "integration.collection_failed"))
             assert utc(datetime.fromisoformat(failed.details["retry_at"])) == start + timedelta(seconds=50 + wait)
@@ -342,16 +342,16 @@ def test_a_copy_claims_each_retry_just_before_running_it(tmp_path, monkeypatch):
             raise PASSING["broken connection"]()
         if len(asked) == 3:  # Copy one's first retry is slow; copy two works meanwhile.
             clock[0] += timedelta(minutes=6)
-            await worker.tick(two.state.session_factory, two.state.settings, clock=lambda: clock[0])
+            await worker.collection_pass(two.state.session_factory, two.state.settings, clock=lambda: clock[0])
         return Snapshot()
 
     fail_dns(monkeypatch, [])
     monkeypatch.setattr("nyctr.integrations.collect", collect)
     with TestClient(one), TestClient(two):
         seed_live_member(one)
-        asyncio.run(worker.tick(one.state.session_factory, one.state.settings, clock=lambda: clock[0]))
+        asyncio.run(worker.collection_pass(one.state.session_factory, one.state.settings, clock=lambda: clock[0]))
         clock[0] = start + timedelta(minutes=1)
-        asyncio.run(worker.tick(one.state.session_factory, one.state.settings, clock=lambda: clock[0]))
+        asyncio.run(worker.collection_pass(one.state.session_factory, one.state.settings, clock=lambda: clock[0]))
         assert sorted(asked) == ["dns", "dns", "unifi", "unifi"]
 
 
@@ -372,6 +372,6 @@ def test_no_retry_runs_once_the_next_scheduled_run_is_due_even_in_a_long_pass(tm
     app = live_app(tmp_path)
     with TestClient(app):
         seed_live_member(app)
-        asyncio.run(worker.tick(app.state.session_factory, app.state.settings, clock=lambda: clock[0]))
+        asyncio.run(worker.collection_pass(app.state.session_factory, app.state.settings, clock=lambda: clock[0]))
         assert len(asked) == 2 and clock[0] == start + timedelta(minutes=15)
         assert tick(app, clock[0]) is True and len(asked) == 4

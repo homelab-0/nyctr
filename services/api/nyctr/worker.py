@@ -1,9 +1,13 @@
 """Background upkeep: close expired access, and collect on the schedule in force.
 
-Runs inside each API process. Closing leases is always on so temporary access
-ends even if nobody opens the console. The collection schedule is read from the
-database at every pass, so a change an administrator saves applies within one tick
-on every running copy, and it never runs in demo mode.
+Runs inside each API process. Every 30 seconds a tick does two separate things,
+and neither waits for the other. It ends the exceptions whose time is up, so
+temporary access ends even if nobody opens the console and however long a
+collection takes. And it starts a collection pass unless this copy's previous
+pass is still going: the pass claims the scheduled run if one is due, collects
+each source in turn, then runs the retries that are due. The schedule is read
+from the database at every pass, so a change an administrator saves applies at
+the next pass on every running copy, and it never runs in demo mode.
 
 A scheduled collection that fails for a reason that may pass is retried up to
 three times before the source is shown as failed (see `schedule.plan_retry`).
@@ -18,10 +22,10 @@ import logging
 from sqlalchemy import select, update
 
 from . import schedule
-from .access import reconcile
+from .access import end_lease
 from .collection import after_collection, collect_integration
 from .guests import enforce
-from .models import Integration, utcnow
+from .models import Integration, Lease, utcnow
 from .security import audit
 
 log = logging.getLogger("nyctr.worker")
@@ -137,8 +141,8 @@ async def retry_due(factory, settings, plan, clock) -> None:
         await _analyse(factory, settings)
 
 
-async def tick(factory, settings, now=None, *, clock=None) -> bool:
-    """Run one upkeep pass and say whether it performed a scheduled collection.
+async def collection_pass(factory, settings, now=None, *, clock=None) -> bool:
+    """Run one collection pass and say whether it performed a scheduled collection.
 
     The run is claimed in the database before any source is contacted, so a
     second copy of Nyctr on the same database skips it. Retries that are due
@@ -147,7 +151,6 @@ async def tick(factory, settings, now=None, *, clock=None) -> bool:
     """
     clock = clock or ((lambda: now) if now else utcnow)
     with factory() as db:
-        await reconcile(db, settings)
         plan = schedule.in_force(db, settings)
         due = schedule.claim_run(db, plan, clock())
     if due:
@@ -156,14 +159,91 @@ async def tick(factory, settings, now=None, *, clock=None) -> bool:
     return due
 
 
-async def run(app) -> None:
-    """Loop until cancelled. One failed pass is logged without its cause text and retried next tick."""
-    settings, factory = app.state.settings, app.state.session_factory
-    while True:
-        await asyncio.sleep(TICK_SECONDS)
+async def end_at_source(factory, settings, lease_ids: list[str]) -> None:
+    """End one source's expired exceptions in turn, each in its own transaction.
+
+    In turn, because two exceptions for one address share one entry at the source
+    and the entry goes only with the last of them. No row is locked during the
+    provider call. After it the exception's row is locked and read again, and the
+    outcome is recorded only if it is still open: another copy of Nyctr, or
+    someone reading the list, may have ended it meanwhile, and then nothing is
+    written here. A failure is logged without its cause text and the rest go on;
+    an exception that could not be ended stays open and is tried again next tick.
+    """
+    for lease_id in lease_ids:
         try:
-            await tick(factory, settings)
-        except asyncio.CancelledError:
-            raise
+            with factory() as db:
+                lease = db.get(Lease, lease_id)
+                if lease is None or lease.status != "active":
+                    continue
+                await end_lease(db, settings, lease, "expired")
+                with db.no_autoflush:  # Read what is stored, not what this session is about to write.
+                    stored = db.scalar(select(Lease.status).where(Lease.id == lease_id).with_for_update())
+                if stored != "active":
+                    db.rollback()
+                    continue
+                db.commit()
+        except Exception as error:  # noqa: BLE001 - one exception's failure must not keep the others open
+            log.warning("Ending an expired exception failed: %s", type(error).__name__)
+
+
+class Upkeep:
+    """One copy's upkeep: what a tick starts, and what is still going from earlier ticks.
+
+    A tick never waits for a provider. It starts at most one collection pass, and
+    at most one run of endings per source, so a slow collection or a source that
+    does not answer holds up neither the next tick nor the other sources.
+    """
+
+    def __init__(self, factory, settings, clock=utcnow):
+        self.factory, self.settings, self.clock = factory, settings, clock
+        self.collecting: asyncio.Task | None = None
+        self.ending: dict[str | None, asyncio.Task] = {}
+
+    def tick(self) -> None:
+        """Start a collection pass if none is going, then the endings that are due.
+
+        A run or retry that comes due during a pass is not claimed until the pass
+        ends, so it stays due in the database for the next tick, or for another copy.
+        """
+        if self.collecting is None or self.collecting.done():
+            self.collecting = asyncio.create_task(self._collect())
+        with self.factory() as db:
+            due = db.execute(select(Lease.id, Lease.integration_id).where(
+                Lease.status == "active", Lease.expires_at.is_not(None), Lease.expires_at <= self.clock()
+            ).order_by(Lease.expires_at)).all()
+        by_source: dict[str | None, list[str]] = {}
+        for lease_id, source in due:
+            by_source.setdefault(source, []).append(lease_id)
+        for source, lease_ids in by_source.items():
+            # Endings still going at this source cover it; what they miss is due again next tick.
+            if source not in self.ending or self.ending[source].done():
+                self.ending[source] = asyncio.create_task(end_at_source(self.factory, self.settings, lease_ids))
+
+    async def _collect(self) -> None:
+        """Run one collection pass. A failure is logged without its cause text; the next tick starts another."""
+        try:
+            await collection_pass(self.factory, self.settings, clock=self.clock)
         except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
             log.warning("Background upkeep failed: %s", type(error).__name__)
+
+    async def stop(self) -> None:
+        """Cancel whatever is still going and wait until it has stopped."""
+        tasks = [task for task in (self.collecting, *self.ending.values()) if task]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def run(app) -> None:
+    """Tick until cancelled, then stop what is in progress. A failed tick is logged without its cause text."""
+    upkeep = Upkeep(app.state.session_factory, app.state.settings)
+    try:
+        while True:
+            await asyncio.sleep(TICK_SECONDS)
+            try:
+                upkeep.tick()
+            except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
+                log.warning("Background upkeep failed: %s", type(error).__name__)
+    finally:
+        await upkeep.stop()

@@ -34,7 +34,7 @@ def next_at(client):
 
 def tick(app, now):
     """Run one upkeep pass of this copy of Nyctr at a chosen time."""
-    return asyncio.run(worker.tick(app.state.session_factory, app.state.settings, now))
+    return asyncio.run(worker.collection_pass(app.state.session_factory, app.state.settings, now))
 
 
 def test_the_starting_value_is_the_deployment_interval_or_fifteen_minutes_and_demo_never_collects(
@@ -190,7 +190,7 @@ def test_two_copies_on_one_database_run_a_scheduled_collection_once(tmp_path, mo
         headers = live_signin(client)
 
         async def both(now):
-            return await asyncio.gather(*(worker.tick(copy.state.session_factory, copy.state.settings, now)
+            return await asyncio.gather(*(worker.collection_pass(copy.state.session_factory, copy.state.settings, now)
                                           for copy in (one, two)))
 
         assert sorted(asyncio.run(both(start))) == [False, True]
