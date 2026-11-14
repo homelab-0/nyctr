@@ -295,6 +295,30 @@ def test_a_preexisting_entry_is_never_removed(tmp_path, monkeypatch):
         assert allowlist == ["click.proofing-studio.example"] and all(method == "GET" for method, _ in calls)
 
 
+@pytest.mark.parametrize("before, said", [("ours", "removed"), ("gone", "already_gone"), ("theirs", "not_owned")])
+def test_an_ending_records_what_it_did_at_the_source(tmp_path, monkeypatch, before, said):
+    """Removed, nothing left to remove, or never Nyctr's: the record and the administrator's list say which."""
+    allowlist = ["click.shootproof.com"] if before == "theirs" else []
+    nextdns_mock(monkeypatch, allowlist)
+    app = live_app(tmp_path, provider_writes="nextdns")
+    with TestClient(app) as client:
+        seed_live_member(app)
+        _row, admin_headers = open_live(client, app)
+        lease = client.get("/api/leases").json()[0]
+        assert lease["removal"] is None
+        if before == "gone":
+            allowlist.clear()  # Someone took it out at the source meanwhile.
+        assert client.post(f"/api/leases/{lease['id']}/end", headers=admin_headers).status_code == 200
+        assert client.get("/api/leases").json()[0]["removal"] == said
+        with app.state.session_factory() as db:
+            closed = db.scalar(select(Audit).where(Audit.action == "access.closed"))
+            assert closed.details["removal"] == said and closed.details["execution"] == "applied"
+        # The member whose exception it was is told nothing about the source.
+        live_signin(client, LIVE_MEMBER)
+        assert [row["status"] for row in client.get("/api/leases").json()] == ["ended"]
+        assert "removal" not in client.get("/api/leases").json()[0]
+
+
 def test_a_failed_close_stays_open_visible_and_retried(tmp_path, monkeypatch):
     """When the provider refuses the removal the lease stays active with an error, never silently ended."""
     allowlist: list[str] = []

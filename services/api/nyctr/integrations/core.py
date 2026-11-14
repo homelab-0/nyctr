@@ -176,7 +176,7 @@ def iso(value: datetime) -> str:
 def source_id(value: Any) -> str:
     """Validate a bounded source identifier without altering its original value."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,255}", value):
-        raise IntegrationError("The provider returned an invalid resource identifier.")
+        raise IntegrationError("The source returned an invalid resource identifier.")
     return value
 
 
@@ -511,10 +511,10 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
             if (evidence := _probe_evidence.get()) is not None:
                 evidence.responses_received += 1
             if response.is_redirect:
-                raise IntegrationError("Provider redirected the request; redirects are never followed.")
+                raise IntegrationError("The source redirected the request; redirects are never followed.")
             if response.status_code in {401, 403}:
                 _fault("refused")
-                raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
+                raise IntegrationError("The source denied access. Check the configured key and its read permissions.",
                                        category="authentication")
             if response.status_code == 429:
                 raise IntegrationError("The source's request limit was reached. Try collecting again later.", category="rate_limit",
@@ -523,31 +523,31 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
                 # A 408 is the source giving up on a read it could not finish: like a 5xx, it may pass.
                 passing = response.status_code >= 500 or response.status_code == 408
                 _fault("source_error" if passing else None)
-                raise IntegrationError(f"Provider returned HTTP {response.status_code}.", transient=passing)
+                raise IntegrationError(f"The source returned HTTP {response.status_code}.", transient=passing)
             chunks: list[bytes] = []
             size = 0
             async for chunk in response.aiter_bytes():
                 size += len(chunk)
                 if size > MAX_BODY_BYTES:
-                    raise IntegrationError("Provider response exceeded the collection size limit.")
+                    raise IntegrationError("The source's answer exceeded the collection size limit.")
                 chunks.append(chunk)
             raw = b"".join(chunks)
             payload = {} if method != "GET" and not raw.strip() else json.loads(raw)
     except (httpx.HTTPError, OSError) as exc:
-        raise IntegrationError("Could not securely connect to the provider. Check its address, certificate, and availability.",
+        raise IntegrationError("Could not securely connect to the source. Check its address, certificate, and availability.",
                                category=_transport_category(exc)) from None
     except (ValueError, UnicodeError):
-        raise IntegrationError("Provider returned invalid JSON.") from None
+        raise IntegrationError("The source returned invalid JSON.") from None
     finally:
         if turn is not None:
             # Counted from the answer, so the limit holds by the source's clock as well as ours.
             turn[0] = monotonic()
     if not isinstance(payload, dict):
-        raise IntegrationError("Provider response must be a JSON object.")
+        raise IntegrationError("The source's answer must be a JSON object.")
     if payload.get("errors"):
         # NextDNS can report failures with HTTP 200. Never expose error bodies,
         # which may contain reflected credentials, addresses, or request inputs.
-        raise IntegrationError("Provider reported an API error. Check the configuration and read permissions.")
+        raise IntegrationError("The source reported an API error. Check the configuration and read permissions.")
     return payload
 
 
@@ -555,9 +555,9 @@ def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Require a bounded list of JSON objects before pagination imports any rows."""
     rows = payload.get("data")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise IntegrationError("Provider returned an invalid list response.")
+        raise IntegrationError("The source returned an invalid list response.")
     if len(rows) > 1000:
-        raise IntegrationError("Provider ignored the requested page size.")
+        raise IntegrationError("The source ignored the requested page size.")
     return rows
 
 
@@ -573,12 +573,12 @@ async def offset_pages(client: ReadClient, path: str) -> list[dict[str, Any]]:
         for metadata_key in ("offset", "count", "totalCount"):
             value = payload.get(metadata_key)
             if value is not None and (type(value) is not int or value < 0):
-                raise IntegrationError("Provider returned invalid pagination metadata.")
+                raise IntegrationError("The source returned invalid pagination metadata.")
         if payload.get("offset", offset) != offset or payload.get("count", len(rows)) != len(rows):
-            raise IntegrationError("Provider returned inconsistent pagination metadata.")
+            raise IntegrationError("The source returned inconsistent pagination metadata.")
         fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
         if rows and fingerprint in seen:
-            raise IntegrationError("Provider repeated a page; incomplete inventory was not imported.")
+            raise IntegrationError("The source repeated a page; incomplete inventory was not imported.")
         seen.add(fingerprint)
         results.extend(rows)
         total = payload.get("totalCount")
@@ -586,11 +586,11 @@ async def offset_pages(client: ReadClient, path: str) -> list[dict[str, Any]]:
             if offset + len(rows) >= total:
                 return results
             if not rows:
-                raise IntegrationError("Provider ended pagination before its advertised total.")
+                raise IntegrationError("The source ended pagination before its advertised total.")
         elif len(rows) < PAGE_SIZE:
             return results
         offset += len(rows)
-    raise IntegrationError("Provider inventory exceeded the page limit; narrow the site scope.")
+    raise IntegrationError("The source's inventory exceeded the page limit; narrow the site scope.")
 
 
 async def cursor_pages(client: ReadClient, path: str, params: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
@@ -612,12 +612,12 @@ async def cursor_pages(client: ReadClient, path: str, params: dict[str, Any]) ->
         results.extend(rows)
         meta = payload.get("meta", {})
         if not isinstance(meta, dict) or not isinstance(meta.get("pagination", {}), dict):
-            raise IntegrationError("Provider returned invalid cursor pagination metadata.")
+            raise IntegrationError("The source returned invalid cursor pagination metadata.")
         cursor = meta.get("pagination", {}).get("cursor")
         if cursor is None:
             return results, False
         if not isinstance(cursor, str) or not cursor or len(cursor) > 2048 or cursor in seen:
-            raise IntegrationError("Provider returned an invalid or repeated pagination cursor.")
+            raise IntegrationError("The source returned an invalid or repeated pagination cursor.")
         seen.add(cursor)
         query["cursor"] = cursor
     return results, True

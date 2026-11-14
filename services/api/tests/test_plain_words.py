@@ -126,6 +126,16 @@ def test_a_gap_text_never_states_a_cause_the_sentence_beside_it_may_contradict()
                 assert describe_gaps(provider.gap_notes, {code: [cause]})[0][2] == f"{text} {sentence}"
 
 
+def test_no_sentence_the_server_answers_with_says_provider_or_sync():
+    """Refusals, failures and connection-test lines say source and collect. Sign-in keeps "identity provider"."""
+    source = "\n".join(path.read_text() for path in sorted(API.rglob("*.py")))
+    said = re.findall(r'(?:IntegrationError|HTTPException)\(\s*(?:\d+,\s*)?f?"([^"]+)"', source)
+    said += [text for pair in diagnostics._FAILURES.values() for text in pair] + list(diagnostics._CHECK_LABELS.values())
+    assert len(said) > 150
+    assert [text for text in said if re.search(r"\bprovider|\bsync", re.sub(r"identity.provider", "", text, flags=re.I),
+                                               re.I)] == []
+
+
 def test_a_request_limit_is_told_in_the_pages_own_words():
     """Whether Nyctr held a request back or the source turned one away, the sentence says source and collect."""
     core = (API / "integrations" / "core.py").read_text()

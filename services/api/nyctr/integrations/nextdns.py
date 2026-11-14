@@ -191,7 +191,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
                 snapshot.resources.append(device_node)
                 snapshot.relationships.append(relationship(
                     integration_id, ID, device_node["id"], profile_node["id"], "uses_dns_profile", core.iso(observed),
-                    evidence_kind="observed", attributes={"meaning": "Provider-reported device label; no user ownership established."},
+                    evidence_kind="observed", attributes={"meaning": "Device label reported by the source; no user ownership established."},
                 ))
             reasons = row.get("reasons", [])
             if not isinstance(reasons, list) or any(not isinstance(x, dict) for x in reasons):
@@ -251,7 +251,7 @@ PROVIDER = Provider(
     provides=frozenset({"dns.blocks", "dns.exceptions"}),
     gaps=(
         ("upstream_identity", "Upstream DNS is not user identity",
-         "A shared DNS profile or provider device label cannot identify the person who made a query. Blocks remain unassigned until trusted attribution exists."),
+         "A shared DNS profile or a device label from the source cannot identify the person who made a query. Blocks remain unassigned until trusted attribution exists."),
         ("dns_scope", "DNS decisions cover one enforcement layer",
          "A DNS block does not establish a firewall decision, HTTPS result, or destination risk. Unknown risk remains unknown."),
     ),

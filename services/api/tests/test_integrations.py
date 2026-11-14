@@ -431,7 +431,7 @@ def test_a_server_error_may_pass_and_a_rate_limit_keeps_its_wait_in_seconds(
         run_nextdns()
     error = caught.value
     assert (error.category, error.transient, error.retry_after) == (category, transient, wait)
-    assert "secret" not in str(error) and (status != 503 or str(error) == "Provider returned HTTP 503.")
+    assert "secret" not in str(error) and (status != 503 or str(error) == "The source returned HTTP 503.")
 
 
 def test_repeated_offset_page_is_rejected(monkeypatch):

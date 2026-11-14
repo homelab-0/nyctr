@@ -107,6 +107,14 @@ def test_expired_observations_are_removed(client, app, admin_headers):
         assert db.get(Observation, "block-expired") is None
 
 
+def test_the_map_says_where_each_item_came_from_and_source_lists_say_what_was_read(client, admin_headers):
+    """An administrator's Map can tell two same-named things apart, and a source never read is not named as read."""
+    nodes = client.get("/api/graph").json()["nodes"]
+    assert nodes and all(node["integration_id"] for node in nodes)
+    assert {source["collected"] for source in client.get("/api/rules").json()["sources"]} == {True}
+    assert {source["collected"] for source in client.get("/api/guests").json()["sources"]} == {True}
+
+
 def test_request_checks_csrf_ownership_freshness_and_duration(client, member_headers):
     """Request creation must enforce CSRF, event visibility, freshness, and duration limits."""
     body = {"block_id": "block-gallery", "reason": "Need to open a picture gallery", "duration_minutes": 60}

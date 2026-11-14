@@ -29,6 +29,7 @@ from .deps import admin, columns, device_permitted, get_db, identity, observatio
 from .integrations import IntegrationError, registry
 from .models import (
     AccessRequest,
+    Audit,
     DeviceLink,
     Integration,
     Lease,
@@ -372,7 +373,10 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             "by hand.")
         return False
     claim = failure = None
+    # What ending did at the source, for the record: only an entry Nyctr added is ever removed.
+    removal = "not_owned" if lease.execution == "applied" else None
     if lease.execution == "applied" and lease.owned:
+        removal = "kept_for_another"
         claim = _claim_entry(db, lease)
         if claim is None:
             raise BeingEnded
@@ -387,8 +391,9 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             try:
                 if not integration or not key or not opener:
                     raise IntegrationError("The source's secret is not configured on the server.")
-                await opener.disallow_domain(integration.config, key, lease.domain,
-                                             allowed=settings.write_mode(integration.provider) == "enabled")
+                sent = await opener.disallow_domain(integration.config, key, lease.domain,
+                                                    allowed=settings.write_mode(integration.provider) == "enabled")
+                removal = "removed" if sent.get("removed") else "already_gone"
             except IntegrationError as error:
                 failure = str(error)
             except BaseException:  # Stopped mid-call: give the claim back so the next start can end it.
@@ -406,7 +411,8 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         db.refresh(lease)
         return True
     lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", reason, utcnow(), None
-    audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=lease.execution)
+    audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=lease.execution,
+          **({"removal": removal} if removal else {}))
     return True
 
 
@@ -536,8 +542,12 @@ async def leases(request: Request, auth=Depends(identity), db: Session = Depends
         query = query.where(Lease.requester_id == auth[0].id)
         return [lease_json(row) for row in db.scalars(query)]
     names, known = _names(db), set(db.scalars(select(Integration.id)))
-    return [{**lease_json(row, names), "source_removed": bool(row.integration_id) and row.integration_id not in known}
-            for row in db.scalars(query)]
+    rows = list(db.scalars(query))
+    # What each ending did at the source is kept in its audit record, not on the exception.
+    removal = {event.target_id: event.details.get("removal") for event in db.scalars(select(Audit).where(
+        Audit.action == "access.closed", Audit.target_id.in_([row.id for row in rows if row.status == "ended"])))}
+    return [{**lease_json(row, names), "source_removed": bool(row.integration_id) and row.integration_id not in known,
+             "removal": removal.get(row.id)} for row in rows]
 
 
 class EndInput(BaseModel):
@@ -578,7 +588,7 @@ async def end(lease_id: str, request: Request, body: EndInput | None = None, use
         raise HTTPException(409, "Nyctr is already ending this exception. Look again in a moment.") from None
     db.commit()
     if not done:
-        raise HTTPException(502, "Nyctr could not remove the entry at the provider. It is still open and will be retried.")
+        raise HTTPException(502, "Nyctr could not remove the entry at the source. It is still open and will be retried.")
     return lease_json(lease, _names(db))
 
 
@@ -635,7 +645,7 @@ def rules(request: Request, _user=Depends(admin), db: Session = Depends(get_db))
                         "provider_name": provider.name if provider else row.provider,
                         "changes": provider.changes if provider else [],
                         "write_mode": settings.write_mode(row.provider) if provider and provider.changes
-                        else "none"})
+                        else "none", "collected": row.last_sync is not None})
     return {"access": get_rule(db, "access_rule").model_dump(), "guest": get_rule(db, "guest_rule").model_dump(),
             "writes": {"access": feature_mode(db, settings, "dns.exceptions"),
                        "guests": feature_mode(db, settings, "guest.control")},

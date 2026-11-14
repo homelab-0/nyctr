@@ -308,7 +308,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 return None, "replaced"
             integration = db.get(Integration, integration_id)
             integration.last_error = (str(exc) if isinstance(exc, IntegrationError)
-                                      else "Collection failed. Check provider reachability and configuration.")
+                                      else "Collection failed. Check that the source can be reached and how it is set up.")
             failure = classify(exc, integration.last_error)
             try:
                 retry_at = hold(db, failure) if hold else None
@@ -323,7 +323,8 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 integration.last_error, retry_at = failure.message, None
             integration.status = previous if retry_at and previous != "syncing" else "error"
             integration.sync_started_at = None
-            details = {} if attempt is None else {"attempt": attempt}
+            # `why` is the sentence the source's card shows: Nyctr's own words, never the source's answer.
+            details = {"why": integration.last_error, **({} if attempt is None else {"attempt": attempt})}
             if retry_at:
                 details["retry_at"] = retry_at.isoformat()
             audit(db, actor, "integration.collection_failed", integration.id, name=integration.name, **details)

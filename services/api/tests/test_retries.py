@@ -17,13 +17,13 @@ PASSING = {
     "timeout": lambda: IntegrationError("Collection timed out.", category="timeout"),
     "overall timeout": lambda: TimeoutError(),
     "rate limit": lambda: IntegrationError("Rate limit.", category="rate_limit"),
-    "server error": lambda: IntegrationError("Provider returned HTTP 503.", transient=True),
+    "server error": lambda: IntegrationError("The source returned HTTP 503.", transient=True),
 }
 LASTING = {
     "refused key": lambda: IntegrationError("Denied.", category="authentication"),
     "missing key": lambda: IntegrationError("Key invalid.", category="secret"),
     "address not allowed": lambda: IntegrationError("Not in the allowlist."),
-    "client error": lambda: IntegrationError("Provider returned HTTP 404."),
+    "client error": lambda: IntegrationError("The source returned HTTP 404."),
     "certificate": lambda: IntegrationError("Bad certificate.", category="tls"),
     "unknown fault": lambda: RuntimeError("fabricated"),
 }
@@ -208,7 +208,7 @@ def test_switching_the_schedule_off_ends_pending_retries_and_shows_the_source_fa
         assert dns(app)[0] == "connected" and pending(app) == ["dns"]
         client.put("/api/collection", headers=live_signin(client), json={"enabled": False, "minutes": 15})
         tick(app, start + timedelta(seconds=30))
-        assert dns(app)[:2] == ("error", "Provider returned HTTP 503.")
+        assert dns(app)[:2] == ("error", "The source returned HTTP 503.")
         assert stopped(app) == ["schedule_off"] and pending(app) == []
         tick(app, start + timedelta(seconds=60))
         assert stopped(app) == ["schedule_off"]

@@ -90,9 +90,9 @@ def _stuck_leases(db) -> list[dict]:
     return [{
         "id": f"auto:lease-stuck:{lease.id}"[:128], "severity": "high",
         "title": f"{lease.domain} is still open after its time ran out",
-        "summary": "Nyctr could not remove this exception at the DNS provider and will keep trying. "
+        "summary": "Nyctr could not remove this exception at the DNS source and will keep trying. "
                    "Remove it by hand if this persists.",
-        "resource_ids": [], "evidence": [f"Provider error: {lease.last_error}"],
+        "resource_ids": [], "evidence": [f"What the source said: {lease.last_error}"],
     } for lease in db.scalars(select(Lease).where(Lease.status == "active", Lease.last_error.is_not(None)))]
 
 
