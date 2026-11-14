@@ -202,6 +202,60 @@ def test_an_opening_whose_claim_was_taken_over_stores_nothing_on_trust(tmp_path,
             assert [row[2] for row in rows(app)] == [True, False, False]
 
 
+@pytest.mark.parametrize("way_out", ["the read-back fails", "cut off at the time limit", "an unexpected error",
+                                     "stopped"])
+def test_a_stalled_opening_never_calls_an_entry_its_own_whichever_way_it_comes_out(tmp_path, monkeypatch, way_out):
+    """Its add was accepted and it stood still past the hold; the tick removed the entry; a person allowed the
+    address by hand and a second approval found it there. However the first opening then ends, its claim is no
+    longer its own: its record says not known, nothing is passed on, and the person's entry is never removed."""
+    with started(tmp_path) as (app, _client, member, admin):
+        source = Failing(monkeypatch, hold=(2, "after"))
+        if way_out == "cut off at the time limit":
+            monkeypatch.setattr(actions, "CHANGE_SECONDS", 2.0)
+
+        def broken(*_args, **_more):
+            raise RuntimeError("fabricated failure")
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                one, two = [(await sam.post("/api/requests", json=ask(block))).json()["id"] for block in ("one", "two")]
+                stalled = asyncio.create_task(review(owner, one))
+                await asyncio.wait_for(source.reached.wait(), 5)
+                age(app, "ending:")
+                with app.state.session_factory() as db:
+                    db.execute(update(Lease).values(expires_at=utcnow()))  # The record is due after the hold.
+                    db.commit()
+                    assert await access.reconcile(db, app.state.settings) == 1 and source.listed == []
+                source.listed.append(DOMAIN)  # By hand, at the source.
+                assert (await review(owner, two)).status_code == 200 and rows(app)[-1] == ("active", None, False)
+                if way_out == "the read-back fails":
+                    source.fail = {len(source.calls)}
+                elif way_out == "an unexpected error":  # After the add returned, before anything is stored.
+                    monkeypatch.setattr(access, "source_unchanged", broken)
+                if way_out == "stopped":
+                    stalled.cancel()
+                elif way_out != "cut off at the time limit":
+                    source.go.set()
+                if way_out in ("an unexpected error", "stopped"):
+                    with pytest.raises(RuntimeError if way_out == "an unexpected error" else asyncio.CancelledError):
+                        await stalled
+                else:
+                    assert (await stalled).status_code == 502
+                monkeypatch.undo()
+                Failing(monkeypatch).listed = source.listed
+                listed = (await owner.get("/api/leases")).json()
+                record = next(row for row in listed if row["status"] == "unconfirmed")
+                assert not record["owned"] and record["expires_at"] is None
+                assert "cannot tell whether it put it there" in record["last_error"]
+                for row in listed:
+                    if row["status"] != "ended":
+                        assert (await owner.post(f"/api/leases/{row['id']}/end")).status_code == 200
+
+        asyncio.run(scenario())
+        assert source.listed == [DOMAIN] and source.calls.count("DELETE") == 1  # The tick's, of Nyctr's own entry.
+        assert [row[2] for row in rows(app)] == [True, False, False] and claims(app) == [] and gates(app) == []
+
+
 @pytest.mark.parametrize("first", ["own", "other", "theirs"])
 def test_the_duty_to_remove_an_entry_nyctr_added_passes_on_and_a_persons_entry_is_never_removed(tmp_path, monkeypatch,
                                                                                                first):
@@ -614,3 +668,30 @@ def test_the_tick_leaves_a_claim_on_a_request_that_another_copy_took_over_in_tha
             monkeypatch.setattr(db, "scalars", read_then_taken_over)
             access.clear_stale_reviews(db)
         assert len(gates(app)) == 1 and note(app, made["id"])[1] == made["decision_note"]
+
+
+def test_a_member_is_given_no_note_that_is_no_longer_true_and_none_written_for_an_administrator(tmp_path, monkeypatch):
+    """An approval fails and a later one opens: the "not opened" note is gone. An exception of the member's whose
+    undo failed carries a sentence for the administrator: the member's own list does not."""
+    with started(tmp_path) as (app, _client, member, admin):
+        source = Failing(monkeypatch, fail={1})
+        by_hand = "Remove the exception for late.example at that source by hand."
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                made = (await sam.post("/api/requests", json=ask("one"))).json()
+                assert (await review(owner, made["id"])).status_code == 502
+                assert note(app, made["id"]) == ("pending", access.NOT_OPENED)
+                source.fail.clear()
+                assert (await review(owner, made["id"])).status_code == 200
+                assert note(app, made["id"]) == ("approved", "")
+                with app.state.session_factory() as db:
+                    db.add(Lease(integration_id="dns", domain="late.example", execution="applied", owned=True,
+                                 requester_id=made["requester_id"], last_error=by_hand))
+                    db.commit()
+                mine, all_of_them = (await sam.get("/api/leases")).json(), (await owner.get("/api/leases")).json()
+                assert sorted(row["domain"] for row in mine) == sorted([DOMAIN, "late.example"])
+                assert all(row["last_error"] is None for row in mine) and "by hand" not in str(mine)
+                assert by_hand in [row["last_error"] for row in all_of_them]
+
+        asyncio.run(scenario())

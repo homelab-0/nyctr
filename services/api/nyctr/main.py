@@ -750,6 +750,10 @@ def create_app(settings: Settings | None = None):
             if db.execute(update(AccessRequest).where(AccessRequest.id == request_id, AccessRequest.status == "pending")
                           .values(status=body.decision, review_note=body.note, decided_by=user.id)).rowcount != 1:
                 raise HTTPException(409, "This request has already been reviewed")
+            if approving:  # An earlier approval that failed left the member a note that is no longer true.
+                db.execute(update(AccessRequest).where(AccessRequest.id == request_id,
+                                                       AccessRequest.decision_note == access.NOT_OPENED)
+                           .values(decision_note=None))
             audit(db, user.id, "access." + body.decision, request_id, execution=execution)
             access.end_review(db, gate)  # Commits the decision, the exception and both claims given back.
         except BaseException as error:  # Every way out gives both claims back; failed work is rolled back first.

@@ -241,8 +241,9 @@ async def _not_confirmed(db: Session, settings: Settings, claim: Claim, error: B
     if not sent or added is False or isinstance(error, SourceGone) or (claim.said is not None and not ours) \
             or (record is None and not ours):
         return release_entry(db, claim)
-    if isinstance(error, TakenOver):
-        # It stood still past the hold and others changed the address meanwhile: its entry may have been
+    if not _mine(db, claim):
+        # Whatever way the opening came out (returned, failed, cut off, stopped): its claim is no longer its
+        # own, so it stood still past the hold and others changed the address meanwhile. Its entry may have been
         # removed, and one now there may be a person's. Not known, so Nyctr never acts on it: a person checks.
         db.execute(delete(Lease).where(Lease.id == claim.record))
         record = _record(db, claim, None)
@@ -373,6 +374,14 @@ def _give_back(db: Session, claim: Claim) -> bool:
                       .execution_options(synchronize_session=False)).rowcount == 1
 
 
+def _mine(db: Session, claim: Claim) -> bool:
+    """Lock the claim's row until the caller commits, and say whether it is still this attempt's own.
+
+    The one check every way out of an opening goes through before it writes that an entry is Nyctr's.
+    """
+    return db.scalar(select(Setting.updated_by).where(Setting.key == str(claim)).with_for_update()) == claim.mark
+
+
 def release_entry(db: Session, claim: Claim | None, unstored: bool = False) -> None:
     """Give a claim back at once, when what it was taken for will not happen, with its record. Commits.
 
@@ -382,8 +391,8 @@ def release_entry(db: Session, claim: Claim | None, unstored: bool = False) -> N
     """
     if claim and unstored and claim.added:
         db.execute(delete(Lease).where(Lease.id == claim.record))
-        _record(db, claim, False).expires_at = utcnow()
-        claim.record = None
+        record = _record(db, claim, False if _mine(db, claim) else None)  # Taken over meanwhile: not known.
+        record.expires_at, claim.record = utcnow() if record.owned else None, None
     if claim:
         db.execute(delete(Lease).where(Lease.id == claim.record))
         _give_back(db, claim)
@@ -776,7 +785,8 @@ async def leases(request: Request, auth=Depends(identity), db: Session = Depends
     query = select(Lease).order_by(Lease.created_at.desc()).limit(300)
     if auth[0].role != "admin":
         query = query.where(Lease.requester_id == auth[0].id)
-        return [lease_json(row) for row in db.scalars(query)]
+        # What went wrong at a source is written for an administrator: a member is given none of it.
+        return [{**lease_json(row), "last_error": None} for row in db.scalars(query)]
     names, known = _names(db), set(db.scalars(select(Integration.id)))
     rows = list(db.scalars(query))
     # What each ending did at the source is kept in its audit record, not on the exception.
