@@ -14,7 +14,12 @@ from pydantic import BaseModel
 from . import integrations
 from .integrations import registry
 from .integrations.core import (
-    IntegrationError, ProbeEvidence, capture_probe, describe_gaps, patience, utc_now,
+    IntegrationError,
+    ProbeEvidence,
+    capture_probe,
+    describe_gaps,
+    patience,
+    utc_now,
 )
 
 DIAGNOSTICS_TIMEOUT_SECONDS = 90

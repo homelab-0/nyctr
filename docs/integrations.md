@@ -167,6 +167,11 @@ saved sources that point at the same console. A request that does not fit waits
 for its turn instead of being sent and refused. A request is counted from when
 its answer arrived. The console's own address is not paced.
 
+A collection through the cloud address, with the `proxy` segment in the path as
+above, succeeded against a real console on 2026-11-13: one installation, read
+only. Everything else here, including the pacing, the error answers and the
+sharing between sites, is tested with fabricated answers only.
+
 - A collection whose lists each fit one page makes at most 96 requests and does
   not wait. One that needs more (a guest pass or Wi-Fi list long enough to page)
   finishes about a minute later.
@@ -180,11 +185,12 @@ its answer arrived. The console's own address is not paced.
 - A connection test waits at most 20 seconds in total for a turn. Past that it
   reports that the request limit is in use and to try again shortly.
 - While a scheduled collection waits, the console and the API are served as
-  usual, but the upkeep pass it belongs to does not move on: other sources'
-  scheduled collections and the ending of expired exceptions wait for it. Any
+  usual. The collection pass it belongs to does not move on: the other sources
+  in that pass, and a run or retry that comes due meanwhile, wait for it. Any
   source may hold the pass for its 60 seconds of reading; a paced source may
-  hold it for up to the 180 seconds above. Opening the list of exceptions ends
-  expired ones at once.
+  hold it for up to the 180 seconds above. The ending of expired exceptions
+  does not wait: the upkeep loop starts it on every tick, whether or not a
+  collection pass is still going.
 
 What pacing does not cover:
 

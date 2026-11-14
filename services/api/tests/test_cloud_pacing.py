@@ -4,6 +4,9 @@ import asyncio
 
 import httpx
 import pytest
+from conftest import live_app, live_signin, seed_live_member
+from fastapi.testclient import TestClient
+from sqlalchemy import select
 from test_device_networks import big, gear, network
 from test_integrations import KEY, mock_client
 
@@ -12,6 +15,7 @@ from nyctr.collection import classify
 from nyctr.diagnostics import diagnose_integration
 from nyctr.integrations import IntegrationError, collect, core, registry, unifi
 from nyctr.integrations.registry import Provider
+from nyctr.models import Integration, Resource
 
 CLOUD = "https://api.ui.com/v1/connector/consoles/0A1B2C3D0000:77/proxy/network/integration"
 DIRECT = "https://unifi.example/proxy/network/integration"
@@ -61,8 +65,8 @@ def serve(monkeypatch, sites, now=None, fault=None):
         if now:
             sent.append(now[0])
             now[0] += 0.05
-        if fault:
-            return fault()
+        if fault and (answer := fault(request)) is not None:
+            return answer
         path = request.url.path.split("/integration", 1)[1]
         if path not in lists:
             return httpx.Response(200, json=details[path])
@@ -121,7 +125,7 @@ def test_the_cloud_path_is_accepted_on_the_cloud_host_only(clock, monkeypatch, u
 
 def cloud_error(status, code, message, headers=None):
     """The cloud's documented error answer, with text that must never be repeated."""
-    return lambda: httpx.Response(status, headers=headers or {}, json={
+    return lambda request: httpx.Response(status, headers=headers or {}, json={
         "code": code, "httpStatusCode": status, "message": f"{message} private-detail", "traceId": "trace-private"})
 
 
@@ -134,7 +138,7 @@ def cloud_error(status, code, message, headers=None):
     (cloud_error(403, "forbidden", "insufficient permissions or not the owner of the host"),
      "authentication", False, None),
     (cloud_error(401, "unauthorized", "unauthorized"), "authentication", False, None),
-    (lambda: httpx.Response(200, json={"data": [{"id": "x" * 4096}]}), "provider_contract", False, None),
+    (lambda request: httpx.Response(200, json={"data": [{"id": "x" * 4096}]}), "provider_contract", False, None),
 ], ids=["rate-limit-with-wait", "rate-limit", "device-timeout", "bad-gateway", "not-the-owner", "unauthorized",
         "too-large"])
 def test_each_cloud_error_answer_fails_the_collection_by_its_meaning(clock, monkeypatch, fault, category, may_pass, wait):
@@ -248,3 +252,35 @@ def test_detail_reads_are_shared_between_sites_and_each_site_cut_short_says_so(c
     assert unifi._shares([100, 3, 60], 77) == [37, 3, 37] and unifi._shares([5, 5], 0) == [0, 0]
     assert unifi._shares([1, 1, 50, 50], 3) == [0, 0, 1, 1] and unifi._shares([4, 9], 40) == [4, 9]
     assert unifi._shares([1, 1, 1, 2], 3) == [0, 0, 0, 1] and unifi._shares([9, 2, 9], 12) == [5, 2, 5]
+
+
+def test_a_collection_cut_short_by_the_request_limit_shows_that_gap_on_the_source(clock, monkeypatch, tmp_path):
+    """An ordinary collection through the cloud address, not only a connection test, leaves the gap on the source."""
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", KEY)
+    _calls, sent = serve(monkeypatch, LARGE, clock[0])
+    app = live_app(tmp_path)
+    with TestClient(app) as client:
+        seed_live_member(app)
+        with app.state.session_factory() as db:
+            db.get(Integration, "unifi").config = {"base_url": CLOUD}
+            db.commit()
+        headers = live_signin(client)
+        assert client.post("/api/integrations/unifi/sync", headers=headers).status_code == 200
+        source = next(row for row in client.get("/api/integrations").json() if row["id"] == "unifi")
+        title, summary = registry.find("unifi_network").gap_notes["unifi_detail_limit"]
+        assert {"id": "unifi_detail_limit", "title": title, "summary": summary} in source["gaps"]
+        with app.state.session_factory() as db:
+            sites = db.scalars(select(Resource).where(Resource.integration_id == "unifi", Resource.kind == "site")).all()
+        assert [site.attributes["detail_reads_skipped"] for site in sites] == [{"devices": 51}]
+    # It was paced on the way: 98 requests, never more than the pace in any minute, under a minute of waiting.
+    assert len(sent) == 98 and most_in_a_minute(sent) == unifi.CLOUD_PACE and 55 < sum(clock[1]) <= 60
+
+
+def test_a_device_timeout_on_an_optional_read_is_a_gap_that_says_the_source_had_an_error(clock, monkeypatch):
+    """The cloud's 408 on one network's detail keeps the collection and records why that read is missing."""
+    timed_out = lambda request: (cloud_error(408, "DeviceTimeout", "Device connection timeout")(request)  # noqa: E731
+                                 if request.url.path.endswith("/networks/lan") else None)
+    serve(monkeypatch, SMALL, fault=timed_out)
+    with core.capture_probe() as evidence:
+        run()
+    assert evidence.gap_causes == {"unifi_networks_details_unavailable": {"source_error"}}

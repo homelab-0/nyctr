@@ -90,7 +90,7 @@ it keeps is source detail for people to read and query.
 | `network` | `vlan`, `subnets` (the address ranges the source configured, as `["192.0.2.0/24"]`), `gateway_ip`, `managed_by` (`gateway`, `switch` or `unmanaged`) |
 | `workload` | `nics: [{bridge, mac, vlan, firewall}]`, `firewall_enabled` |
 | `host` | `addresses` |
-| `site` | `wifi: [{name, enabled, captive_portal, network_id}]` |
+| `site` | `wifi: [{name, enabled, captive_portal, network_id}]`, `detail_reads_skipped: {networks, devices}` (how many detail reads a collection left out for this site to stay inside a request limit; absent when none were, and a kind is absent when none of that kind were) |
 | `dns_profile` | `logs_enabled` |
 
 Guest passes go in `Snapshot.passes` as `{id, code, name, minutes, guest_limit,
@@ -141,6 +141,19 @@ statement.
   only offers session sign-in: it may sign in and out of its own session (Pi-hole
   does, with one `POST` and one `DELETE` to `/api/auth`) and must say so in its
   module docstring.
+- **A source's request limit.** Where a source allows only so many requests in
+  a period, declare it: pass `core.Pace(key, requests, seconds=60.0)` as the
+  third argument of `ReadClient`. The key names what the source counts against
+  (one account, one console), so two saved sources with the same key share one
+  count; use `None` for an address that has no limit. Before each request the
+  core waits until one more fits. The count is kept in the running process, a
+  request holds its place until `seconds` after its answer arrived, and
+  collections and connection tests share it. Time spent waiting is not counted
+  in the 60 seconds a collection may read. A collection waits at most 120
+  seconds in total and a connection test 20; past that the request is not sent
+  and the collection ends as a rate limit carrying the wait. Declare fewer
+  requests than the source allows if anything else of yours uses the same
+  limit: changes made through `integrations/actions.py` are not paced.
 - **Changes live in `integrations/actions.py`** and nowhere else. Each takes an
   explicit `allowed` flag, validates its inputs, makes one documented call and
   reads back what it changed. They run only for an integration an operator named
