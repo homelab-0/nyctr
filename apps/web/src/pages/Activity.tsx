@@ -173,6 +173,12 @@ function summary(event: AuditEvent) {
   if (happened) parts.push(happened);
   if (d.by_rule === true || d.decided_by === 'rule') parts.push('by a written rule');
   if (typeof d.minutes === 'number') parts.push(`${d.minutes} min`);
+  // How long after the attempt the record was settled. Not "looked for": after a copy was killed Nyctr
+  // only waits until the claim can be taken over and then reads once.
+  if (typeof d.looked === 'number')
+    parts.push(
+      `settled ${d.looked < 90 ? counted(d.looked, 'second') : counted(Math.round(d.looked / 60), 'minute')} after the attempt`,
+    );
   if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
   if (typeof d.observations === 'number') parts.push(counted(d.observations, 'blocked lookup'));
   if (d.partial === true) parts.push('most recent only');

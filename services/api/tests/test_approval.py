@@ -42,10 +42,13 @@ def words(app):
 
 
 def age(app, prefix):
-    """Make the claims whose key starts so old enough to be taken over, as after a copy was killed or stood still."""
+    """Make the claims whose key starts so old enough to be taken over, as after a copy was killed or stood still,
+    and the attempts on record as old: five minutes have passed for both."""
     with app.state.session_factory() as db:
         db.execute(update(Setting).where(Setting.key.startswith(prefix)).values(
             updated_at=utcnow() - access.ENDING_HOLD))
+        db.execute(update(Lease).where(Lease.status == "unconfirmed").values(
+            created_at=utcnow() - access.ENDING_HOLD))
         db.commit()
 
 
@@ -352,7 +355,7 @@ def test_an_attempt_is_on_record_when_the_address_was_already_there_and_the_adds
                 db.commit()
                 assert await access.reconcile(db, app.state.settings) == 1
             assert source.listed == [DOMAIN] and source.calls.count("DELETE") == 1
-            assert rows(app)[-1] == ("ended", "not_confirmed", False)
+            assert ("ended", "not_confirmed", False) in rows(app)  # Its attempt is five minutes old by now.
 
         asyncio.run(scenario())
     monkeypatch.setattr(actions, "CHANGE_SECONDS", 0.3)

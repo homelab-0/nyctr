@@ -186,6 +186,27 @@ describe('ending an exception', () => {
     ).toBeTruthy();
   });
 
+  it('says until when Nyctr is still checking for an add it could not confirm', async () => {
+    mockApi({
+      'GET /leases': [
+        lease('late', {
+          status: 'unconfirmed',
+          execution: 'not_applied',
+          last_error: 'It may be open there.',
+          checking_until: '2026-11-13T10:05:00Z',
+        }),
+        lease('unknown', { status: 'unconfirmed', owned: false, last_error: 'Check there.' }),
+      ],
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={() => {}} />);
+    const text = (await screen.findByText('late.example')).closest('tr')!.textContent!;
+    expect(text).toMatch(/It may be open there\.Nyctr is still checking the source, until \S.*\./);
+    expect(screen.getByText('unknown.example').closest('tr')!.textContent).not.toContain(
+      'still checking',
+    );
+  });
+
   it('says what is listed may still be open at the source, never that it is not access', async () => {
     mockApi({
       'GET /leases': [

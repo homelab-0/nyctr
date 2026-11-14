@@ -260,6 +260,8 @@ export interface Lease {
   source_removed?: boolean;
   /** What ending it did at the source, as a code in `REMOVAL`. Administrators only. */
   removal?: string | null;
+  /** Until when Nyctr reads the source again for an opening it could not confirm. Administrators only. */
+  checking_until?: string | null;
 }
 export interface Suggestion {
   domain: string;

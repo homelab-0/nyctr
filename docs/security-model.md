@@ -131,11 +131,21 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   or the tick and a person, remove and record it once, and an opening and a
   removal of one address cannot cross. Each change at a source ends within 60
   seconds, as failed if it has not finished. An opening that fails after its add
-  may have been sent leaves a record, and Nyctr removes the entry itself. Known
-  limits. From the moment a record is listed as not confirmed until it is
+  may have been sent leaves a record, and Nyctr removes the entry itself. A
+  source can apply an add after Nyctr stopped waiting for it (Nyctr waits 20
+  seconds for a request and 60 for a change), so the record is not settled on
+  one read that shows nothing: for five minutes after the attempt Nyctr reads
+  the source again on every tick, removes the entry if it appears, and takes
+  an entry found there by a new opening of that address to be its own. Five
+  minutes is five times the longest Nyctr itself waits for a change and the
+  time after which a claim counts as abandoned; after it the record is settled
+  with how long Nyctr looked. Known limits. A source that applies an add more
+  than five minutes late leaves an entry nothing on record removes. From the
+  moment a record is listed as not confirmed until it is
   settled, Nyctr takes an entry for that address at that source to be its own
   and removes it: an administrator must not add the address there by hand while
-  Open now lists it as not confirmed, and the row says so. An entry added by
+  Open now lists it as not confirmed (at least five minutes after such an
+  attempt), and the row says so, with until when. An entry added by
   hand meanwhile may also be handed to another open exception for that address
   and removed later, when that exception ends, after the row is gone. Nyctr keeps no such
   record when the add itself reports that nothing was sent. It does keep one
