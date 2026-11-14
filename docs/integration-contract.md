@@ -102,6 +102,9 @@ are left alone; a list is treated as the complete current set.
 Blocks go in `Snapshot.blocks` with `source` set to the integration id, the
 provider's own reason text and `reason_codes`, `device_id` left `None`, and
 `risk_score` left `None`. Scoring happens in the core and uses your `classify`.
+`classify` must be a pure function of its text: the core remembers its answer for each
+distinct set of reasons for as long as the process runs, and the registry does not change
+in a running process.
 
 ## What the adapter states and what Nyctr works out
 

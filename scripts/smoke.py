@@ -93,7 +93,7 @@ def run(verify_persistence):
     member = Client()
     assert member.login("jamie@nyctr.demo")["role"] == "member"
     member.request("/api/integrations", expected=403)
-    blocks = member.request("/api/blocks")
+    blocks = member.request("/api/blocks")["rows"]
     assert blocks and all(block["attribution"] == "assigned" for block in blocks)
     requests = member.request("/api/requests")
 

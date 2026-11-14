@@ -73,7 +73,7 @@ def test_member_cannot_access_admin_data(client, member_headers):
 def test_member_sees_only_current_and_event_time_authorized_devices(client, member_headers):
     """The member inbox includes only owned/shared devices; guest, admin and unattributed events stay hidden."""
     assert {x["id"] for x in client.get("/api/devices").json()} == {"laptop-jamie", "tablet-family"}
-    blocks = client.get("/api/blocks").json()
+    blocks = client.get("/api/blocks").json()["rows"]
     assert {x["id"] for x in blocks} == {"block-gallery", "block-tablet", "block-fonts", "block-verify",
                                          "block-stream", "block-print"}
     assert {x["device_id"] for x in blocks} == {"laptop-jamie", "tablet-family"}
@@ -90,12 +90,12 @@ def test_new_assignment_cannot_expose_historical_blocks(client, app, member_head
         event.observed_at = utcnow() - timedelta(minutes=30)
         db.commit()
     assert "old-laptop" in {x["id"] for x in client.get("/api/devices").json()}
-    assert "block-old-owner" not in {x["id"] for x in client.get("/api/blocks").json()}
+    assert "block-old-owner" not in {x["id"] for x in client.get("/api/blocks").json()["rows"]}
 
 
 def test_admin_sees_iot_unattributed_and_other_owners_not_stale(client, admin_headers):
     """Administrator scope includes infrastructure and unknown origins but excludes expired events."""
-    blocks = {x["id"] for x in client.get("/api/blocks").json()}
+    blocks = {x["id"] for x in client.get("/api/blocks").json()["rows"]}
     assert {"block-washer", "block-unattributed", "block-admin", "block-old-owner"} <= blocks
     assert "block-expired" not in blocks
 
@@ -186,7 +186,7 @@ def test_assignment_revokes_access_and_history_is_not_backdated(client, admin_he
                           json={"classification": "personal", "user_ids": ["user-admin"]})
     assert response.status_code == 200
     signin(client, member=True)
-    assert "block-gallery" not in {x["id"] for x in client.get("/api/blocks").json()}
+    assert "block-gallery" not in {x["id"] for x in client.get("/api/blocks").json()["rows"]}
 
 
 def test_live_requires_bootstrap_and_has_no_demo_data(tmp_path):
@@ -292,7 +292,7 @@ def test_overview_names_what_it_counts_and_the_span_of_stored_blocks(client, adm
         kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
     assert overview["kind_counts"] == kinds
     assert sum(overview["kind_counts"].values()) == overview["resource_count"] == len(resources)
-    times = sorted(block["observed_at"] for block in client.get("/api/blocks").json())
+    times = sorted(block["observed_at"] for block in client.get("/api/blocks").json()["rows"])
     assert overview["recent_block_count"] == len(times) > 1
     assert (overview["oldest_block_at"], overview["newest_block_at"]) == (times[0], times[-1])
 

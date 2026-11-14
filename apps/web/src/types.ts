@@ -182,6 +182,28 @@ export interface Block {
   reason_codes: string[] | null;
 }
 export type RiskBand = 'low' | 'medium' | 'high' | 'unknown';
+/**
+ * One page of blocked lookups, newest first. Everything but `rows` and `matching` describes
+ * every lookup the caller may see, not the page: the server counts, the screen never does.
+ */
+export interface BlockList {
+  rows: Block[];
+  /** Hand back as `before` to read the next older page; null when there is none. */
+  next: string | null;
+  page_size: number;
+  total: number;
+  /** How many stored lookups pass the filter that was asked for. */
+  matching: number;
+  oldest_at: string | null;
+  newest_at: string | null;
+  counts: {
+    band: Record<RiskBand, number>;
+    /** By kind of source: how many it has stored, and how many of those name no device. */
+    source: Record<string, { total: number; unnamed: number }>;
+    named: number;
+    unnamed: number;
+  };
+}
 /** One explained contribution to a score. Null points mean the score is unknown. */
 export interface RiskFactor {
   label: string;

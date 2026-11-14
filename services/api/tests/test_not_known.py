@@ -106,7 +106,7 @@ def test_block_coverage_is_failed_while_a_source_that_once_collected_is_failing(
             for row in db.query(Observation):
                 db.delete(row)
             db.commit()
-        assert client.get("/api/blocks").json() == []
+        assert client.get("/api/blocks").json()["rows"] == []
         failing = answer(last_sync=utcnow() - timedelta(days=2), last_error="The source refused the key")
         assert failing == {"collected": "failed", "unassigned": False}
         # A retry is waiting, so the status is not "error" yet; the failure still counts.
@@ -132,10 +132,10 @@ def test_block_coverage_counts_only_stored_lookups_no_member_could_be_shown(tmp_
         assert answer()["unassigned"] is False
         # The source stops naming devices: the member's list empties, and the reason is given.
         assert lookups(device_id=None, attribution="unattributed")["unassigned"] is True
-        assert client.get("/api/blocks").json() == []
+        assert client.get("/api/blocks").json()["rows"] == []
         # A tie Nyctr only inferred has a device, but no member is shown it, so it counts the same.
         assert lookups(device_id="unifi:client:laptop", attribution="inferred")["unassigned"] is True
-        assert client.get("/api/blocks").json() == []
+        assert client.get("/api/blocks").json()["rows"] == []
         # Once it has expired it is no longer stored evidence of anything.
         assert lookups(expires_at=utcnow() - timedelta(minutes=1))["unassigned"] is False
 
@@ -166,9 +166,9 @@ def test_block_coverage_does_not_change_when_another_person_has_a_site_blocked(t
                                expires_at=now + timedelta(hours=20), evidence_kind="observed",
                                attribution="assigned", risk_score=None, risk_explanation=""))
             db.commit()
-        assert client.get("/api/blocks").json() == []
+        assert client.get("/api/blocks").json()["rows"] == []
         assert client.get("/api/blocks/coverage").json() == before
         # The person whose device it is sees the lookup, and gets the same two answers.
         live_signin(client, LIVE_MEMBER)
-        assert [row["domain"] for row in client.get("/api/blocks").json()] == ["blocked.example"]
+        assert [row["domain"] for row in client.get("/api/blocks").json()["rows"]] == ["blocked.example"]
         assert client.get("/api/blocks/coverage").json() == before
