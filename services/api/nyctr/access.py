@@ -655,6 +655,12 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     if why is None:
         minutes, name, turn, waited = min(row.duration_minutes, rule.max_minutes), integration.name, None, 0.0
         db.commit()  # The assessment is stored now: the opening takes a claim, and may undo what is unsaved.
+        # The rule's decision holds the request's claim like any other, so a person's decision on a request
+        # that is already listed as waiting is never overwritten. If a person has it, the rule leaves it to them.
+        gate = hold_review(db, row.id)
+        db.refresh(row)
+        if gate is None or row.status != "pending":
+            return end_review(db, gate) if gate else None
         try:
             # One automatic opening at a time for each person, so the day's count is right when it is read.
             while (turn := _claim(db, "ending:auto:" + sha256(row.requester_id.encode()).hexdigest()[:40])) is None:
@@ -672,7 +678,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                                  device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
                                  minutes=minutes, decided_by="rule", risk_score=assessment.score)
                 _give_back(db, turn)  # With the commit that stores the lease, so the next one counts it.
-                turn = None
+                _give_back(db, gate)
+                turn = gate = None
                 row.status, row.decided_by, row.duration_minutes = "auto_approved", "rule", minutes
                 row.decision_note = f"Opened for {minutes} minutes by the access rule."
                 return
@@ -685,6 +692,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             why = f"Nyctr could not change {name} just now, so a person decides."
         finally:
             release_entry(db, turn)
+            if gate:
+                end_review(db, gate)
     row.decision_note = why
 
 
