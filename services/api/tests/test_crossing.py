@@ -184,12 +184,16 @@ def test_an_approval_takes_the_claim_first_and_gives_it_back_on_every_way_out(tm
 
             with factory() as db:
                 held = access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))  # Being changed.
+                monkeypatch.setattr(access, "OPENING_WAITS", 0.5)
                 waiting = asyncio.create_task(review(two))
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.2)
+                code, status, detail = await review(two, "denied")  # Answered at once: an approval has the request.
+                assert (code, status) == (409, "pending") and detail == access.REVIEWING
+                code, _, detail = await waiting
+                assert code == 409 and "already changing" in detail
                 assert (await review(two, "denied"))[:2] == (200, "denied")  # Opens nothing, so takes no claim.
                 access.release_entry(db, held)
-                code, _, detail = await waiting
-                assert code == 409 and "already been reviewed" in detail and claims(app) == []
+                assert (await review(two))[0] == 409 and claims(app) == []
                 held = access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))
                 monkeypatch.setattr(access, "OPENING_WAITS", 0.3)
                 code, status, detail = await review(one)
