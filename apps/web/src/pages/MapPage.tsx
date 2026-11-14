@@ -13,7 +13,7 @@ import {
   sourceOf,
 } from '../components/ui';
 import { drawn, type MapView } from '../lib/map-layout';
-import type { Finding, Graph, Resource } from '../types';
+import type { Finding, Graph, Resource, Rules } from '../types';
 
 /** Attributes worth showing in the inspector, with plain names. Everything else stays in Queries. */
 const FACTS: [string, string][] = [
@@ -86,7 +86,13 @@ function facts(resource: Resource): [string, string][] {
  * sources reported something, so an administrator can start on the network side, pick a host,
  * and follow it into the source that runs it.
  */
-export default function MapPage({ params }: { params: URLSearchParams }) {
+export default function MapPage({
+  params,
+  sources,
+}: {
+  params: URLSearchParams;
+  sources?: Rules['sources'];
+}) {
   const graph = useApi<Graph>('/graph');
   const findings = useApi<Finding[]>('/findings');
   const [view, setView] = useState<MapView>('all');
@@ -109,6 +115,7 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
     [findings.data],
   );
   const pinned = useMemo(() => new Set(open.flatMap((item) => item.resource_ids)), [open]);
+  const named = useMemo(() => new Map((sources || []).map((s) => [s.id, s.name])), [sources]);
   if (graph.loading) return <Loading text="Drawing the map…" />;
   if (graph.error) return <ErrorState message={graph.error} retry={graph.reload} />;
   const data = graph.data!;
@@ -189,6 +196,7 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
           selected={selected}
           onSelect={setSelected}
           pinned={pinned}
+          sourceNames={named}
         />
         {node && (
           <aside className="inspector" ref={inspector} aria-label={`About ${node.name}`}>

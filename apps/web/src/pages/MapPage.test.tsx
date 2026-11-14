@@ -5,7 +5,7 @@ import { bigSite, link, thing } from '../test/map-site';
 import * as ui from '../components/ui';
 import { kindText } from './Inventory';
 import MapPage, { kindBasis } from './MapPage';
-import type { Graph, Resource } from '../types';
+import type { Graph, Resource, Rules } from '../types';
 
 // Every card asks for its icon once each time it is drawn, so these calls count the cards drawn.
 vi.mock('../components/ui', async (original) => {
@@ -195,6 +195,49 @@ describe('what a full square on the Map could not draw', () => {
     expect(reached.sort()).toEqual(site.nodes.map((item) => item.name).sort());
     expect(cards.length + boxes.length).toBeLessThan(110);
     expect(boxes.length).toBeGreaterThan(2);
+  });
+
+  it('says which source each of two things with one name is from, and cuts a name in the middle', async () => {
+    const of = (id: string, kind: string, name: string, integration_id: string) => ({
+      ...thing(id, kind, name),
+      integration_id,
+    });
+    const site: Graph = {
+      nodes: [
+        ...['one', 'two'].flatMap((source) => [
+          of(`lan-${source}`, 'network', 'Office LAN', source),
+          of(`gw-${source}`, 'gateway', 'Main gateway', source),
+        ]),
+        of('ap1', 'access_point', 'Example access point 1', 'one'),
+        of('ap8', 'access_point', 'Example access point 8', 'one'),
+      ],
+      edges: [],
+    };
+    mockApi({ 'GET /graph': site, 'GET /findings': [] });
+    const sources = [
+      { id: 'one', name: 'First site' },
+      { id: 'two', name: 'Second site' },
+    ] as Rules['sources'];
+    render(<MapPage params={new URLSearchParams()} sources={sources} />);
+    await screen.findByRole('group', { name: 'Network map' });
+    const text = (query: string) =>
+      [...document.querySelectorAll(query)].map((item) => item.textContent);
+    for (const name of ['First site', 'Second site']) {
+      expect(
+        screen.getByRole('button', { name: `Main gateway, Gateway, from ${name}` }),
+      ).toBeTruthy();
+      expect(text('.node .sub')).toContain(name);
+      expect(text('.node title')).toContain(`Main gateway, from ${name}`);
+      expect(text('.lane-sub')).toContain(`No VLAN number · ${name}`);
+    }
+    // A name only one source uses is left as it was, and a cut name keeps the end that differs.
+    const point = screen.getByRole('button', {
+      name: 'Example access point 8, Access point, from Example',
+    });
+    expect(point.querySelector('.sub')!.textContent).toBe('Access point');
+    expect(point.querySelector('.name')!.textContent).toBe('Example ac…s point 8');
+    expect(point.querySelector('title')!.textContent).toBe('Example access point 8');
+    expect(text('.node .name')).toContain('Example ac…s point 1');
   });
 
   it('draws a card again when its source is named after the Map was drawn', async () => {

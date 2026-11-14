@@ -12,7 +12,11 @@ import {
 import type { Graph, Resource } from '../types';
 import { SourceTag, kindIcon, sourceOf, sourcesLearned } from './ui';
 
-const short = (text: string, max = 20) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+/** Cuts a long name in the middle: names that differ only at the end stay different. */
+export const short = (text: string, max = 20) =>
+  text.length > max
+    ? `${text.slice(0, Math.ceil((max - 1) / 2))}…${text.slice(text.length - Math.floor((max - 1) / 2))}`
+    : text;
 const KIND: Record<string, string> = {
   access_point: 'Access point',
   dns_profile: 'DNS profile',
@@ -49,7 +53,13 @@ const act = (run: () => void) => ({
 // opening one list used to draw every card, line and row again, twice for an item in a list.
 
 /** The columns and rows behind the cards: they change only with the layout. */
-const Ground = memo(function Ground({ layout }: { layout: MapLayout }) {
+const Ground = memo(function Ground({
+  layout,
+  from,
+}: {
+  layout: MapLayout;
+  from: Map<string, string>;
+}) {
   return (
     <>
       {layout.lanes.map((lane, index) => (
@@ -62,10 +72,13 @@ const Ground = memo(function Ground({ layout }: { layout: MapLayout }) {
             height={layout.height}
           />
           <text className="lane-name" x={lane.x + 14} y={24}>
+            <title>
+              {from.has(lane.id) ? `${lane.name}, from ${from.get(lane.id)}` : lane.name}
+            </title>
             {short(lane.name, 22)}
           </text>
           <text className="lane-sub" x={lane.x + 14} y={41}>
-            {lane.sub}
+            {short(from.has(lane.id) ? `${lane.sub} · ${from.get(lane.id)}` : lane.sub, 28)}
           </text>
         </g>
       ))}
@@ -96,10 +109,13 @@ const Card = memo(function Card({
   on,
   dim,
   pin,
+  from,
   onSelect,
 }: {
   /** How much was known about sources when this was drawn; see `sourcesLearned`. */
   known: number;
+  /** The source's own name, when another card or column has this one's name. */
+  from?: string;
   node: MapNode;
   on: boolean;
   dim: boolean;
@@ -114,17 +130,19 @@ const Card = memo(function Card({
       className={`node ${source.tone} ${on ? 'sel' : ''} ${dim ? 'dim' : ''} ${off ? 'off' : ''} ${node.evidence}`}
       transform={`translate(${node.x},${node.y})`}
       aria-pressed={on}
-      aria-label={`${node.name}, ${KIND[node.kind] || node.kind}, from ${source.name}${pin ? ', has a finding' : ''}`}
+      aria-label={`${node.name}, ${KIND[node.kind] || node.kind}, from ${from || source.name}${pin ? ', has a finding' : ''}`}
       {...act(() => onSelect(node.id))}
     >
       <rect className="box" width={node.w} height={node.h} rx={9} />
       <rect className="stripe" x={0} y={8} width={3} height={node.h - 16} rx={1.5} />
       <Icon x={13} y={14} size={16} strokeWidth={1.8} />
+      <title>{from ? `${node.name}, from ${from}` : node.name}</title>
       <text className="name" x={37} y={19}>
         {short(node.name)}
       </text>
       <text className="sub" x={37} y={34}>
-        {off ? 'Cut off' : KIND[node.kind] || node.kind}
+        {/* Two cards with one name differ only by their source, so that is what is said. */}
+        {off ? 'Cut off' : from ? short(from, 22) : KIND[node.kind] || node.kind}
       </text>
       {(pin || off) && <circle className="pin" cx={node.w - 12} cy={12} r={4.5} />}
     </g>
@@ -210,7 +228,10 @@ export default function NetworkMap({
   selected,
   onSelect,
   pinned,
+  sourceNames,
 }: {
+  /** Each source's own name by its id, to tell apart two things with one name. */
+  sourceNames?: Map<string, string>;
   graph: Graph;
   view: MapView;
   zoom: number;
@@ -220,6 +241,25 @@ export default function NetworkMap({
 }) {
   const layout = useMemo(() => layoutMap(graph, view), [graph, view]);
   const known = sourcesLearned();
+  // A name drawn more than once, from different sources: each card or column says which source.
+  const from = useMemo(() => {
+    const byId = new Map(graph.nodes.map((item) => [item.id, item]));
+    const shown = [
+      ...layout.nodes.map((node) => node.resource),
+      ...layout.lanes.map((lane) => byId.get(lane.id)),
+    ].filter((item): item is Resource => !!item);
+    const origins = new Map<string, Set<string>>();
+    for (const item of shown)
+      origins.set(item.name, (origins.get(item.name) || new Set()).add(item.integration_id || ''));
+    return new Map(
+      shown
+        .filter((item) => origins.get(item.name)!.size > 1)
+        .map((item) => [
+          item.id,
+          sourceNames?.get(item.integration_id || '') || sourceOf(item.provider).name,
+        ]),
+    );
+  }, [graph, layout, sourceNames]);
   const scroller = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLElement>(null);
   const [opened, setOpened] = useState<string | null>(null);
@@ -293,7 +333,7 @@ export default function NetworkMap({
         aria-label="Network map"
         onClick={() => onSelect(null)}
       >
-        <Ground layout={layout} />
+        <Ground layout={layout} from={from} />
         {layout.edges.map((edge) => {
           const on = selected !== null && (edge.source === selected || edge.target === selected);
           return <Line key={edge.id} edge={edge} state={on ? 'on' : near ? 'dim' : ''} />;
@@ -316,6 +356,7 @@ export default function NetworkMap({
               on={selected === node.id}
               dim={dim}
               pin={pinned.has(node.id)}
+              from={from.get(node.id)}
               known={known}
               onSelect={onSelect}
             />

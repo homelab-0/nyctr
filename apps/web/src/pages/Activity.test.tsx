@@ -108,7 +108,9 @@ describe('Activity rows the reviews found unworded', () => {
     expect(await row('Access closed')).toContain(
       'files.example · removed at the source by hand, so nothing was sent',
     );
-    expect(await row('Let a waiting guest on')).toContain('nothing changed at the source');
+    expect(await row('Decided to let a waiting guest on')).toContain(
+      'nothing changed at the source',
+    );
     expect(await row('Was sent to the member portal to sign in')).toBeTruthy();
     expect(await row('Started a collection when the server was asked to')).toBeTruthy();
     expect(await row('Something this version of the page cannot describe')).toBeTruthy();
@@ -140,6 +142,22 @@ describe('Activity rows about a change at a source', () => {
         event('m', 'access.approved', { execution: 'applied' }),
         event('n', 'access.denied', { execution: 'not_performed' }),
         event('o', 'made.up_later', { execution: 'applied' }),
+        // What an ending did at the source, one row for each thing the record can say.
+        ...['removed', 'already_gone', 'kept_for_another', 'not_owned'].map((removal) =>
+          event(removal, 'access.closed', {
+            domain: `${removal.replace(/_/g, '-')}.example`,
+            execution: 'applied',
+            removal,
+          }),
+        ),
+        event('p', 'access.close_failed', { domain: 'held.example' }),
+        event('q', 'guest.pass_ended', { execution: 'failed' }),
+        event('r', 'integration.collection_failed', {
+          name: 'Resolver',
+          why: 'The source returned HTTP 500.',
+          retry_at: '2026-11-13T10:42:00Z',
+        }),
+        event('s', 'integration.collection_failed', { name: 'Gateway', why: 'Could not connect.' }),
         ...['secret', 'secret_ref', 'missing'].map((reason) =>
           event(reason, 'integration.retries_stopped', { name: `Source ${reason}`, reason }),
         ),
@@ -172,10 +190,27 @@ describe('Activity rows about a change at a source', () => {
       'left.example · already allowed at the source, left as it was',
     );
     expect(detail('Cut a guest off')).toBe('without access at the source · Asked to leave');
-    expect(detail('Locked a guest out')).toBe('did not go through');
-    expect(detail('Issued a guest pass')).toBe(
+    // A headline reads as done only when the record says applied.
+    expect(detail('Tried to lock a guest out')).toBe('did not go through');
+    expect(detail('Tried to end a guest pass')).toBe('did not go through');
+    expect(detail('Simulated: issue a guest pass')).toBe(
       'simulated, nothing was sent to the source · 60 min',
     );
+    expect(screen.getByText('Simulated: open access', { selector: 'th' })).toBeTruthy();
+    expect(screen.getByText('Decided to open access', { selector: 'th' })).toBeTruthy();
+    expect(screen.getByText('Simulated: close access', { selector: 'th' })).toBeTruthy();
+    expect(screen.queryByText('Locked a guest out')).toBeNull();
+    expect(about('removed.example')).toBe('removed.example · removed at the source');
+    expect(about('already-gone.example')).toMatch(/nothing to remove, the entry was already gone/);
+    expect(about('kept-for-another.example')).toMatch(/another open exception still needs it/);
+    expect(about('not-owned.example')).toMatch(/nothing to remove, the entry was not Nyctr's$/);
+    expect(detail('Access could not be closed')).toBe(
+      'held.example · could not be removed at the source, so it is still open',
+    );
+    expect(detail('Could not collect from Resolver')).toMatch(
+      /^The source returned HTTP 500\. · next try at \d/,
+    );
+    expect(detail('Could not collect from Gateway')).toBe('Could not connect.');
     expect(detail('Ended a guest pass')).toBe('ended at the source');
     expect(detail('Approved a request')).toBe('allowed at the source');
     expect(detail('Said no to a request')).toBe('');

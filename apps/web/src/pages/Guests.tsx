@@ -14,7 +14,7 @@ import {
   Stepper,
   Switch,
 } from '../components/ui';
-import { ago, bytes, clock, left, plural, span, useNow } from '../lib/format';
+import { ago, bytes, clock, left, plural, someNames, span, useNow } from '../lib/format';
 import { useAuth } from '../auth';
 import type { GuestDevice, GuestOverview, GuestPass, GuestRule } from '../types';
 
@@ -215,7 +215,11 @@ export default function Guests({
       }),
     );
   const live = data.passes.filter((pass) => pass.state !== 'ended');
-  const source = data.sources.map((item) => item.name).join(' and ') || 'your network source';
+  // Only sources that have been read are named; the full list is on Sources.
+  const readNames = data.sources
+    .filter((item) => item.collected !== false)
+    .map((item) => item.name);
+  const source = someNames(data.sources.map((item) => item.name)) || 'your network source';
   // Why Nyctr cannot tell who is a guest here, when it cannot: said first, before passes or cut-offs,
   // and only from what the source reported. A source that reports guest devices is never called blind.
   const wifi = data.portal.wifi;
@@ -248,8 +252,19 @@ export default function Guests({
               : blind
                 ? 'Nyctr cannot tell who is a guest here.'
                 : 'No guest devices are connected.'}{' '}
-            Guests sign in on the page your network shows. Nyctr stays out of their path and reads
-            who is on from {source}.
+            Guests sign in on the page your network shows. Nyctr stays out of their path
+            {data.sources.length && !readNames.length ? (
+              ' and has not read who is on yet: no source has been collected.'
+            ) : (
+              <>
+                {' '}
+                and reads who is on from{' '}
+                <a href="#/sources" title={readNames.join(', ')}>
+                  {someNames(readNames) || source}
+                </a>
+                .
+              </>
+            )}
           </p>
         </div>
       </header>

@@ -1,7 +1,7 @@
 import { Fragment, useState } from 'react';
 import { post, useApi } from '../api';
 import { Empty, ErrorState, InlineError, Loading, Panel, Score } from '../components/ui';
-import { ago, executionText, left, plural, useNow } from '../lib/format';
+import { REMOVAL, ago, executionText, left, plural, useNow } from '../lib/format';
 import type { Lease, Suggestion } from '../types';
 
 /** An entry that was at the source before Nyctr's exception: Nyctr added nothing and removes nothing. */
@@ -70,7 +70,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   <th>For</th>
                   <th>Decided by</th>
                   <th>Ends</th>
-                  <th>At the provider</th>
+                  <th>At the source</th>
                   <th />
                 </tr>
               </thead>
@@ -216,6 +216,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   <span className="d">
                     {ENDED[lease.ended_reason || ''] || 'Closed'} {ago(lease.ended_at, now)}
                     {lease.requester_name ? ` · ${lease.requester_name}` : ''}
+                    {REMOVAL[lease.removal || ''] ? ` · ${REMOVAL[lease.removal || '']}` : ''}
                   </span>
                 </span>
                 <span className="muted tiny">{lease.decided_by_name}</span>

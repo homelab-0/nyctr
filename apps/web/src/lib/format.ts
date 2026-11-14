@@ -62,17 +62,32 @@ const WORDS = ['No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eig
 /** Small counts as words for headlines. */
 export const word = (count: number) => WORDS[count] ?? String(count);
 
-/** Says what a provider outcome means in plain words. */
+/** Says what happened at the source in plain words. */
 export function executionText(execution: Execution) {
   return {
-    simulated: 'Simulated. Demo mode never contacts a provider.',
-    applied: 'Changed at the provider and checked.',
-    not_applied: 'Not changed. Nyctr is read-only for this provider.',
-    failed: 'The provider refused the change.',
+    simulated: 'Simulated. Demo mode never contacts a source.',
+    applied: 'Changed at the source and checked.',
+    not_applied: 'Not changed. Nyctr is read-only for this source.',
+    failed: 'The source refused the change.',
   }[execution];
 }
 
-/** Says how Nyctr may act on a provider. */
+/** What ending an exception did at the source, by the code its record keeps. */
+export const REMOVAL: Record<string, string> = {
+  removed: 'removed at the source',
+  already_gone: 'nothing to remove, the entry was already gone at the source',
+  kept_for_another: 'left at the source, another open exception still needs it',
+  not_owned: "nothing to remove, the entry was not Nyctr's",
+};
+
+/** "A", "A and B", "A, B and C", then "A, B and 5 more": a long list of names stays one phrase. */
+export function someNames(names: string[], max = 3) {
+  const shown =
+    names.length > max ? [...names.slice(0, max - 1), `${names.length - max + 1} more`] : names;
+  return shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}` : shown[0] || '';
+}
+
+/** Says how Nyctr may act on a source. */
 export function writeText(mode: WriteMode) {
   return {
     simulated: 'Simulated in demo',

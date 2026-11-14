@@ -136,6 +136,26 @@ describe('member portal', () => {
     }
   });
 
+  it('does not tell a member to ask when blocked sites will be collected if nothing collects them', async () => {
+    open({ 'GET /blocks/coverage': { collected: 'none', unassigned: false } });
+    expect(
+      await screen.findByText('Blocked sites are not collected on this network'),
+    ).toBeDefined();
+    expect(document.body.textContent).toContain('Ask whoever runs Nyctr if a page will not load.');
+    expect(document.body.textContent).not.toMatch(/when it will|not been collected yet/);
+  });
+
+  it('says once that the device is not recognised and that some sites are tied to no device', async () => {
+    open({
+      'GET /me/device': { device_id: null, name: null, simulated: false },
+      'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+      'GET /blocks/coverage': { collected: 'yes', unassigned: true },
+    });
+    await screen.findByText(/could not tell which of your devices this is/);
+    expect(document.body.textContent!.match(/cannot be tied to a device/g)).toHaveLength(1);
+    expect(document.body.textContent!.match(/one of yours may be missing/g)).toHaveLength(1);
+  });
+
   it('claims only what is known when some blocked sites are tied to no device', async () => {
     open({ 'GET /blocks/coverage': { collected: 'yes', unassigned: true } });
     expect(

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useApi } from '../api';
 import { Empty, ErrorState, Loading, Panel, SearchInput } from '../components/ui';
 import { counted } from '../lib/counts';
+import { REMOVAL, clock } from '../lib/format';
 import type { AuditEvent, Integration, Person } from '../types';
 
 /** Every action the server writes has a sentence here or in ABOUT_A_SOURCE; a server test checks it. */
@@ -50,12 +51,33 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
 };
 
 /**
+ * A change at a source that can fail, as what was attempted. A row reads as done only when its
+ * record says applied; otherwise it says simulated, decided or tried, and the detail says why.
+ */
+const ATTEMPT: Record<string, string> = {
+  'access.opened': 'open access',
+  'access.closed': 'close access',
+  'guest.pass_issued': 'issue a guest pass',
+  'guest.pass_ended': 'end a guest pass',
+  'guest.admit': 'let a waiting guest on',
+  'guest.cut': 'cut a guest off',
+  'guest.restore': 'let a guest back on',
+  'guest.lock': 'lock a guest out',
+};
+
+/**
  * What a row says happened. A source is named as the audit record kept it, else by its current
  * name. It is called removed only when the source list loaded and does not hold it; while the
  * list is unavailable the row says "a source". Never an id.
  */
 function what(event: AuditEvent, sources: Map<string, string> | null) {
   const about = ABOUT_A_SOURCE[event.action];
+  const tried = ATTEMPT[event.action];
+  const did = event.details?.execution;
+  if (tried && did !== 'applied')
+    return did === 'simulated'
+      ? `Simulated: ${tried}`
+      : `${did === 'not_applied' ? 'Decided' : 'Tried'} to ${tried}`;
   if (!about) return WORDS[event.action] || 'Something this version of the page cannot describe';
   const kept = event.details?.name;
   return about(
@@ -90,7 +112,7 @@ const APPLIED: Record<string, string> = {
   'access.opened': 'allowed at the source',
   'access.approved': 'allowed at the source',
   'access.open_undone': 'taken back out at the source',
-  // The record keeps how the exception was opened, not whether closing it removed an entry.
+  // Said from what the ending recorded; a record from before that was kept says only this.
   'access.closed': 'this record does not say what was sent to the source',
   'guest.cut': 'without access at the source',
   'guest.lock': 'without access at the source',
@@ -110,11 +132,15 @@ const FAILED: Record<string, string> = {
 /** What happened at the source, kept apart from the decision; nothing reads as changed unless it was. */
 function outcome(event: AuditEvent) {
   const d = event.details || {};
+  if (event.action === 'access.close_failed')
+    return 'could not be removed at the source, so it is still open';
   if (d.execution === 'simulated') return 'simulated, nothing was sent to the source';
   if (d.execution === 'failed') return FAILED[event.action] || 'did not go through';
   if (d.execution === 'not_applied')
     return event.action === 'access.open_undone' ? LEFT_ALONE : 'nothing changed at the source';
   if (d.execution !== 'applied') return undefined;
+  if (event.action === 'access.closed' && typeof d.removal === 'string' && REMOVAL[d.removal])
+    return REMOVAL[d.removal];
   return event.action === 'access.opened' && d.owned === false ? LEFT_ALONE : APPLIED[event.action];
 }
 
@@ -144,6 +170,9 @@ function summary(event: AuditEvent) {
         : 'now turned off',
     );
   if (typeof d.reason === 'string' && d.reason) parts.push(REASONS[d.reason] || d.reason);
+  // Why a collection failed, in the words the source's card uses, and when the next try is due.
+  if (typeof d.why === 'string' && d.why) parts.push(d.why);
+  if (typeof d.retry_at === 'string') parts.push(`next try at ${clock(d.retry_at)}`);
   return parts.join(' · ');
 }
 

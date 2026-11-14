@@ -791,6 +791,24 @@ describe('a source that could not read everything', () => {
     expect(within(whole).queryByText(/could not read everything/)).toBeNull();
   });
 
+  it('says the last collection failed and why, and dates the gaps to the one that worked', async () => {
+    const failed = { ...gappy, last_error: 'The source returned HTTP 500.' };
+    await openIntegrations({ source: failed });
+    const card = screen.getByRole('heading', { name: failed.name }).closest('section')!;
+    const failure = within(card).getByText('The last collection failed.');
+    expect(failure.parentElement!.textContent).toBe(
+      'The last collection failed. The source returned HTTP 500.',
+    );
+    expect(within(card).queryByText('The last collection could not read everything')).toBeNull();
+    const earlier = within(card).getByText(
+      /^The last collection that worked, .+ ago, could not read everything$/,
+    );
+    // The failure is said first, the earlier gaps after it.
+    expect(
+      failure.compareDocumentPosition(earlier) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   /** Resolves once the catalogue has arrived: only then can a link have opened anything. */
   const catalogueArrived = () =>
     waitFor(() =>

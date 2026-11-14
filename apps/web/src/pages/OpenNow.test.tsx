@@ -60,7 +60,7 @@ describe('ending an exception', () => {
   it("says a refusal with the row whose button was pressed, in the server's words", async () => {
     const never =
       'Nyctr has not collected from Resolver yet, so it changes nothing there. Collect from it first, then try again.';
-    const stuck = 'Nyctr could not remove the entry at the provider. It is still open.';
+    const stuck = 'Nyctr could not remove the entry at the source. It is still open.';
     mockApi({
       'GET /leases': [lease('open', {}), lease('other', {})],
       'GET /suggestions': [
@@ -101,13 +101,14 @@ describe('ending an exception', () => {
         lease('hand', { status: 'ended', ended_reason: 'removed_by_hand' }),
         lease('gone', { status: 'ended', ended_reason: 'source_removed' }),
         lease('early', { status: 'ended', ended_reason: 'revoked' }),
-        lease('late', { status: 'ended', ended_reason: 'expired' }),
+        lease('late', { status: 'ended', ended_reason: 'expired', removal: 'removed' }),
+        lease('kept', { status: 'ended', ended_reason: 'expired', removal: 'not_owned' }),
       ],
       'GET /suggestions': [],
     });
     render(<OpenNow onChange={() => {}} />);
     await screen.findByText('ours.example');
-    expect(row('ours.example').getByText('Changed at the provider and checked.')).toBeTruthy();
+    expect(row('ours.example').getByText('Changed at the source and checked.')).toBeTruthy();
     expect(row('theirs.example').queryByText(/Changed/)).toBeNull();
     expect(
       row('theirs.example').getByText(
@@ -117,6 +118,11 @@ describe('ending an exception', () => {
     expect(row('hand.example').getByText(/^Marked as removed by hand/)).toBeTruthy();
     expect(row('gone.example').getByText(/^Closed when its source was removed/)).toBeTruthy();
     expect(row('early.example').getByText(/^Ended early/)).toBeTruthy();
-    expect(row('late.example').getByText(/^Ran out/)).toBeTruthy();
+    expect(row('late.example').getByText(/^Ran out .* · removed at the source$/)).toBeTruthy();
+    expect(
+      row('kept.example').getByText(/ · nothing to remove, the entry was not Nyctr's$/),
+    ).toBeTruthy();
+    // A record from before endings kept this says nothing about the source.
+    expect(row('early.example').getByText(/^Ended early/).textContent).not.toMatch(/source/);
   });
 });
