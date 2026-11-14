@@ -41,3 +41,8 @@ def test_catalog_carries_what_each_kind_of_source_never_gives(client, admin_head
     for provider in registry.providers().values():
         limits = [(row["id"], row["title"], row["summary"]) for row in listed[provider.id]["limits"]]
         assert limits == list(provider.gaps)
+        assert listed[provider.id]["not_collected"] == list(provider.not_collected)
+    # Only blocked lookups are stored, so every source of them says the allowed ones are not collected.
+    for provider in registry.providers().values():
+        if "dns.blocks" in provider.provides:
+            assert "DNS lookups that were allowed" in listed[provider.id]["not_collected"]

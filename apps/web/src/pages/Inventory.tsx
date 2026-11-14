@@ -12,7 +12,7 @@ import {
   kindIcon,
 } from '../components/ui';
 import { GROUPS, UNLISTED, type Group } from '../lib/counts';
-import { uncollected, whyEmpty } from '../lib/coverage';
+import { failing, uncollected, whyEmpty } from '../lib/coverage';
 import { ago, useNow } from '../lib/format';
 import type { Integration, Person, Resource } from '../types';
 
@@ -37,8 +37,10 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
   const resources = useApi<Resource[]>('/resources');
   const people = useApi<Person[]>('/users');
   const sources = useApi<Integration[]>('/integrations');
-  // With a source still to collect, an empty kind is unknown, so it is shown without a zero.
+  // With a source that has no working collection, an empty kind is unknown, so it shows no zero.
   const waiting = uncollected(sources.data);
+  // A source failing now may still have rows from a collection that worked. They are not current.
+  const stale = waiting.filter((source) => source.last_sync);
   const [group, setGroup] = useState<Group>(
     (params.get('show') as Group) in GROUPS ? (params.get('show') as Group) : 'all',
   );
@@ -92,12 +94,23 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
         />
         <SearchInput value={text} onChange={setText} placeholder="Find by name, address or model" />
       </div>
+      {rows.length > 0 && stale.length > 0 && (
+        <div className="note yellow" role="status">
+          <div>
+            <b>{stale.map(whyEmpty).join('. ')}.</b>
+            <p>
+              What is listed from {stale.length === 1 ? 'it' : 'them'} is what Nyctr stored the last
+              time a collection worked, so it may be out of date and the counts may be short.
+            </p>
+          </div>
+        </div>
+      )}
       {rows.length === 0 ? (
         text.trim() ? (
           <Empty title="Nothing matches" text="Clear the search or pick another kind." />
         ) : waiting.length ? (
           <Empty
-            title="Not collected yet"
+            title={waiting.every(failing) ? 'Could not be collected' : 'Not collected yet'}
             text={`${waiting.map(whyEmpty).join('. ')}. What it reports will be listed here after a collection that works.`}
           />
         ) : sources.data?.length === 0 ? (

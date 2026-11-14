@@ -105,8 +105,10 @@ export interface CatalogProvider {
   reads: { id: string; label: string }[];
   changes: string[];
   write_mode: WriteMode | 'none';
-  /** What a source of this kind never gives Nyctr, in the integration's own words. */
+  /** Cautions about what a source of this kind tells Nyctr, in the integration's own words. */
   limits?: { id: string; title: string; summary: string }[];
+  /** What a source of this kind never collects, each a few plain words. */
+  not_collected?: string[];
 }
 /** What the finding rules check with the sources connected, and what is collected but never checked. */
 export interface FindingChecks {

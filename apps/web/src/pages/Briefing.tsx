@@ -3,7 +3,7 @@ import { ArrowRight, Sparkles } from 'lucide-react';
 import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { counted, lookupSpan, namedCounts } from '../lib/counts';
-import { uncollected, whyEmpty } from '../lib/coverage';
+import { failing, uncollected, waitingText, whyEmpty } from '../lib/coverage';
 import { ago, left, useNow, word } from '../lib/format';
 import { askNyctr, hrefFor } from '../lib/links';
 import { nextCollection, useSchedule } from '../lib/schedule';
@@ -19,21 +19,36 @@ const KIND: Record<AttentionItem['kind'], string> = {
 };
 
 /**
- * What Nyctr cannot see here, built from the sources connected: one still to collect, what the last
- * collection could not read, and what each kind of source declares it never gives. Shown hatched so
- * a quiet list is never read as "all clear".
+ * What Nyctr cannot see here, built from the sources connected: one with no working collection, what
+ * the last collection could not read, and what each kind of source declares it never collects. Shown
+ * hatched so a quiet list is never read as "all clear".
  */
 function notCollected(sources: Integration[], catalog: Catalog | null) {
   return sources.flatMap((source) => {
-    const declared = catalog?.providers.find((item) => item.id === source.provider)?.limits || [];
+    const kind = catalog?.providers.find((item) => item.id === source.provider);
     return [
-      ...(source.last_sync ? [] : [{ id: 'never', title: whyEmpty(source), summary: '' }]),
-      ...[...(source.gaps || []), ...declared].map((gap) => ({
-        ...gap,
-        title: `${source.name}: ${gap.title}`,
+      ...(uncollected([source]).length
+        ? [{ id: 'none', title: whyEmpty(source), summary: '' }]
+        : []),
+      ...(source.gaps || []).map((gap) => ({ ...gap, title: `${source.name}: ${gap.title}` })),
+      ...(kind?.not_collected || []).map((text) => ({
+        id: text,
+        title: `${source.name}: ${text}`,
+        summary: '',
       })),
     ].map((line) => ({ ...line, id: `${source.id}:${line.id}` }));
   });
+}
+
+/** What each kind of source connected declares about its evidence: cautions, not things left out. */
+function cautions(sources: Integration[], catalog: Catalog | null) {
+  return sources.flatMap((source) =>
+    (catalog?.providers.find((item) => item.id === source.provider)?.limits || []).map((gap) => ({
+      ...gap,
+      id: `${source.id}:${gap.id}`,
+      title: `${source.name}: ${gap.title}`,
+    })),
+  );
 }
 
 /** Where a "Needs you" row leads. A source that stored only part names its Edit form or its card. */
@@ -46,21 +61,29 @@ function needHref(item: AttentionItem) {
 
 /** What the sources reported, each kind named with its own count, then the span of stored lookups. */
 function briefingCounts(overview: Overview, now: number, connected: Integration[] | null) {
+  if (!overview.integration_count) return 'No sources are connected yet.';
   const named = namedCounts(overview.kind_counts || {});
   const sources = counted(overview.integration_count, 'source');
-  // A count with no stored collection behind it is not a zero: it has not been collected.
-  const waiting = uncollected(connected).length;
+  // A count with no working collection behind it is not a zero: it has not been collected.
+  const dns = uncollected(connected, 'dns.blocks');
   const span =
-    !overview.recent_block_count && uncollected(connected, 'dns.blocks').length
-      ? 'Blocked lookups have not been collected yet.'
+    !overview.recent_block_count && dns.length
+      ? dns.some(failing)
+        ? 'Blocked lookups could not be collected.'
+        : 'Blocked lookups have not been collected yet.'
       : lookupSpan(
           overview.recent_block_count,
           overview.oldest_block_at,
           overview.newest_block_at,
           now,
         );
-  const pending = waiting ? ` ${counted(waiting, 'source')} not collected yet.` : '';
-  return `${named ? `${named} from ${sources}.` : waiting ? `Not collected yet from ${sources}.` : `Nothing inventoried yet from ${sources}.`}${named ? pending : ''} ${span}`;
+  return [
+    named ? `${named} from ${sources}.` : `Nothing inventoried yet from ${sources}.`,
+    waitingText(connected),
+    span,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 /**
@@ -82,6 +105,7 @@ export default function Briefing({
   const cover = useApi<FindingChecks>('/findings/checks').data;
   const idle = cover?.checks.filter((check) => !check.active).length || 0;
   const missing = notCollected(sources.data || [], catalog.data);
+  const careful = cautions(sources.data || [], catalog.data);
   const [question, setQuestion] = useState('');
   const now = useNow();
   // A schedule read again means a collection was due, so "Collected ... ago" is read again too.
@@ -202,7 +226,7 @@ export default function Briefing({
                   <span>
                     <span className="t">{source.name}</span>
                     <span className="d">
-                      {source.status === 'error'
+                      {failing(source)
                         ? source.last_error || 'Last collection failed'
                         : !source.last_sync
                           ? 'Not collected yet'
@@ -219,11 +243,11 @@ export default function Briefing({
                     )}
                   </span>
                   <i
-                    className={`dot ${source.status === 'error' ? 'red' : source.status === 'partial' || source.gaps?.length ? 'yellow' : source.last_sync ? 'green' : ''}`}
+                    className={`dot ${failing(source) ? 'red' : source.status === 'partial' || source.gaps?.length ? 'yellow' : source.last_sync ? 'green' : ''}`}
                     title={
                       source.status === 'partial'
                         ? 'Partly collected'
-                        : source.gaps?.length && source.status !== 'error'
+                        : source.gaps?.length && !failing(source)
                           ? 'Collected with gaps'
                           : undefined
                     }
@@ -234,18 +258,34 @@ export default function Briefing({
             </div>
           </Panel>
           <div className="note hatch">
-            <div>
-              <b>Not collected</b>
-              {sources.data?.length === 0 ? (
-                <p>No sources are connected, so nothing is collected yet.</p>
-              ) : (
-                <ul className="plain">
-                  {missing.map((line) => (
-                    <li key={line.id} title={line.summary}>
-                      {line.title}
-                    </li>
-                  ))}
-                </ul>
+            <div className="stack tight">
+              {(sources.data?.length === 0 || missing.length > 0) && (
+                <div>
+                  <b>Not collected</b>
+                  {sources.data?.length === 0 ? (
+                    <p>No sources are connected, so nothing is collected yet.</p>
+                  ) : (
+                    <ul className="plain">
+                      {missing.map((line) => (
+                        <li key={line.id} title={line.summary || undefined}>
+                          {line.title}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {careful.length > 0 && (
+                <div>
+                  <b>Keep in mind</b>
+                  <ul className="plain">
+                    {careful.map((line) => (
+                      <li key={line.id} title={line.summary}>
+                        {line.title}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
               {cover && (
                 <p>

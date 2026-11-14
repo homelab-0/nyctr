@@ -96,7 +96,9 @@ function HowGuestsGetOn({
         <div>
           <h3>Wi-Fi names reported</h3>
           {portal.wifi.length === 0 ? (
-            <p className="aside">Not collected yet. Collect from your network source to check.</p>
+            <p className="aside">
+              Nyctr has none. It reads them when it collects from your network source.
+            </p>
           ) : (
             <ul className="wifi">
               {portal.wifi.map((item) => (
@@ -214,24 +216,27 @@ export default function Guests({
     );
   const live = data.passes.filter((pass) => pass.state !== 'ended');
   const source = data.sources.map((item) => item.name).join(' and ') || 'your network source';
-  // Why Nyctr cannot tell who is a guest here, when it cannot. Said first, before passes or cut-offs.
+  // Why Nyctr cannot tell who is a guest here, when it cannot: said first, before passes or cut-offs,
+  // and only from what the source reported. A source that reports guest devices is never called blind.
   const wifi = data.portal.wifi;
-  const blind = !data.sources.length
-    ? {
-        title: 'No connected source can tell guests from other devices.',
-        text: 'Nyctr does not know who is a guest here. Connect a network source that reports guest Wi-Fi to see them.',
-      }
-    : !wifi.length
+  const blind = data.devices.length
+    ? null
+    : !data.sources.length
       ? {
-          title: `Wi-Fi names have not been collected from ${source} yet.`,
-          text: 'Until they are, Nyctr does not know whether anyone is on the guest Wi-Fi.',
+          title: 'No connected source can tell guests from other devices.',
+          text: 'Nyctr does not know who is a guest here. Connect a network source that reports guest Wi-Fi to see them.',
         }
-      : !wifi.some((item) => item.captive_portal)
+      : !wifi.length
         ? {
-            title: `${source} reports that no Wi-Fi name uses a sign-in page.`,
-            text: `Nyctr tells guests apart by that page, so it cannot say who is a guest: it has nothing to count, and passes and the cut-off have nothing to act on. Turn on the guest sign-in page with passes at ${source} to change that.`,
+            title: `Nyctr has no Wi-Fi names and no guest devices from ${source}.`,
+            text: 'So it does not know whether anyone is on the guest Wi-Fi.',
           }
-        : null;
+        : !wifi.some((item) => item.captive_portal)
+          ? {
+              title: `No Wi-Fi name reported by ${source} uses a sign-in page, and Nyctr has no guest devices from ${source}.`,
+              text: `So Nyctr cannot tell who is a guest here, and passes and the cut-off have nothing to act on. Turning on the guest sign-in page with passes at ${source} gives them something to act on.`,
+            }
+          : null;
   return (
     <div className="page">
       <header className="page-head">

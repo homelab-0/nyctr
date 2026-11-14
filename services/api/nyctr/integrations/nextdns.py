@@ -255,6 +255,7 @@ PROVIDER = Provider(
         ("dns_scope", "DNS decisions cover one enforcement layer",
          "A DNS block does not establish a firewall decision, HTTPS result, or destination risk. Unknown risk remains unknown."),
     ),
+    not_collected=("DNS lookups that were allowed",),
     gap_notes={
         "nextdns_policy_fields_missing": (
             "Some DNS policy sections were absent",

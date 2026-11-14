@@ -116,8 +116,8 @@ function Checked({ cover }: { cover: FindingChecks }) {
             <div>
               <b>Collected but not checked</b>
               <p>
-                {cover.not_checked.join(', ')}. You can see these on the Map and in Inventory, but
-                no check reads them, so nothing wrong with them would show up here.
+                {cover.not_checked.join(', ')}. Nyctr stores these, but no check reads them, so
+                nothing wrong with them would show up here.
               </p>
             </div>
           </div>
@@ -148,6 +148,8 @@ export default function Findings({ params }: { params: URLSearchParams }) {
     show === 'open' ? item.status === 'open' : item.status !== 'open',
   );
   const finding = list.find((item) => item.id === selected) || list[0];
+  // Only a check with something to look at can speak for an empty list.
+  const active = cover?.checks.filter((check) => check.active).length;
   const byId = new Map((resources.data || []).map((item) => [item.id, item]));
   return (
     <div className="page">
@@ -185,15 +187,19 @@ export default function Findings({ params }: { params: URLSearchParams }) {
           title={
             show !== 'open'
               ? 'Nothing resolved yet'
-              : cover
-                ? `No open findings from the ${cover.checks.length} checks listed below`
-                : 'No open findings'
+              : !cover
+                ? 'No open findings'
+                : !active
+                  ? 'Nothing was checked, so there are no findings'
+                  : active === cover.checks.length
+                    ? `No open findings from the ${active} checks listed below`
+                    : `No open findings from the ${active} of ${cover.checks.length} checks below that had something to check`
           }
-          text={
+          text={`${show === 'open' && cover && !active ? 'No collected source reports anything the checks below look at. ' : ''}${
             every
               ? `Findings are re-checked after every collection, ${every}.`
               : 'Findings are re-checked when a source is collected.'
-          }
+          }`}
         />
       ) : (
         <div className="split wide-side">

@@ -110,6 +110,9 @@ class Provider:
     limitations: tuple[tuple[str, str, str], ...] = ()
     # Evidence gaps that always apply to this source, as (id, title, text).
     gaps: tuple[tuple[str, str, str], ...] = ()
+    # What a source of this kind never collects, each a few plain words. The Briefing lists these
+    # under "Not collected" for every connected source, so say only what is true of every setup.
+    not_collected: tuple[str, ...] = ()
     # Text for gap codes the adapter records during a collection: code -> (title, text).
     gap_notes: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Optional: map one block reason (an identifier or a name) to (category, base score, explanation).
@@ -147,8 +150,10 @@ class Provider:
                          for c in CAPABILITIES if c in self.provides],
             "reads": [{"id": read, "label": label} for read, label in self.reads],
             "changes": self.changes, "write_mode": write_mode if self.changes else "none",
-            # What a source of this kind never gives Nyctr, however well a collection goes.
+            # What a source of this kind never gives Nyctr, however well a collection goes: the
+            # cautions about its evidence, then the things it does not collect at all.
             "limits": [{"id": id_, "title": title, "summary": text} for id_, title, text in self.gaps],
+            "not_collected": list(self.not_collected),
         }
 
 
