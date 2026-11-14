@@ -56,9 +56,11 @@ def _limited(change):
         try:
             async with asyncio.timeout(CHANGE_SECONDS):
                 return await change(*args, **kwargs)
-        except TimeoutError:
-            raise IntegrationError("The source took too long to answer, so Nyctr stopped waiting. Check there "
-                                   "whether the change went through.", category="timeout") from None
+        except TimeoutError as late:
+            error = IntegrationError("The source took too long to answer, so Nyctr stopped waiting. Check there "
+                                     "whether the change went through.", category="timeout")
+            error.add_sent = getattr(late.__cause__, "add_sent", None)
+            raise error from None
     return within
 
 
@@ -116,10 +118,14 @@ async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, al
             return {"owned": False, "verified": True}
         if name in before:
             raise IntegrationError("That domain is on the allowlist but switched off. Nyctr will not change it.")
-        await exchange(reader, "POST", f"/profiles/{profile}/allowlist", body={"id": name, "active": True})
-        after = await _allowlist(reader, profile)
-        if after.get(name) is not True:
-            raise IntegrationError("NextDNS accepted the request but the domain is not on the allowlist.")
+        try:
+            await exchange(reader, "POST", f"/profiles/{profile}/allowlist", body={"id": name, "active": True})
+            after = await _allowlist(reader, profile)
+            if after.get(name) is not True:
+                raise IntegrationError("NextDNS accepted the request but the domain is not on the allowlist.")
+        except BaseException as error:  # Its own read found the address absent and its add was sent: say so.
+            error.add_sent = True
+            raise
         return {"owned": True, "verified": True}
 
 
