@@ -184,6 +184,22 @@ function Home({ data }: { data: Data }) {
   const partly = data.coverage.data?.unassigned
     ? `Some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
     : '';
+  // Under a list, a failing or unfinished collection means a newer block may be missing. One
+  // sentence carries that and the lookups tied to no device, so two notes never stack.
+  const cover = data.coverage.data;
+  const unread =
+    cover?.collected === 'failed'
+      ? 'Nyctr could not read what was blocked just now'
+      : cover && cover.collected !== 'yes'
+        ? 'Nyctr has not finished reading what was blocked'
+        : '';
+  const missing = unread
+    ? cover?.unassigned
+      ? `${unread}, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
+      : `${unread}, so a newer block may be missing here. ${ASK} if a page will not load.`
+    : gap
+      ? ''
+      : partly;
   const requestFor = useMemo(
     () => new Map((data.requests.data || []).map((row) => [row.block_id, row])),
     [data.requests.data],
@@ -289,7 +305,7 @@ function Home({ data }: { data: Data }) {
           ))}
         </section>
       )}
-      {blocks.length > 0 && partly && !gap && <p className="aside">{partly}</p>}
+      {blocks.length > 0 && missing && <p className="aside">{missing}</p>}
       {blocks.length === 0 && found === null && !noDevices && (
         <Empty
           title={
@@ -575,7 +591,9 @@ function Result({ data, id }: { data: Data; id: string }) {
 
 function MyRequests({ data }: { data: Data }) {
   const now = useNow();
-  const gap = notKnown(data);
+  // The reason stands only over an empty list of blocked sites. With one listed there is
+  // something to ask about, whatever the collection is doing.
+  const gap = data.blocks.data?.length === 0 ? notKnown(data) : null;
   if (data.requests.loading) return <Loading />;
   const rows = data.requests.data || [];
   const leaseFor = new Map((data.leases.data || []).map((lease) => [lease.request_id, lease]));

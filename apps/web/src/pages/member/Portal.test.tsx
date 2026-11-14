@@ -157,6 +157,65 @@ describe('member portal', () => {
     expect(screen.queryByText(/may be missing/)).toBeNull();
   });
 
+  it('says under a list that a newer block may be missing while collection is failing or unfinished', async () => {
+    const cases = [
+      [
+        'failed',
+        false,
+        'Nyctr could not read what was blocked just now, so a newer block may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+      [
+        'no',
+        false,
+        'Nyctr has not finished reading what was blocked, so a newer block may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+      [
+        'failed',
+        true,
+        'Nyctr could not read what was blocked just now, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+      [
+        'no',
+        true,
+        'Nyctr has not finished reading what was blocked, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+    ] as const;
+    for (const [collected, unassigned, line] of cases) {
+      open({
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /blocks/coverage': { collected, unassigned },
+      });
+      expect(await screen.findByText('photos.example')).toBeDefined();
+      expect(screen.getByText(line)).toBeDefined();
+      // One note, never two stacked.
+      expect(screen.getAllByText(/may be missing here/)).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it('never tells a member with a blocked site listed that there is nothing to ask about', async () => {
+    for (const collected of ['failed', 'no'] as const) {
+      const { user } = open({
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /blocks/coverage': { collected, unassigned: false },
+      });
+      expect(await screen.findByText('photos.example')).toBeDefined();
+      await user.click(screen.getByRole('link', { name: /My requests/ }));
+      expect(
+        await screen.findByText(
+          'When a page is blocked, find it under Blocked sites and ask to open it.',
+        ),
+      ).toBeDefined();
+      expect(document.body.textContent).not.toContain('nothing to ask about');
+      cleanup();
+      // With nothing listed the reason is still given.
+      const empty = open({ 'GET /blocks/coverage': { collected, unassigned: false } });
+      await empty.user.click(await screen.findByRole('link', { name: /My requests/ }));
+      expect(await screen.findByText(/so there is nothing to ask about yet/)).toBeDefined();
+      cleanup();
+    }
+  });
+
   it('does not say nothing was blocked before it knows why the list is empty', async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => (release = resolve));
