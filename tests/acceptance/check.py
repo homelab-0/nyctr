@@ -65,7 +65,7 @@ SCENARIOS = {
     "site at real size": (
         {**CONNECTIONS["unifi"], "name": "Scenario - site at real size",
          "config": {**CONNECTIONS["unifi"]["config"], "site_id": "site-large"}},
-        {"ok": True, "resource_count": 281, "observation_count": 0, "partial": False, "gaps": 0}, "connected", []),
+        {"ok": True, "resource_count": 321, "observation_count": 0, "partial": False, "gaps": 0}, "connected", []),
     "one gap": (
         {**CONNECTIONS["unifi"], "name": "Scenario - key that may not read Wi-Fi names",
          "secret_ref": "NYCTR_CONNECTOR_SECRET_LIMITED"},
@@ -76,6 +76,8 @@ SCENARIOS = {
          "config": {"profile_id": "dddddd", "lookback_hours": 24}},
         {"ok": True, "resource_count": 46, "observation_count": 400, "partial": True, "gaps": 0}, "partial", []),
 }
+# The feature each kind of source changes, as GET /api/rules names it.
+CHANGES = {"access": "nextdns", "guests": "unifi_network"}
 
 
 class AcceptanceFailure(Exception):
@@ -400,17 +402,20 @@ def verify_scenarios(client: Client, *, keep: bool) -> None:
     for scenario, (specification, answer, status, gaps) in SCENARIOS.items():
         saved = [row for row in client.json("/api/integrations") if row["name"] == specification["name"]]
         row = saved[0] if saved else client.json("/api/integrations", method="POST", body=specification, expected=201)
+        require(len(saved) <= 1 and all(row.get(key) == value for key, value in specification.items()),
+                "A named scenario source is saved twice or has unexpected configuration; refusing to use it.")
         require(client.json(source_path(row, "sync"), method="POST") == answer,
                 f"Collecting the {scenario} source returned unexpected counts.")
-        listed = next(item for item in client.json("/api/integrations") if item["id"] == row["id"])
+        listed = next((item for item in client.json("/api/integrations") if item["id"] == row["id"]), None)
+        require(listed is not None, f"The {scenario} source is no longer saved after its collection.")
         assert_sanitized(listed)
         require(
             listed["status"] == status and [gap["id"] for gap in listed["gaps"]] == gaps
             and all(gap["title"] and "refused the read" in gap["summary"] for gap in listed["gaps"]),
             f"The {scenario} source does not show its status and what it could not read.",
         )
-        record = next(event["details"] for event in client.json("/api/audit")
-                      if event.get("action") == "integration.collected" and event["target_id"] == row["id"])
+        record = next((event["details"] for event in client.json("/api/audit")
+                       if event.get("action") == "integration.collected" and event["target_id"] == row["id"]), {})
         require(
             record.get("gaps") == gaps and record.get("partial") is answer["partial"]
             and record.get("rows_kept") == (4000 if answer["partial"] else None),
@@ -420,6 +425,38 @@ def verify_scenarios(client: Client, *, keep: bool) -> None:
             removed = f"/api/integrations/{quote(row['id'], safe='')}"
             client.json(removed, method="DELETE", body={"name": specification["name"]})
         print(f"PASS scenario: {scenario}; {status}, {len(gaps)} gaps listed{'' if keep else '; removed again'}")
+
+
+def verify_mode(client: Client, writes: str) -> bool:
+    """Require the API to say what the start said about changes, print it, and return whether access may change.
+
+    The default start must be read only for both features. A start with changes allowed
+    must say so for each kind of source named, so neither mode can pass as the other.
+    """
+    allowed = {kind.strip() for kind in writes.split(",")}
+    found = client.json("/api/rules").get("writes") or {}
+    require(
+        {feature: found.get(feature) for feature in CHANGES}
+        == {feature: "enabled" if kind in allowed else "disabled" for feature, kind in CHANGES.items()},
+        "Nyctr's answer about changes does not match this start. A default start must have changes disabled for "
+        "access and guests; with NYCTR_ACCEPTANCE_WRITES set, give the checker the same value.",
+    )
+    print("PASS mode: " + "; ".join(f"changes {found[feature]} for {feature}" for feature in CHANGES))
+    return found["access"] == "enabled"
+
+
+def request_exception(client: Client) -> None:
+    """Ask, as the administrator, for one blocked lookup to be opened, so Requests has one waiting.
+
+    The stack has no member account and the console lets only a member ask. Nothing changes at
+    a source until the request is approved in the console.
+    """
+    asked = {"reason": "Acceptance check: open this for the tester", "duration_minutes": 15}
+    block = next((row for row in client.json("/api/blocks") if row["domain"] == "lookup-00.example.test"), None)
+    require(block is not None, "The blocked lookup to ask about is not in Blocks; use a fresh project.")
+    made = client.json("/api/requests", method="POST", body={"block_id": block["id"], **asked}, expected=201)
+    require(made.get("status") == "pending", "The request is not waiting for a decision; use a fresh project.")
+    print("PASS request: lookup-00.example.test is waiting under Requests")
 
 
 def verify_placement(client: Client, graph: dict) -> None:
@@ -566,6 +603,11 @@ def main() -> int:
         action="store_true",
         help="Only add and collect the scenario sources and leave them for the browser",
     )
+    parser.add_argument(
+        "--writes",
+        default=os.environ.get("NYCTR_ACCEPTANCE_WRITES", ""),
+        help="The kinds of source the stack was started with changes allowed for; empty means read only",
+    )
     args = parser.parse_args()
     try:
         client = Client(args.url)
@@ -582,6 +624,8 @@ def main() -> int:
         client.login()
         if args.scenarios:
             verify_scenarios(client, keep=True)
+            if verify_mode(client, args.writes):
+                request_exception(client)
             return 0
         # Nyctr collects every saved source on its schedule, first 30 seconds after it starts. That
         # would add the failing sources' data to the fixed counts below, so the check turns it off.
@@ -589,7 +633,14 @@ def main() -> int:
             client.json("/api/collection", method="PUT", body={"enabled": False, "minutes": 15})
         require(client.json("/api/collection").get("enabled") is False,
                 "Scheduled collection is on, so the saved counts cannot be relied on.")
+        kept = {specification["name"] for specification, *_ in SCENARIOS.values()}
+        require(
+            not args.verify_persistence or not any(row.get("name") in kept for row in client.json("/api/integrations")),
+            "Scenario sources are saved (check.py --scenarios keeps them), so the saved counts include them and "
+            "cannot be compared. Nothing was lost. Verify persistence before adding the scenario sources.",
+        )
         connections = saved_connections(client, create=not args.verify_persistence)
+        verify_mode(client, args.writes)
         if not args.verify_persistence:
             verify_diagnostics(client, connections)
             collect_fixtures(client, connections)
@@ -601,7 +652,7 @@ def main() -> int:
         return 0
     except AcceptanceFailure as error:
         print(f"FAIL: {error}", file=sys.stderr)
-    except (KeyError, TypeError, ValueError, OSError):
+    except (LookupError, StopIteration, TypeError, ValueError, OSError):
         print(
             "FAIL: An acceptance response did not match the synthetic test contract. Details suppressed.",
             file=sys.stderr,

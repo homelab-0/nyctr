@@ -34,10 +34,10 @@ OVER_BOUND = 4200
 # Longer than the 20 seconds Nyctr waits for an answer.
 TIMEOUT_HOLD = 25.0
 # Each switch and the values it takes. Empty is off. Set at start by FIXTURE_<NAME>,
-# or while running through /control, which only the compose network can reach.
+# or while running through /control, which is not published (on Linux the host itself can reach it).
 SWITCH_FORMS = {
-    "refuse": r"[\w/-]{0,80}",  # part of a path: reads of it are refused (HTTP 403)
-    "error": r"[\w/-]{0,80}",  # part of a path: reads of it get a server error (HTTP 500)
+    "refuse": r"[\w/-]{0,80}",  # part of a path: requests for it are refused (HTTP 403)
+    "error": r"[\w/-]{0,80}",  # part of a path: requests for it get a server error (HTTP 500)
     "fail": r"|(drop|timeout|limit):[1-9]\d{0,2}",  # the next N requests break, hang or are rate limited
     "retry_after": r"\d{1,4}",  # seconds a rate-limited answer says to wait
     "slow": r"|\d{1,2}(\.\d)?",  # seconds every answer is held back
@@ -60,6 +60,7 @@ def set_switch(name: str, value: str) -> None:
 for _name in SWITCH_FORMS:  # A value this fixture does not know stops it at the start.
     set_switch(_name, os.environ.get(f"FIXTURE_{_name.upper()}") or SWITCHES[_name])
 
+
 def next_fault() -> str:
     """Use up one planned failure and return its kind, or nothing when none is left."""
     with LOCK:
@@ -67,7 +68,6 @@ def next_fault() -> str:
         if kind:
             SWITCHES["fail"] = f"{kind}:{int(left) - 1}" if int(left) > 1 else ""
         return kind
-
 
 
 def device(id_: str, name: str, feature: str, address: str, number: int) -> dict:
@@ -161,7 +161,8 @@ CLIENT_KINDS = ("laptop", "phone", "tablet", "printer", "camera", "television", 
 def large_site() -> tuple[dict[str, tuple[str, int]], dict[str, str]]:
     """Add a site at real size and return its address ranges and uplinks.
 
-    Ten networks, 13 pieces of equipment, 67 clients and 190 firewall policies.
+    Ten networks, 13 pieces of equipment, 67 clients and 230 firewall policies: more
+    policies than one page of a list holds, so a collection has to ask for a second.
     Clients 63 to 66 cannot be placed: two report no address and two report one
     outside every range. Five wireless clients on the Guests network are guests of
     the Wi-Fi name that uses a sign-in page; one of them is still waiting.
@@ -195,7 +196,7 @@ def large_site() -> tuple[dict[str, tuple[str, int]], dict[str, str]]:
     policies = [{"id": f"big-policy-{p:03d}", "name": f"Example rule {p:03d}", "enabled": p % 9 != 0, "index": 10 * p,
                  "action": {"type": ("ALLOW", "BLOCK")[p % 2]}, "source": {"zoneId": f"big-zone-{p % 10}"},
                  "destination": {"zoneId": f"big-zone-{(3 * p + 1) % 10}" if p % 4 else "big-zone-external"},
-                 "loggingEnabled": False} for p in range(1, 191)]
+                 "loggingEnabled": False} for p in range(1, 231)]
     wifi = [{"id": "big-wifi-main", "name": "Example Wi-Fi", "enabled": True,
              "network": {"type": "SPECIFIC", "networkId": "big-net-0"}},
             {"id": "big-wifi-guests", "name": "Example Guest Wi-Fi", "enabled": True,
@@ -208,7 +209,7 @@ def large_site() -> tuple[dict[str, tuple[str, int]], dict[str, str]]:
 
 
 def guest_access(authorized: bool, method: str, since: datetime, minutes: int) -> dict:
-    """A guest's access as the client reads report it; the authorisation only while it is let on."""
+    """A guest's access as the read of one client reports it; the list read leaves the authorisation out."""
     grant = {"authorizationMethod": method, "authorizedAt": since.isoformat(),
              "expiresAt": (since + timedelta(minutes=minutes)).isoformat(),
              "usage": {"bytes": 52_000_000, "durationSec": 1800}}
@@ -281,8 +282,10 @@ def change(method: str, path: str, sent: dict) -> tuple[int, dict]:
     guest = head.rpartition("/")
     row = next((row for row in UNIFI_ROWS.get(guest[0], []) if row["id"] == guest[2] and "access" in row), None)
     if method == "POST" and last == "actions" and row and guest[0].endswith("/clients"):
-        allow = sent.get("action") == "AUTHORIZE_GUEST_ACCESS"
-        row["access"] = guest_access(allow, "API", datetime.now(UTC), int(sent.get("timeLimitMinutes") or 60))
+        if sent.get("action") == "AUTHORIZE_GUEST_ACCESS":
+            row["access"] = guest_access(True, "API", datetime.now(UTC), int(sent.get("timeLimitMinutes") or 60))
+        else:  # Cutting a guest off also disconnects it, so it is no longer among the connected clients.
+            UNIFI_ROWS[guest[0]].remove(row)
         return 200, {}
     return 404, {"errors": [{"code": "unknown_fixture_change"}]}
 
@@ -291,7 +294,7 @@ def response_for(target: str, api_key: str | None, method: str = "GET", sent: by
     """Return source data, a normal credential rejection, a malformed contract, or a switched fault.
 
     No request URL, credential, or outside data is reflected in the response.
-    Pagination responds to documented offset/limit inputs without external URLs.
+    Lists are paged as documented: 25 rows unless asked, 200 at most, no external URLs.
     Status 0 means no answer at all: the caller closes the connection.
     """
     # The gateway source's cloud address serves the same reads under a console path.
@@ -337,14 +340,16 @@ def response_for(target: str, api_key: str | None, method: str = "GET", sent: by
         query = parse_qs(parsed.query)
         try:
             offset = int(query.get("offset", ["0"])[0])
-            limit = int(query.get("limit", ["200"])[0])
+            limit = int(query.get("limit", ["25"])[0])
         except (ValueError, IndexError):
             return 400, b'{"errors":[{"code":"invalid_pagination"}]}'
-        if offset < 0 or not 1 <= limit <= 1000:
+        if offset < 0 or not 1 <= limit <= 200:
             return 400, b'{"errors":[{"code":"invalid_pagination"}]}'
         rows = UNIFI_ROWS[parsed.path]
-        page = rows[offset : offset + limit]
-        payload = {"data": page, "offset": offset, "count": len(page), "totalCount": len(rows)}
+        # The list says only whether a guest is let on; how and until when is in the read of that client.
+        page = [{**row, "access": {key: row["access"][key] for key in ("type", "authorized")}} if "access" in row
+                else row for row in rows[offset : offset + limit]]
+        payload = {"data": page, "offset": offset, "limit": limit, "count": len(page), "totalCount": len(rows)}
         status = 200
     elif parsed.path in UNIFI_DETAILS:
         status, payload = 200, UNIFI_DETAILS[parsed.path]

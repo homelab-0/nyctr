@@ -6,6 +6,7 @@ import asyncio
 import http.client
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import sys
@@ -56,7 +57,8 @@ class FixtureTLSCase(unittest.TestCase):
         cls.thread.join(timeout=5)
         cls.temporary.cleanup()
 
-    def request(self, hostname: str, path: str, key: str = GOOD_API_KEY, method: str = "GET"):
+    def request(self, hostname: str, path: str, key: str = GOOD_API_KEY, method: str = "GET",
+                body: bytes = b"", length: int = 0):
         """Verify hostname and chain while connecting only to the local fixture test socket."""
         context = ssl.create_default_context(cafile=str(self.directory / "combined-ca.pem"))
         with socket.create_connection(self.server.server_address, timeout=5) as connection:
@@ -64,8 +66,8 @@ class FixtureTLSCase(unittest.TestCase):
                 secured.sendall(
                     (
                         f"{method} {path} HTTP/1.1\r\nHost: {hostname}\r\n"
-                        f"X-Api-Key: {key}\r\nConnection: close\r\n\r\n"
-                    ).encode()
+                        f"X-Api-Key: {key}\r\nContent-Length: {length or len(body)}\r\nConnection: close\r\n\r\n"
+                    ).encode() + body
                 )
                 response = http.client.HTTPResponse(secured)
                 response.begin()
@@ -95,6 +97,16 @@ class FixtureTLSCase(unittest.TestCase):
     def test_write_methods_are_rejected(self):
         """The synthetic provider does not accept mutations even with its known test key."""
         self.assertEqual(self.request("fixture", f"{UNIFI_PREFIX}/sites", method="POST")[0], 405)
+
+    def test_a_change_is_read_only_when_changes_are_on(self):
+        """Refused without waiting for contents that never come on the default start; read and made once on."""
+        path = "/profiles/aaaaaa/allowlist"
+        self.assertEqual(self.request("api.nextdns.io", path, method="POST", length=40)[0], 405)
+        self.addCleanup(fixture.ALLOWLISTS.clear)
+        with patch.dict(fixture.SWITCHES, {"writes": "on"}):
+            sent = b'{"id":"photos.example.test"}'
+            self.assertEqual(self.request("api.nextdns.io", path, method="POST", body=sent)[0], 200)
+        self.assertEqual(fixture.ALLOWLISTS[path], [{"id": "photos.example.test", "active": True}])
 
     def test_switched_faults_reach_the_wire_and_pass(self):
         """A planned rate limit states its wait, a planned break sends nothing, and both are used up."""
@@ -156,12 +168,20 @@ class FixtureContractCase(unittest.TestCase):
             return self.through_fixture(collect(provider, "acceptance-test", config, key))
 
     def test_large_site_is_real_size_and_reads_cleanly(self):
-        """Ten networks, 13 pieces of equipment, 67 clients and 190 policies, with nothing left unread."""
+        """Ten networks, 13 pieces of equipment, 67 clients and 230 policies in two pages, with nothing left unread."""
         snapshot = self.collect_fixture("unifi_network", LARGE)
         kinds = [node["kind"] for node in snapshot.resources]
         self.assertEqual({kind: kinds.count(kind) for kind in set(kinds)}, {
-            "site": 1, "gateway": 1, "switch": 4, "access_point": 8, "network": 10, "client": 67, "policy": 190})
+            "site": 1, "gateway": 1, "switch": 4, "access_point": 8, "network": 10, "client": 67, "policy": 230})
         self.assertEqual(self.evidence.gaps, set())
+        # The gateway's lists give 25 rows unless asked and never more than 200, so the policies take two reads.
+        listed = [json.loads(response_for(f"{fixture.LARGE}/{rows}", GOOD_API_KEY)[1])
+                  for rows in ("firewall/policies", "firewall/policies?limit=200", "clients?limit=200")]
+        self.assertEqual([(page["count"], page["totalCount"]) for page in listed], [(25, 230), (200, 230), (67, 67)])
+        self.assertEqual(response_for(f"{fixture.LARGE}/clients?limit=201", GOOD_API_KEY)[0], 400)
+        # Only the read of one client says how and until when a guest was let on.
+        self.assertNotIn("authorization", json.dumps(listed[2]))
+        self.assertIn("authorization", json.loads(response_for(f"{fixture.LARGE}/clients/big-client-02", GOOD_API_KEY)[1])["access"])
         cloud = {**LARGE, "base_url": "https://api.ui.com/v1/connector/consoles/example-console/proxy/network/integration"}
         self.assertEqual(len(self.collect_fixture("unifi_network", cloud).resources), len(snapshot.resources))
         gateway = next(node for node in snapshot.resources if node["kind"] == "gateway")
@@ -223,10 +243,14 @@ class FixtureContractCase(unittest.TestCase):
         self.assertEqual([row["id"] for row in self.collect_fixture("unifi_network", LARGE).passes], [issued["id"]])
         run(actions.unifi_delete_voucher(LARGE, key, "site-large", issued["id"], allowed=True))
         self.assertEqual(self.collect_fixture("unifi_network", LARGE).passes, [])
-        for allow in (True, False):
+        clients = fixture.UNIFI_ROWS[f"{fixture.LARGE}/clients"]
+        self.addCleanup(clients.__setitem__, slice(None), [dict(row) for row in clients])
+        # A guest let on is read back. One cut off is disconnected and no longer listed, so nothing can be read back.
+        for allow, read_back in ((True, {"authorized": True, "verified": True}), (False, {"authorized": None, "verified": False})):
             done = run(actions.unifi_set_guest_access(LARGE, key, "site-large", "big-client-62", allow,
                                                       minutes=30, allowed=True))
-            self.assertEqual(done, {"authorized": allow, "verified": True})
+            self.assertEqual(done, read_back)
+        self.assertEqual(len(clients), 66)
         fixture.set_switch("writes", "fail")
         with self.assertRaises(core.IntegrationError):
             run(actions.nextdns_allow(NEXTDNS, key, "photos.example.test", allowed=True))
@@ -272,6 +296,16 @@ class FixtureContractCase(unittest.TestCase):
             self.collect_fixture("nextdns", {"profile_id": "cccccc", "lookback_hours": 24})
         self.assertEqual(error.exception.category, "provider_contract")
         self.assertNotIn("fixture-private-error-marker", str(error.exception))
+
+
+class ReadOnlyDefaultCase(unittest.TestCase):
+    """The compose file is the whole control over whether a start may change the fake sources."""
+
+    def test_compose_allows_no_change_unless_asked(self):
+        """Both sides stay empty, which is read only, unless NYCTR_ACCEPTANCE_WRITES is set at the start."""
+        compose = (Path(__file__).parent / "compose.yaml").read_text()
+        self.assertEqual(re.findall(r"(?:FIXTURE_WRITES=|NYCTR_PROVIDER_WRITES: )(.*)", compose),
+                         ["${NYCTR_ACCEPTANCE_WRITES:+on}", "${NYCTR_ACCEPTANCE_WRITES:-}"])
 
 
 class AcceptanceURLCase(unittest.TestCase):
