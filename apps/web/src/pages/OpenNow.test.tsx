@@ -57,6 +57,28 @@ describe('ending an exception', () => {
     ]);
   });
 
+  it('ends an unconfirmed opening by hand only once its source is gone', async () => {
+    const record = { status: 'unconfirmed', execution: 'not_applied', owned: false } as const;
+    const calls = mockApi({
+      'GET /leases': [
+        lease('unchecked', { ...record, source_removed: true, last_error: 'Check at Resolver.' }),
+        lease('reachable', { ...record, last_error: 'Check at Resolver.' }),
+      ],
+      'GET /suggestions': [],
+      'POST /leases/unchecked/end': {},
+      'POST /leases/reachable/end': {},
+    });
+    render(<OpenNow onChange={() => {}} />);
+    await screen.findByText('unchecked.example');
+    fireEvent.click(row('unchecked.example').getByRole('button', { name: 'I removed it by hand' }));
+    fireEvent.click(row('reachable.example').getByRole('button', { name: 'End now' }));
+    await vi.waitFor(() => expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2));
+    expect(calls.filter((call) => call.method === 'POST').map((call) => call.body)).toEqual([
+      { by_hand: true },
+      {},
+    ]);
+  });
+
   it("says a refusal with the row whose button was pressed, in the server's words", async () => {
     const never =
       'Nyctr has not collected from Resolver yet, so it changes nothing there. Collect from it first, then try again.';

@@ -84,9 +84,12 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   const remaining = lease.expires_at
                     ? Math.max(0, Date.parse(lease.expires_at) - now)
                     : 0;
-                  // The server ends by hand only an entry Nyctr itself added at a source since removed.
+                  // The server ends by hand only an entry Nyctr itself added at a source since removed,
+                  // and an opening it could not confirm there: nobody can check that through Nyctr any more.
                   const byHand =
-                    Boolean(lease.source_removed) && lease.execution === 'applied' && lease.owned;
+                    Boolean(lease.source_removed) &&
+                    ((lease.execution === 'applied' && lease.owned) ||
+                      lease.status === 'unconfirmed');
                   const refusal = error?.key === lease.id ? error.message : null;
                   return (
                     <Fragment key={lease.id}>
