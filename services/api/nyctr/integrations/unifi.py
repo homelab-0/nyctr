@@ -47,8 +47,10 @@ CLOUD_HOST = "api.ui.com"
 CLOUD_PACE = 96
 _CLOUD_PATH = re.compile(r"/v1/connector/consoles/([A-Za-z0-9:_-]+)/proxy/network/integration")
 # The optional per-network and per-device reads stop while the whole collection is still
-# under this many requests, leaving room for the reads that must follow. A collection
-# whose lists each fit one page therefore fits one minute of the cloud limit and never waits.
+# under this many requests, leaving room for the reads that must follow. A collection of
+# up to nine sites whose lists each fit one page therefore fits one minute of the cloud
+# limit and never waits. The reads that follow (six lists for each site, one for each guest)
+# are not held to this number, so ten sites or more go past it and wait once.
 REQUEST_CEILING = 96
 _MANAGERS = {"GATEWAY": "gateway", "SWITCH": "switch", "UNMANAGED": "unmanaged"}
 READS = (

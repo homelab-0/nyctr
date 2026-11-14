@@ -130,15 +130,26 @@ _FAILURES = {
     ),
 }
 
+# A rate limit where every request in the count was this test's own. Trying again cannot help.
+_OWN_LIMIT = (
+    "This test sent as many requests as the source allows in a minute and still needed more, so it stopped.",
+    "Trying again will not help: the test would stop at the same place. "
+    "Collect from this source instead. A collection may wait longer for its turn.",
+)
+
+
 def _set_check(checks, id_, status, category, summary, guidance=None):
     """Replace one fixed report stage with sanitized application-owned diagnostic text."""
     checks[id_] = DiagnosticCheck(id=id_, label=_CHECK_LABELS[id_], status=status,
                                   category=category, summary=summary, guidance=guidance)
 
 
-def _failed_check(checks, id_, category):
-    """Render a known failure category without exposing the underlying exception message."""
-    summary, guidance = _FAILURES[category]
+def _failed_check(checks, id_, category, text=None):
+    """Render a known failure category without exposing the underlying exception message.
+
+    `text` is other fixed wording for the same category, as a summary and what to do.
+    """
+    summary, guidance = text or _FAILURES[category]
     _set_check(checks, id_, "failed", category, summary, guidance)
 
 
@@ -224,6 +235,7 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
         api_key = None
         _failed_check(checks, "secret", "secret")
     error_category = None
+    spent_here = False
     counts = None
     with capture_probe() as evidence:
         if valid_config is not None and api_key is not None:
@@ -239,6 +251,7 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
                 error_category = "timeout"
             except IntegrationError as exc:
                 error_category = exc.category if exc.category in _FAILURES else "internal"
+                spent_here = exc.category == "rate_limit" and exc.limit_spent_here
             except Exception:
                 error_category = "internal"
     if evidence.responses_received:
@@ -259,7 +272,7 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
         }.get(error_category, "provider_contract")
         if error_category in {"transport", "timeout"} and not evidence.responses_received:
             stage = "connectivity"
-        _failed_check(checks, stage, error_category)
+        _failed_check(checks, stage, error_category, _OWN_LIMIT if spent_here else None)
     capabilities = _capabilities(provider, evidence)
     implemented = [item for item in capabilities if item.implementation == "implemented"]
     if not evidence.verified_capabilities:

@@ -13,7 +13,7 @@ from nyctr.collection import apply_snapshot
 from nyctr.integrations import Snapshot, core
 from nyctr.models import Audit, Integration, Lease, Observation, utcnow
 
-GALLERY = {"block_id": "block-gallery", "reason": "Need to open a family gallery", "duration_minutes": 240}
+GALLERY = {"block_id": "block-gallery", "reason": "Need to open a picture gallery", "duration_minutes": 240}
 
 
 def put_rule(client, headers, **values):
@@ -38,7 +38,7 @@ def test_low_risk_privacy_block_opens_under_the_written_rule(client, app, member
 
 @pytest.mark.parametrize("block,expect", [
     ("block-verify", "above the automatic limit"),   # newly registered: score 72
-    ("block-tablet", "household rule"),               # administrator denylist
+    ("block-tablet", "an administrator's rule"),      # administrator denylist
 ])
 def test_risky_or_deliberate_blocks_always_wait_for_a_person(client, member_headers, block, expect):
     """Security and policy blocks are scored, explained and left pending."""

@@ -1,6 +1,7 @@
 """The cloud address: what is requested, what its errors mean, and staying inside its request limit."""
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -10,7 +11,7 @@ from sqlalchemy import select
 from test_device_networks import big, gear, network
 from test_integrations import KEY, mock_client
 
-from nyctr import integrations
+from nyctr import collection, integrations
 from nyctr.collection import classify
 from nyctr.diagnostics import diagnose_integration
 from nyctr.integrations import IntegrationError, collect, core, registry, unifi
@@ -179,6 +180,42 @@ def test_collections_and_a_connection_test_of_one_console_share_one_count(clock,
     assert len(calls) == 192 and waits == []
     run()
     assert len(calls) == 288 and waits and most_in_a_minute(sent[:96] + sent[192:]) == 96
+
+
+def test_a_connection_test_that_used_the_whole_limit_itself_says_trying_again_cannot_help(clock, monkeypatch):
+    """98 requests can never fit a test's 20 seconds of waiting, so the answer does not send the person round again."""
+    now, waits = clock
+    calls, _sent = serve(monkeypatch, LARGE, now)
+    report = asyncio.run(diagnose_integration("unifi_network", "one", {"base_url": CLOUD, "site_id": "home"}, SECRET))
+    failed = [check for check in report.checks if check.status == "failed"]
+    assert len(calls) == 96 and waits == [] and [check.category for check in failed] == ["rate_limit"]
+    assert "This test sent as many requests as the source allows" in failed[0].summary
+    assert "Trying again will not help" in failed[0].guidance and "shortly" not in failed[0].guidance
+    # With one place in the count taken by something else, trying again may help, and it says so as before.
+    now[0] += 120
+    core._turns[unifi.pace(CLOUD).key].append([now[0]])
+    report = asyncio.run(diagnose_integration("unifi_network", "one", {"base_url": CLOUD, "site_id": "home"}, SECRET))
+    failed = [check for check in report.checks if check.status == "failed"]
+    assert [check.category for check in failed] == ["rate_limit"] and "Try again shortly" in failed[0].guidance
+
+
+def test_the_backstop_is_longer_than_a_paced_collection_may_take_and_is_the_limit_in_force(monkeypatch, tmp_path):
+    """Reading and waiting for a turn together must fit under the backstop, or a paced collection is cut off as failed."""
+    assert integrations.READING_SECONDS + core.LONGEST_WAIT < collection.BACKSTOP_SECONDS < 300
+    # The number checked above is the one a collection is held to: shortened, it stops a slow source.
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", KEY)
+    monkeypatch.setattr(collection, "BACKSTOP_SECONDS", 0.2)
+
+    async def slow(provider, integration_id, config, api_key):
+        await asyncio.sleep(3)
+
+    monkeypatch.setattr("nyctr.integrations.collect", slow)
+    app = live_app(tmp_path)
+    with TestClient(app) as client:
+        seed_live_member(app)
+        started = time.monotonic()
+        response = client.post("/api/integrations/unifi/sync", headers=live_signin(client))
+        assert response.status_code == 502 and time.monotonic() - started < 2
 
 
 def test_the_console_s_own_address_is_not_paced(clock, monkeypatch):

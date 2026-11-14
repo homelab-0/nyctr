@@ -226,7 +226,7 @@ const partialReport: IntegrationDiagnosticsReport = {
       id: 'identity',
       title: 'Device-to-user identity is unverified',
       summary:
-        'Do not assign upstream DNS observations to a family member without reliable device evidence.',
+        'Do not assign upstream DNS observations to a person without reliable device evidence.',
     },
   ],
   snapshot_counts: { resources: 1, relationships: 0, observations: 0 },
