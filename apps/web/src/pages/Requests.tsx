@@ -69,7 +69,7 @@ export default function Requests({
   }, [requests.data, params]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // On a narrow screen the request's panel sits under the list: bring it into view when one is chosen.
-  const panel = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLElement>(null);
   useEffect(() => {
     if (selected && row?.id === selected) bringIntoView(panel.current);
   }, [selected, row?.id]);
@@ -173,104 +173,103 @@ export default function Requests({
             </div>
           </Panel>
           {row && (
-            <div className="into-view" ref={panel}>
-              <Panel title={<span className="dom">{row.domain}</span>}>
-                <div className="stack">
-                  <div className="bar">
-                    <Score value={row.risk_score} big />
-                    <span className={`tag ${STATUS[row.status]?.tone || ''}`}>
-                      {STATUS[row.status]?.text || row.status}
-                    </span>
-                  </div>
-                  <RiskScale
-                    value={row.risk_score}
-                    limit={rules.data?.access.enabled ? rules.data.access.max_score : undefined}
-                  />
-                  {row.risk_factors && <Factors items={row.risk_factors} />}
-                  {row.decision_note && <p className="aside">{row.decision_note}</p>}
-                  <KV
-                    items={[
-                      ['Who', names.get(row.requester_id) || 'Unknown'],
-                      ['Device', row.device_name],
-                      ...(row.source_name
-                        ? ([['Source', row.source_name]] as [string, string][])
-                        : []),
-                      ['Their reason', row.reason],
-                      ['Asked for', span(row.duration_minutes)],
-                      ...(written ? ([['Your note', written]] as [string, string][]) : []),
-                      ...(happened ? ([['At the source', happened]] as [string, string][]) : []),
-                    ]}
-                  />
-                  {row.status === 'pending' && (
-                    <>
-                      <div className="note yellow">
+            <Panel
+              title={<span className="dom">{row.domain}</span>}
+              className="into-view"
+              panelRef={panel}
+            >
+              <div className="stack">
+                <div className="bar">
+                  <Score value={row.risk_score} big />
+                  <span className={`tag ${STATUS[row.status]?.tone || ''}`}>
+                    {STATUS[row.status]?.text || row.status}
+                  </span>
+                </div>
+                <RiskScale
+                  value={row.risk_score}
+                  limit={rules.data?.access.enabled ? rules.data.access.max_score : undefined}
+                />
+                {row.risk_factors && <Factors items={row.risk_factors} />}
+                {row.decision_note && <p className="aside">{row.decision_note}</p>}
+                <KV
+                  items={[
+                    ['Who', names.get(row.requester_id) || 'Unknown'],
+                    ['Device', row.device_name],
+                    ...(row.source_name
+                      ? ([['Source', row.source_name]] as [string, string][])
+                      : []),
+                    ['Their reason', row.reason],
+                    ['Asked for', span(row.duration_minutes)],
+                    ...(written ? ([['Your note', written]] as [string, string][]) : []),
+                    ...(happened ? ([['At the source', happened]] as [string, string][]) : []),
+                  ]}
+                />
+                {row.status === 'pending' && (
+                  <>
+                    <div className="note yellow">
+                      <div>
+                        <b>This opens it for everyone on the DNS profile.</b>
+                        <p>
+                          A DNS exception applies to everyone using{' '}
+                          {source?.name || 'the DNS source'}, not to one person or device.
+                        </p>
+                      </div>
+                    </div>
+                    {(source?.write_mode === 'disabled' || source?.write_mode === 'none') && (
+                      <div className="note">
                         <div>
-                          <b>This opens it for everyone on the DNS profile.</b>
+                          <b>
+                            {source.write_mode === 'none'
+                              ? `Nyctr cannot open addresses at ${source.name}.`
+                              : `Nyctr is read-only for ${source.name}.`}
+                          </b>
                           <p>
-                            A DNS exception applies to everyone using{' '}
-                            {source?.name || 'the DNS source'}, not to one person or device.
+                            Approving records your decision and the time window. You open the
+                            address at the source yourself.
                           </p>
                         </div>
                       </div>
-                      {(source?.write_mode === 'disabled' || source?.write_mode === 'none') && (
-                        <div className="note">
-                          <div>
-                            <b>
-                              {source.write_mode === 'none'
-                                ? `Nyctr cannot open addresses at ${source.name}.`
-                                : `Nyctr is read-only for ${source.name}.`}
-                            </b>
-                            <p>
-                              Approving records your decision and the time window. You open the
-                              address at the source yourself.
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                      <label className="field">
-                        <span>Note for the record (optional)</span>
-                        <textarea
-                          rows={2}
-                          value={note}
-                          maxLength={500}
-                          onChange={(e) => setNote(e.target.value)}
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Open for</span>
-                        <select
-                          value={minutes}
-                          onChange={(e) => setMinutes(Number(e.target.value))}
-                        >
-                          {[15, 30, 60, 120, 240].map((value) => (
-                            <option key={value} value={value}>
-                              {span(value)}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <InlineError message={error} />
-                      <div className="button-row">
-                        <button
-                          className="button primary"
-                          disabled={pending}
-                          onClick={() => void decide('approved')}
-                        >
-                          <Check size={16} /> Approve
-                        </button>
-                        <button
-                          className="button danger"
-                          disabled={pending}
-                          onClick={() => void decide('denied')}
-                        >
-                          <X size={16} /> Say no
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </Panel>
-            </div>
+                    )}
+                    <label className="field">
+                      <span>Note for the record (optional)</span>
+                      <textarea
+                        rows={2}
+                        value={note}
+                        maxLength={500}
+                        onChange={(e) => setNote(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Open for</span>
+                      <select value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
+                        {[15, 30, 60, 120, 240].map((value) => (
+                          <option key={value} value={value}>
+                            {span(value)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <InlineError message={error} />
+                    <div className="button-row">
+                      <button
+                        className="button primary"
+                        disabled={pending}
+                        onClick={() => void decide('approved')}
+                      >
+                        <Check size={16} /> Approve
+                      </button>
+                      <button
+                        className="button danger"
+                        disabled={pending}
+                        onClick={() => void decide('denied')}
+                      >
+                        <X size={16} /> Say no
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </Panel>
           )}
         </div>
       )}

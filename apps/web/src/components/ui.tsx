@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type Ref,
   type ComponentType,
   type SVGProps,
 } from 'react';
@@ -371,6 +372,7 @@ export function Panel({
   children,
   flush = false,
   className = '',
+  panelRef,
 }: {
   title?: ReactNode;
   hint?: ReactNode;
@@ -378,9 +380,11 @@ export function Panel({
   children: ReactNode;
   flush?: boolean;
   className?: string;
+  /** The panel's own element, for a screen that brings it into view. */
+  panelRef?: Ref<HTMLElement>;
 }) {
   return (
-    <section className={`panel ${className}`}>
+    <section className={`panel ${className}`} ref={panelRef}>
       {title && (
         <div className="panel-head">
           <div>
