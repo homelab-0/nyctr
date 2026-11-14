@@ -44,9 +44,11 @@ session has member rights, so someone with a blocked site signs in at
 > source in exactly three ways (open or close a DNS exception, issue or end a
 > guest pass, let a guest device on or take its access away), only at a source
 > whose integration offers it, and only when an operator names that integration in
-> `NYCTR_PROVIDER_WRITES`. It is off by default. Nothing here has been run against
-> real UniFi, NextDNS, Proxmox or Pi-hole systems; tests use synthetic provider
-> responses. The capability table below
+> `NYCTR_PROVIDER_WRITES`. It is off by default. No change has been run against
+> a real UniFi or NextDNS system, and Proxmox and Pi-hole have never been read
+> from a real one; one UniFi console was read once through its cloud address,
+> read only, by an earlier build. Tests use synthetic provider responses. The
+> capability table below
 > separates what is implemented, simulated in demo, experimental and planned.
 
 ## Why Nyctr?
@@ -88,14 +90,15 @@ These screenshots show the running application with synthetic demonstration data
 | --- | --- | --- | --- |
 | Console | Briefing, map, inventory, findings, blocks, requests, open access, guests, sources, activity, setup | Implemented | Saved views, multiple workspaces |
 | Integration contract | Each integration declares what it reads, which capabilities it adds and what it can change; the core and console hold no vendor names, enforced by tests | Implemented | Out-of-tree integrations |
-| Network map | Column per network, row per layer; one view per kind of source; follow a network device into the source that hosts it | Implemented; layout tested to a 40-device cell, not at enterprise scale | Temporal comparison, path simulation |
+| Sources and collection | Add, edit and remove a source in the console; collection on a schedule set in the console, on by default at 15 minutes, with up to three retries of a failed scheduled collection; what a collection could not read is recorded and shown on the source | Implemented; tested with a passed-in clock and fabricated sources, not run for days on a real installation | Collection workers outside the web process |
+| Network map | Column per network, row per layer; one view per kind of source; follow a network device into the source that hosts it; a crowded cell opens as a list, so every item can be opened | Implemented; tested with a fabricated 280-item site, not at enterprise scale | Temporal comparison, path simulation |
 | Identity | Local accounts, cookie sessions, administrator and member roles, optional OIDC | Implemented | Account administration, group policies |
 | Evidence | Resources, typed relationships and observations, each marked observed, configured or inferred | Implemented | Historical snapshots, drift |
 | Risk score | Rule-based score from the stored block reason, explained by the source's own integration, and the shape of the name; unknown stays unknown | Implemented. It is not a reputation lookup | Background investigation with source links |
 | Access rule and leases | Administrator-written rule may open a low-risk privacy-list block at a source that offers it; durable leases; expiry and restart reconciliation; suggestions for permanent exceptions | Implemented; simulated in demo; real NextDNS writes untested | Exact-plan approval binding, drift checks |
 | Member portal | Blocks on the device in hand, score and factors, one request form, reconnect steps per device type | Implemented. Device recognition needs the member's LAN address to reach Nyctr | Push or email when a person decides |
 | Guest Wi-Fi | Guests sign in on the network's own portal (UniFi today); Nyctr issues passes, lets a waiting device on, shows who is on, access point history, data use and blocked lookups, and can cut off, restore or lock out, by hand or under a counted rule ([design](docs/guest-wifi.md)) | Implemented; simulated in demo; real UniFi writes untested | Firewall log receiver, UniFi-side block rule |
-| UniFi Network | Read-only inventory with equipment uplinks and network address ranges, policies, guest access state and vouchers; diagnostics. Which network a device is on is worked out from its address and shown as inferred | Implemented against the 11.0.97 contract | Ports, event receiver, policy analysis |
+| UniFi Network | Read-only inventory with equipment uplinks and network address ranges, policies, guest access state and vouchers; diagnostics. Which network a device is on is worked out from its address and shown as inferred; the gateway is filed on evidence when the console does not list it as one. Reads through the console's own address or the vendor's cloud address, the second paced under the vendor's request limit | Implemented against the 11.0.97 contract. The cloud address was read once against one real console; whether the gateway is recognised on a real network is not known | Ports, event receiver, policy analysis |
 | NextDNS | Read-only profile and blocked lookups with reason codes; administrator device-label links | Implemented | Incremental collection |
 | Proxmox VE | Read-only nodes, bridges, guests, network cards and firewall switches | Experimental; never run against a cluster | Firewall rules, SDN |
 | Pi-hole | Read-only blocked lookups from a Pi-hole v6 resolver with its client labels. Reports blocks; does not open them, so its requests always wait for a person | Experimental; sign-in follows the published contract, query-log fields unverified against a live Pi-hole | Opening an address, list names |
