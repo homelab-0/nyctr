@@ -93,6 +93,14 @@ async def _allowlist(reader: ReadClient, profile: str) -> dict[str, bool]:
 
 
 @_limited
+async def nextdns_listed(config: dict[str, Any], api_key: str, domain: str) -> bool:
+    """Say whether a domain is on the profile allowlist, switched on or off. A read: it changes nothing."""
+    name, profile = _domain(domain), _path_id(config["profile_id"])
+    async with core.make_http_client(api_key) as client:
+        return name in await _allowlist(ReadClient(client, NEXTDNS_BASE), profile)
+
+
+@_limited
 async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, allowed: bool) -> dict[str, Any]:
     """Allow a domain on the whole profile and verify it. Reports whether Nyctr created the entry.
 

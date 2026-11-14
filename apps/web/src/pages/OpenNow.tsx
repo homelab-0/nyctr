@@ -43,7 +43,8 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
   if (leases.loading) return <Loading text="Loading open access…" />;
   if (leases.error) return <ErrorState message={leases.error} retry={leases.reload} />;
   const all = leases.data || [];
-  const active = all.filter((lease) => lease.status === 'active');
+  const open = all.filter((lease) => lease.status === 'active');
+  const active = all.filter((lease) => lease.status !== 'ended');
   const ended = all.filter((lease) => lease.status === 'ended').slice(0, 20);
   return (
     <div className="page">
@@ -51,8 +52,8 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
         <div>
           <h1 className="display d2">Open now</h1>
           <p className="lede">
-            {active.length
-              ? `${plural(active.length, 'exception')} open. Temporary ones close themselves when their time is up.`
+            {open.length
+              ? `${plural(open.length, 'exception')} open. Temporary ones close themselves when their time is up.`
               : 'Nothing is open. Temporary access appears here while it lasts.'}
           </p>
         </div>
@@ -97,9 +98,15 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                           {lease.requester_name || 'Everyone'}
                           <div className="muted tiny">{lease.scope}</div>
                         </td>
-                        <td>{lease.decided_by_name || 'An administrator'}</td>
+                        <td>
+                          {lease.status === 'unconfirmed'
+                            ? ''
+                            : lease.decided_by_name || 'An administrator'}
+                        </td>
                         <td style={{ minWidth: 130 }}>
-                          {lease.kind === 'permanent' ? (
+                          {lease.status === 'unconfirmed' ? (
+                            'Not opened'
+                          ) : lease.kind === 'permanent' ? (
                             'Never'
                           ) : (
                             <>
@@ -113,8 +120,12 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                         <td>
                           {lease.last_error ? (
                             <>
-                              <span className="tag red">Could not close</span>
-                              {lease.source_removed && (
+                              <span className="tag red">
+                                {lease.status === 'unconfirmed'
+                                  ? 'Not confirmed'
+                                  : 'Could not close'}
+                              </span>
+                              {(lease.source_removed || lease.status === 'unconfirmed') && (
                                 <div className="muted tiny">{lease.last_error}</div>
                               )}
                             </>

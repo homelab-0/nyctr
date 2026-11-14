@@ -22,7 +22,7 @@ import logging
 from sqlalchemy import select, update
 
 from . import schedule
-from .access import BeingEnded, end_lease
+from .access import OPEN, BeingEnded, end_lease
 from .collection import after_collection, collect_integration
 from .guests import enforce
 from .models import Integration, Lease, utcnow
@@ -205,7 +205,7 @@ class Upkeep:
             self.collecting = asyncio.create_task(self._collect())
         with self.factory() as db:
             due = db.execute(select(Lease.id, Lease.integration_id).where(
-                Lease.status == "active", Lease.expires_at.is_not(None), Lease.expires_at <= self.clock()
+                Lease.status.in_(OPEN), Lease.expires_at.is_not(None), Lease.expires_at <= self.clock()
             ).order_by(Lease.expires_at)).all()
         by_source: dict[str | None, list[str]] = {}
         for lease_id, source in due:

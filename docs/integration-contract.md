@@ -30,6 +30,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `not_collected` | Optional. What a source of this kind never collects, each a few plain words ("DNS lookups that were allowed"). It travels in the catalog, and the Briefing lists it under "Not collected" for each connected source. A caution about evidence that is collected belongs in `gaps` |
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
 | `allow_domain`, `disallow_domain`, `issue_pass`, `end_pass`, `guest_access` | Actions, present exactly for the write capabilities declared |
+| `domain_listed` | Optional read for a source that declares `dns.exceptions`: whether an address is already allowed there, switched on or off. With it, Nyctr removes by itself what a failed or interrupted opening left behind. Without it, Nyctr removes nothing after such an opening and asks an administrator to check |
 
 The registry refuses to start if a provider declares a write capability without
 its actions, or actions without the capability.

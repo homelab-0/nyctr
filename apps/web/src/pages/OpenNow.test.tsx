@@ -125,4 +125,29 @@ describe('ending an exception', () => {
     // A record from before endings kept this says nothing about the source.
     expect(row('early.example').getByText(/^Ended early/).textContent).not.toMatch(/source/);
   });
+
+  it('lists an opening that was not confirmed in plain words and never as open access', async () => {
+    const words =
+      'Nyctr tried to open slow.example at Resolver and has not confirmed it. It may be open there. ' +
+      'Unless the opening completes, Nyctr removes it.';
+    mockApi({
+      'GET /leases': [
+        lease('open', {}),
+        lease('slow', {
+          status: 'unconfirmed',
+          execution: 'not_applied',
+          decided_by: '',
+          last_error: words,
+        }),
+      ],
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={() => {}} />);
+    expect(await screen.findByText(/^1 exception open\./)).toBeTruthy();
+    const text = screen.getByText('slow.example').closest('tr')!.textContent;
+    expect(text).toContain('Not opened');
+    expect(text).toContain('Not confirmed');
+    expect(text).toContain(words);
+    expect(text).not.toMatch(/left|Closing|An administrator/);
+  });
 });
