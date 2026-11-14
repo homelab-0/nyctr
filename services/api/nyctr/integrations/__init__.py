@@ -5,8 +5,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import registry
+from . import core, registry
 from .core import IntegrationError, Snapshot
+
+# The longest one collection may spend reading, whatever the source. Time spent waiting for a
+# turn at a source that declares a request limit is not reading and is bounded separately.
+READING_SECONDS = 60
 
 
 def capabilities_for(provider: str) -> list[str]:
@@ -31,12 +35,15 @@ async def collect(provider: str, integration_id: str, config: dict[str, Any], ap
 
     Validate configuration before dispatch and convert the overall timeout into
     a sanitized provider error; callers must discard failed partial collections.
+    Each wait for a turn at a paced source moves the deadline back by that wait,
+    so reading is limited to the same time for every source.
     """
     definition = registry.get(provider)
     clean = definition.validate(config) if isinstance(config, dict) else validate_config(provider, config)
     try:
-        async with asyncio.timeout(60):
-            return await definition.collect(integration_id, clean, api_key)
+        async with asyncio.timeout(READING_SECONDS) as limit:
+            with core.patience(waited=lambda wait: limit.reschedule(limit.when() + wait)):
+                return await definition.collect(integration_id, clean, api_key)
     except TimeoutError:
         raise IntegrationError("Collection timed out; narrow its site scope or log lookback.",
                                category="timeout") from None

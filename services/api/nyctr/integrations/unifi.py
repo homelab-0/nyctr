@@ -22,6 +22,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import actions, core
 from .core import (
@@ -39,11 +40,16 @@ from .registry import ConfigField, Provider
 ID = "unifi_network"
 MAX_GUEST_DETAILS = 40
 # The vendor's Site Manager API description limits its cloud pass-through to 100 requests
-# a minute for each console. A collection takes seconds, so the optional per-network and
-# per-device reads stop while the whole collection is still under this many requests,
-# leaving room for the reads that must follow.
+# a minute for each console. Through that address Nyctr's reads are paced to this many in
+# any 60 seconds for one console, whatever they are for. The four held back are for the
+# changes Nyctr may make there (a guest pass, letting a guest on), which are not paced.
+CLOUD_HOST = "api.ui.com"
+CLOUD_PACE = 96
+_CLOUD_PATH = re.compile(r"/v1/connector/consoles/([A-Za-z0-9:_-]+)/proxy/network/integration")
+# The optional per-network and per-device reads stop while the whole collection is still
+# under this many requests, leaving room for the reads that must follow. A collection
+# whose lists each fit one page therefore fits one minute of the cloud limit and never waits.
 REQUEST_CEILING = 96
-SITE_LIST_READS = 6
 _MANAGERS = {"GATEWAY": "gateway", "SWITCH": "switch", "UNMANAGED": "unmanaged"}
 READS = (
     ("sites:read", "Site discovery"),
@@ -148,6 +154,34 @@ async def _detail(reader: ReadClient, path: str, remote_id: str, parse, gap: str
         return None
 
 
+def pace(base_url: str) -> core.Pace | None:
+    """Declare the request limit of the address in use: the cloud's for one console, none for the console's own."""
+    parsed = urlsplit(base_url)
+    cloud = _CLOUD_PATH.fullmatch(parsed.path.rstrip("/"))
+    return core.Pace(f"{ID}:{cloud.group(1)}", CLOUD_PACE) if cloud and parsed.hostname == CLOUD_HOST else None
+
+
+def _shares(needs: list[int], budget: int) -> list[int]:
+    """Split the detail reads a collection can still make between its sites.
+
+    Every site gets what it needs up to one level, the highest the budget
+    allows, so a small site is read in full and the large ones are cut short
+    alike. What is left over goes one read each to the largest sites. No site
+    is read in full while another that needs reads gets none.
+    """
+    budget, level = max(budget, 0), 0
+    while level < max(needs, default=0) and sum(min(need, level + 1) for need in needs) <= budget:
+        level += 1
+    shares = [min(need, level) for need in needs]
+    spare = budget - sum(shares)
+    for index in sorted(range(len(needs)), key=lambda site: -needs[site]):
+        # With too few reads for one each, a read never completes a site while others have none.
+        if spare and needs[index] > level + (level == 0):
+            shares[index] += 1
+            spare -= 1
+    return shares
+
+
 def _renamed(row: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
     """Copy documented fields under the neutral names the core reads."""
     return {neutral: row[field] for field, neutral in names.items() if field in row}
@@ -160,8 +194,7 @@ def validate(config: dict[str, Any]) -> dict[str, Any]:
     parsed, host = core.validated_host(config.get("base_url"), "UniFi")
     path = parsed.path.rstrip("/")
     local = path == "/proxy/network/integration"
-    cloud = bool(re.fullmatch(r"/v1/connector/consoles/[A-Za-z0-9:_-]+/proxy/network/integration", path))
-    if not local and not (host == "api.ui.com" and cloud):
+    if not local and not (host == CLOUD_HOST and _CLOUD_PATH.fullmatch(path)):
         raise IntegrationError("Use the documented UniFi Network integration base path.")
     clean = {"base_url": config["base_url"].rstrip("/")}
     if config.get("site_id"):
@@ -182,7 +215,7 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
     snapshot = Snapshot(capabilities=[read for read, _label in READS], passes=[])
     now = core.iso(core.utc_now())
     async with core.make_http_client(api_key) as client:
-        reader = ReadClient(client, config["base_url"])
+        reader = ReadClient(client, config["base_url"], pace(config["base_url"]))
         sites = await offset_pages(reader, "/v1/sites")
         if config.get("site_id"):
             sites = [site for site in sites if site.get("id") == config["site_id"]]
@@ -196,8 +229,20 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
         core.record_capability("sites:read")
         if not sites:
             core.record_gap("unifi_no_visible_sites")
-        # Detail reads are capped for the whole collection, not per site, so many sites
-        # cannot spend the request budget on guests.
+        # Every site's lists are read before any detail, so the detail reads that fit can be
+        # shared between the sites by what each one needs.
+        lists = []
+        for site in sites:
+            # Sequential, bounded reads avoid saturating small self-hosted gateways.
+            lists.append([await offset_pages(reader, f"/v1/sites/{site['id']}/{name}")
+                          for name in ("devices", "networks", "clients", "firewall/policies")])
+        guests = sum(isinstance(row.get("access"), dict) and row["access"].get("type") == "GUEST"
+                     for _devices, _networks, clients, _policies in lists for row in clients)
+        # Requests the collection must still be able to make after the optional detail reads:
+        # two closing lists for each site and the guest details, capped for the whole collection.
+        reserved = 2 * len(sites) + min(guests, MAX_GUEST_DETAILS)
+        shares = _shares([len(devices) + len(networks) for devices, networks, _clients, _policies in lists],
+                         REQUEST_CEILING - reader.requests - reserved)
         guest_details = 0
         for position, site in enumerate(sites):
             sid = source_id(site.get("id"))
@@ -205,32 +250,24 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
             site_resource["site_id"] = site_resource["id"]
             snapshot.resources.append(site_resource)
             base = f"/v1/sites/{sid}"
-            # Sequential, bounded reads avoid saturating small self-hosted gateways.
-            devices = await offset_pages(reader, base + "/devices")
-            networks = await offset_pages(reader, base + "/networks")
-            clients = await offset_pages(reader, base + "/clients")
-            policies = await offset_pages(reader, base + "/firewall/policies")
+            devices, networks, clients, policies = lists[position]
             device_map: dict[str, str] = {}
             network_map: dict[str, str] = {}
-            # Requests this collection must still be able to make after the optional detail
-            # reads: this site's guest details and two closing lists, then every later site.
-            guests = sum(isinstance(row.get("access"), dict) and row["access"].get("type") == "GUEST"
-                         for row in clients)
-            later = len(sites) - position - 1
-            reserved = 2 + later * SITE_LIST_READS + (
-                MAX_GUEST_DETAILS - guest_details if later else min(guests, MAX_GUEST_DETAILS - guest_details))
             detail: dict[str, dict[str, Any]] = {}
+            left = shares[position]
             for kind, rows, parse in (("networks", networks, _network_addresses),
                                       ("devices", devices, _device_uplink)):
-                for row in rows:
+                for row in rows[:left]:
                     remote_id = source_id(row.get("id"))
-                    if reader.requests + reserved >= REQUEST_CEILING:
-                        core.record_gap("unifi_detail_limit")
-                        break
                     found = await _detail(
                         reader, f"{base}/{kind}/{remote_id}", remote_id, parse, f"unifi_{kind}_details_unavailable")
                     if found is not None:
                         detail[f"{kind}/{remote_id}"] = found
+                if len(rows) > left:
+                    # The gap is one fixed code; the site itself says it was cut short and by how much.
+                    core.record_gap("unifi_detail_limit")
+                    site_resource["attributes"].setdefault("detail_reads_skipped", {})[kind] = len(rows) - left
+                left = max(left - len(rows), 0)
             # The gateway's address on each network the source says its gateway manages.
             routed = [row for row in networks if row.get("management") == "GATEWAY"]
             gateway_ips = {ip for row in routed
@@ -446,8 +483,9 @@ PROVIDER = Provider(
             "A device's detail was refused or unusable. The Map cannot show what that equipment is attached to."),
         "unifi_detail_limit": (
             "More networks and equipment than one collection reads in detail",
-            "Detail reads stop before the collection reaches the source's request limit. "
-            "Some address ranges or uplinks are missing; narrow the connection to one site."),
+            "Detail reads stop before the collection reaches the source's request limit, and the reads "
+            "that fit are shared between the sites. Some address ranges or uplinks are missing; each site "
+            "that was cut short says how many. Narrow the connection to one site to read it in full."),
         "unifi_gateway_not_identified": (
             "No device could be shown to be the gateway",
             "The source says a gateway manages some networks, but lists no device as a gateway, no single "
