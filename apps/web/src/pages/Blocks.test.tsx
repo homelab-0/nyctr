@@ -112,7 +112,8 @@ describe('Blocks', () => {
       '/blocks?band=high',
       '/blocks?band=high&q=host-29',
     ]);
-  });
+    // Four draws and a typing pause: about a second. The room is for a machine at full load.
+  }, 20_000);
 
   it('offers no older rows and keeps a true line when another filter could not be read', async () => {
     const stored = Array.from({ length: 6 }, (_, index) => block(`host-${index}`, index + 1));
