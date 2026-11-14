@@ -69,7 +69,7 @@ def silent_source():
                         connection.recv(4096)
                 except OSError:
                     continue  # The client gave up on the certificate: nothing more to hold open.
-                done.wait(10)
+                done.wait()  # Held open, unanswered, until the test is over: no clock decides how long.
 
         threading.Thread(target=serve, daemon=True).start()
         return listener.getsockname()[1]
@@ -80,14 +80,20 @@ def silent_source():
         held.close()
 
 
-def failure(port: int, trust) -> IntegrationError:
+# The one wait each case is about is short. Every other wait is long enough that a busy machine cannot
+# turn one failure into another: a slow handshake must not read as a timeout, nor a slow certificate check.
+SHORT, PATIENT = 0.4, 120.0
+
+
+def failure(port: int, trust, *, connect: float, read: float) -> IntegrationError:
     """Read from the local server through the shared connector and return how it failed."""
-    async def read():
-        async with httpx.AsyncClient(timeout=httpx.Timeout(0.4), verify=trust, trust_env=False) as client:
+    async def read_once():
+        limits = httpx.Timeout(connect=connect, read=read, write=PATIENT, pool=PATIENT)
+        async with httpx.AsyncClient(timeout=limits, verify=trust, trust_env=False) as client:
             await core.ReadClient(client, f"https://localhost:{port}").get("/x")
 
     with pytest.raises(IntegrationError) as caught:
-        asyncio.run(read())
+        asyncio.run(read_once())
     return caught.value
 
 
@@ -108,7 +114,12 @@ def test_an_https_source_that_does_not_answer_in_time_is_a_timeout_and_is_retrie
     raised = []
     real = core._transport_category
     monkeypatch.setattr(core, "_transport_category", lambda error: raised.append(error) or real(error))
-    error = failure(silent_source(shown if stalls == "after the handshake" else None), trust)
+    if stalls == "after the handshake":
+        # The handshake may take as long as the machine needs; only the answer that never comes is waited for briefly.
+        error = failure(silent_source(shown), trust, connect=PATIENT, read=SHORT)
+    else:
+        # Nothing answers the handshake at all, so no race is possible: the connection is accepted and held.
+        error = failure(silent_source(None), trust, connect=SHORT, read=PATIENT)
     # The honest case: the library's own timeout, with an SSLError at the bottom of its chain.
     assert isinstance(raised[0], httpx.TimeoutException)
     assert any(issubclass(kind, ssl.SSLError) for kind in chain(raised[0]))
@@ -125,6 +136,7 @@ def test_a_certificate_that_is_not_trusted_is_still_a_certificate_failure_and_is
                                                                                            silent_source):
     """The certificate sentence is kept for a certificate failure, which waiting will not fix."""
     shown, _trust = certificate
-    error = failure(silent_source(shown), ssl.create_default_context())
+    # Patient on every wait: however slowly the certificate arrives, it is refused before any time is up.
+    error = failure(silent_source(shown), ssl.create_default_context(), connect=PATIENT, read=PATIENT)
     assert error.category == "tls" and "certificate" in str(error)
     assert classify(error, str(error)).may_pass is False
