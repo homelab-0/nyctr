@@ -277,6 +277,7 @@ async function openIntegrations({
   save = async () => jsonResponse(source),
   others = [],
   removal = async (method: string) => jsonResponse(method === 'GET' ? plan : {}),
+  catalogue = async () => jsonResponse(catalog),
 }: {
   mode?: Mode;
   role?: Role;
@@ -287,6 +288,7 @@ async function openIntegrations({
   save?: (path: string) => Promise<Response>;
   others?: Integration[];
   removal?: (method: string) => Promise<Response>;
+  catalogue?: () => Promise<Response>;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -300,7 +302,7 @@ async function openIntegrations({
     const path = String(input);
     if (path === '/api/auth/me') return jsonResponse(user);
     if (path === '/api/integrations') return jsonResponse([source, ...others]);
-    if (path === '/api/integrations/catalog') return jsonResponse(catalog);
+    if (path === '/api/integrations/catalog') return catalogue();
     if (path === '/api/collection') return jsonResponse(schedule);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
     if (path.startsWith('/api/integrations/') && options?.method === 'PUT') return save(path);
@@ -753,25 +755,77 @@ describe('a source that could not read everything', () => {
     expect(within(whole).queryByText(/could not read everything/)).toBeNull();
   });
 
-  it('opens the Edit form from a Briefing link once, and goes to the card from the other', async () => {
-    window.location.hash = `/sources?edit=${resolver.id}`;
-    const { interaction } = await openIntegrations({ source: resolver });
+  /** Resolves once the catalogue has arrived: only then can a link have opened anything. */
+  const catalogueArrived = () =>
+    waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add connection' })).toHaveProperty(
+        'disabled',
+        false,
+      ),
+    );
+  const form = () => screen.queryByRole('dialog', { name: 'Edit source' });
+
+  it('opens the Edit form from a Briefing link once, however often the list is read again', async () => {
+    window.location.hash = `/sources?edit=${connection.id}`;
+    const { interaction, fetchMock } = await openIntegrations();
     const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    expect(within(dialog).getByLabelText(/^Connection name/)).toHaveProperty(
+      'value',
+      connection.name,
+    );
     await interaction.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit source' })).toBeNull());
-    cleanup();
+    await waitFor(() => expect(form()).toBeNull());
+    const reads = () => fetchMock.mock.calls.filter(([path]) => path === '/api/integrations');
+    const before = reads().length;
+    await interaction.click(screen.getByRole('button', { name: 'Collect snapshot' }));
+    await screen.findByText(/Snapshot collected/);
+    await waitFor(() => expect(reads().length).toBeGreaterThan(before));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(form()).toBeNull();
+  });
+
+  it('goes to the card, not the form, from a link to the source', async () => {
     window.location.hash = `/sources?source=${gappy.id}`;
     await openIntegrations({ source: gappy });
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole('heading', { name: gappy.name })),
     );
-    expect(screen.queryByRole('dialog', { name: 'Edit source' })).toBeNull();
+    await catalogueArrived();
+    expect(form()).toBeNull();
   });
 
-  it('does not open the Edit form for a member', async () => {
+  it('waits for the catalogue when the list of sources arrives first', async () => {
     window.location.hash = `/sources?edit=${resolver.id}`;
-    await openIntegrations({ source: resolver, role: 'member' });
-    expect(screen.queryByRole('dialog', { name: 'Edit source' })).toBeNull();
+    const held = deferredResponse();
+    await openIntegrations({ source: resolver, catalogue: () => held.promise });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The console is still standing and nothing has opened on an empty catalogue.
+    expect(screen.getByRole('heading', { name: resolver.name })).toBeDefined();
+    expect(form()).toBeNull();
+    await act(async () => held.resolve(jsonResponse(catalog)));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    expect(within(dialog).getByLabelText(/^Integration/)).toHaveProperty('value', 'acme_resolver');
+  });
+
+  it('opens no form for a source whose integration this release lacks', async () => {
+    const orphan = { ...resolver, provider: 'retired_kind', provider_name: 'Retired' };
+    window.location.hash = `/sources?edit=${orphan.id}`;
+    await openIntegrations({ source: orphan });
+    await catalogueArrived();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(form()).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it.each([
+    ['a member', { role: 'member' as const }],
+    ['the demo workspace', { mode: 'demo' as const }],
+  ])('does not open the Edit form from a link for %s', async (_who, session) => {
+    window.location.hash = `/sources?edit=${resolver.id}`;
+    await openIntegrations({ source: resolver, ...session });
+    await catalogueArrived();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(form()).toBeNull();
   });
 });
 

@@ -433,21 +433,26 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
     if (!edit) editButton.current?.focus();
   }, [edit]);
   // A link from the Briefing names one source: `edit` opens its Edit form, `source` goes to its
-  // card. Each link is followed once, so closing the form does not open it again.
+  // card. Each link is followed once, so closing the form does not open it again. The form is
+  // built from the catalogue, so an edit link waits for it, and then opens only where the Edit
+  // button would: for an administrator, outside the demo, for a source whose integration this
+  // release has, and not while a change to it is still being saved.
   const followed = useRef('');
   const mayEdit = user?.role === 'admin' && user.mode !== 'demo';
   useEffect(() => {
     const hash = window.location.hash;
     if (!result.data || followed.current === hash) return;
-    followed.current = hash;
     const wanted = new URLSearchParams(hash.split('?')[1] || '');
-    const target = result.data.find(
-      (item) => item.id === (wanted.get('edit') || wanted.get('source')),
-    );
+    const editing = wanted.get('edit');
+    if (editing && !catalog) return;
+    followed.current = hash;
+    const target = result.data.find((item) => item.id === (editing || wanted.get('source')));
     if (!target) return;
     document.getElementById(`source-${target.id}`)?.focus();
-    if (wanted.get('edit') && mayEdit) setEdit(target);
-  }, [result.data, mayEdit]);
+    const known = catalog?.providers.some((item) => item.id === target.provider);
+    const settling = saving[target.id] === 'pending' || saving[target.id] === result.data;
+    if (editing && mayEdit && known && !settling) setEdit(target);
+  }, [result.data, catalog, mayEdit, saving]);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);

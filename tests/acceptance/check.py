@@ -342,15 +342,34 @@ def verify_diagnostics(client: Client, connections: dict[str, dict]) -> None:
 
 
 def collect_fixtures(client: Client, connections: dict[str, dict]) -> None:
-    """Import only the two positive fixtures through the ordinary administrator collection API."""
-    for scenario, count, observations in (("unifi", 11, 0), ("nextdns", 8, 1)):
+    """Import only the two positive fixtures through the ordinary administrator collection API.
+
+    Both fixtures serve every read their adapter makes, optional ones included, so
+    each collection must record no gap: in its answer, on the source and in its
+    audit record. A gap here means an adapter failed a read the fixture serves.
+    """
+    expected = (("unifi", 11, 0, []), ("nextdns", 8, 1, []))
+    for scenario, count, observations, gaps in expected:
         result = client.json(source_path(connections[scenario], "sync"), method="POST")
         require(
-            result
-            == {"ok": True, "resource_count": count, "observation_count": observations, "partial": False},
+            result == {"ok": True, "resource_count": count, "observation_count": observations,
+                       "partial": False, "gaps": len(gaps)},
             f"Explicit {scenario} collection returned unexpected counts.",
         )
-        print(f"PASS explicit collection: {scenario}")
+        listed = next(row for row in client.json("/api/integrations") if row["id"] == connections[scenario]["id"])
+        require(
+            [gap["id"] for gap in listed["gaps"]] == gaps
+            and all(gap["title"] and gap["summary"] for gap in listed["gaps"]),
+            f"The {scenario} source does not list what its collection could not read.",
+        )
+        assert_sanitized(listed["gaps"])
+        print(f"PASS explicit collection: {scenario}; {len(gaps)} recorded gaps listed")
+    collected = [event for event in client.json("/api/audit") if event.get("action") == "integration.collected"]
+    recorded = {event["target_id"]: event["details"].get("gaps") for event in reversed(collected)}
+    require(
+        all(recorded.get(connections[scenario]["id"]) == gaps for scenario, _count, _observations, gaps in expected),
+        "The audit record of a collection does not list its gap codes.",
+    )
 
 
 def verify_placement(client: Client, graph: dict) -> None:

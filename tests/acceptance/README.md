@@ -79,6 +79,10 @@ Nyctr. All provider-reported clients stay unassigned. The DNS observation has
 no trusted device ID and no score, because the fixture's block reason is one the
 scorer does not recognise. No source writes or exceptions are created.
 
+Both fixtures serve every read their adapter makes, the optional ones included.
+Each collection must therefore record nothing it could not read: a gap count of
+zero in its answer, none listed on the source and none in its audit record.
+
 The isolated HTTPS fixture routes are:
 
 ```text
