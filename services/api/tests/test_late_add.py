@@ -24,9 +24,11 @@ class Late(Source):
 
     def __init__(self, monkeypatch, **more):
         super().__init__(monkeypatch, **more)
-        self.late, self.taken = 1, []
+        self.late, self.taken, self.land_at = 1, [], None
 
     async def answer(self, request):
+        if len(self.calls) == self.land_at:
+            self.land()
         if request.method == "POST" and self.late:
             self.late -= 1
             self.calls.append("POST")
@@ -108,7 +110,8 @@ def test_an_add_applied_after_nyctr_gave_up_is_found_on_a_later_tick_and_removed
             assert db.get(Lease, record).status == "ended" and claims(app) == []
 
 
-@pytest.mark.parametrize("second", ["before the add lands", "after the add lands", "and is ended before the add lands"])
+@pytest.mark.parametrize("second", ["before the add lands", "after the add lands", "and is ended before the add lands",
+                                    "as the add lands, between its two reads"])
 def test_a_second_opening_while_the_first_is_still_checked_takes_the_entry_as_nyctrs_own(tmp_path, monkeypatch,
                                                                                          second):
     """Approve, fail at the limit, approve again, end: nothing is left at the source, whether the first add lands
@@ -124,6 +127,9 @@ def test_a_second_opening_while_the_first_is_still_checked_takes_the_entry_as_ny
                 assert (await review(owner, made)).status_code == 502
                 if second == "after the add lands":
                     source.land()
+                elif second == "as the add lands, between its two reads":
+                    # Its look for the earlier attempt finds nothing; its own question finds the entry there.
+                    source.land_at = len(source.calls) + 1
                 assert (await review(owner, made)).status_code == 200
                 lease = next(row for row in (await owner.get("/api/leases")).json() if row["status"] == "active")
                 assert lease["owned"] is True and lease["execution"] == "applied"
