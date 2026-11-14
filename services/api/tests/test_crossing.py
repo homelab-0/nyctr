@@ -193,7 +193,8 @@ def test_an_approval_takes_the_claim_first_and_gives_it_back_on_every_way_out(tm
                 assert code == 409 and "already changing" in detail
                 assert (await review(two, "denied"))[:2] == (200, "denied")  # Opens nothing, so takes no claim.
                 access.release_entry(db, held)
-                assert (await review(two))[0] == 409 and claims(app) == []
+                code, _, detail = await review(two)
+                assert code == 409 and "already been reviewed" in detail and claims(app) == []
                 held = access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))
                 monkeypatch.setattr(access, "OPENING_WAITS", 0.3)
                 code, status, detail = await review(one)
