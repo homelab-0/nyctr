@@ -135,6 +135,11 @@ export function assignLanes(graph: Graph): Map<string, string> {
   return lanes;
 }
 
+/** Whether the map draws a node at all, so a count beside the map counts only what is on it. */
+export const drawn = (node: Resource) =>
+  !HIDDEN.has(node.kind) &&
+  BANDS.some((band) => (band.kinds as readonly string[]).includes(node.kind));
+
 /** Computes positions for every visible node and a path for every drawn relationship. */
 export function layoutMap(graph: Graph, view: MapView = 'all', perCell = 6): MapLayout {
   const laneOf = assignLanes(graph);
@@ -142,10 +147,7 @@ export function layoutMap(graph: Graph, view: MapView = 'all', perCell = 6): Map
     .filter((node) => node.kind === 'network')
     .sort((a, b) => (vlanOf(a) ?? 1e9) - (vlanOf(b) ?? 1e9) || a.name.localeCompare(b.name));
   const shown = graph.nodes.filter(
-    (node) =>
-      !HIDDEN.has(node.kind) &&
-      BANDS.some((band) => (band.kinds as readonly string[]).includes(node.kind)) &&
-      (view === 'all' || node.provider === view || node.kind === 'network'),
+    (node) => drawn(node) && (view === 'all' || node.provider === view || node.kind === 'network'),
   );
   const lanes: MapLane[] = [
     { id: SHARED, name: 'Whole site', sub: 'Not tied to one network', x: LABEL_W, w: LANE_W },

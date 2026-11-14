@@ -12,7 +12,7 @@ import {
   SourceTag,
   sourceOf,
 } from '../components/ui';
-import type { MapView } from '../lib/map-layout';
+import { drawn, type MapView } from '../lib/map-layout';
 import type { Finding, Graph, Resource } from '../types';
 
 /** Attributes worth showing in the inspector, with plain names. Everything else stays in Queries. */
@@ -128,8 +128,9 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
   const twin = links.find((edge) => edge.kind === 'same_device');
   const twinProvider =
     (twin && byId.get(twin.source === node?.id ? twin.target : twin.source)?.provider) || '';
+  // Counts only what the map draws: blocked addresses and sites are left off it, so they are left out here.
   const count = (provider: string) =>
-    data.nodes.filter((item) => item.provider === provider).length;
+    data.nodes.filter((item) => item.provider === provider && drawn(item)).length;
   // One view per kind of source that reported something, in a stable order.
   const kinds = [...new Set(data.nodes.map((item) => item.provider))]
     .filter((kind) => kind && kind !== 'demo')

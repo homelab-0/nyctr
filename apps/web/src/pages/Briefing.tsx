@@ -2,7 +2,8 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Sparkles } from 'lucide-react';
 import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
-import { ago, left, plural, useNow, word } from '../lib/format';
+import { counted, lookupSpan, namedCounts } from '../lib/counts';
+import { ago, left, useNow, word } from '../lib/format';
 import { askNyctr, hrefFor } from '../lib/links';
 import { nextCollection, useSchedule } from '../lib/schedule';
 import type { AttentionItem, Integration, Lease, Overview } from '../types';
@@ -23,6 +24,19 @@ const NOT_COLLECTED = [
   'Devices that have left the network',
   'Workload firewall rules (only the on/off switches are read)',
 ];
+
+/** What the sources reported, each kind named with its own count, then the span of stored lookups. */
+function briefingCounts(overview: Overview, now: number) {
+  const named = namedCounts(overview.kind_counts || {});
+  const sources = counted(overview.integration_count, 'source');
+  const span = lookupSpan(
+    overview.recent_block_count,
+    overview.oldest_block_at,
+    overview.newest_block_at,
+    now,
+  );
+  return `${named ? `${named} from ${sources}.` : `Nothing inventoried yet from ${sources}.`} ${span}`;
+}
 
 /**
  * The landing screen: what needs a person, ranked, then what is open and how fresh the sources are.
@@ -66,7 +80,7 @@ export default function Briefing({
           <h1 className="display d1">{headline}</h1>
           <p className="lede">
             {overview.data
-              ? `${plural(overview.data.resource_count, 'item')} inventoried from ${plural(overview.data.integration_count, 'source')}. ${plural(overview.data.recent_block_count, 'blocked lookup')} in the last day.`
+              ? briefingCounts(overview.data, now)
               : 'Ranked by fixed rules from what your sources reported.'}
           </p>
         </div>

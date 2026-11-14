@@ -11,12 +11,14 @@ import {
   Seg,
   SourceTag,
 } from '../components/ui';
+import { lookupSpan } from '../lib/counts';
 import { ago, useNow } from '../lib/format';
-import type { Block, RiskBand } from '../types';
+import type { Block, Integration, RiskBand } from '../types';
 
 /** Recent blocked lookups from every source, with the rule-based score and how each was attributed. */
 export default function Blocks() {
   const blocks = useApi<Block[]>('/blocks');
+  const sources = useApi<Integration[]>('/integrations');
   const [text, setText] = useState('');
   const [band, setBand] = useState<'all' | RiskBand>('all');
   const now = useNow();
@@ -31,6 +33,12 @@ export default function Blocks() {
           row.reason.toLowerCase().includes(needle)),
     );
   }, [blocks.data, text, band]);
+  // The span comes from the lookups actually stored, oldest and newest, never a fixed window.
+  const span = useMemo(() => {
+    const times = (blocks.data || []).map((row) => row.observed_at).sort();
+    return lookupSpan(times.length, times[0], times.at(-1), now);
+  }, [blocks.data, now]);
+  const partial = (sources.data || []).filter((source) => source.status === 'partial');
   const count = (value: RiskBand) =>
     (blocks.data || []).filter((row) => row.risk_band === value).length;
   if (blocks.loading) return <Loading text="Loading blocked lookups…" />;
@@ -41,9 +49,30 @@ export default function Blocks() {
         <div>
           <h1 className="display d2">Blocks</h1>
           <p className="lede">
-            Lookups your DNS source refused in the last day. The score is rule-based from the block
-            reason; no score means unknown, not safe.
+            Lookups your DNS sources refused. {span} The score is rule-based from the block reason;
+            no score means unknown, not safe.
           </p>
+          {sources.error && (
+            <div className="note yellow" role="alert">
+              <span>
+                <b>
+                  Whether each source&rsquo;s last collection was complete could not be checked.
+                </b>{' '}
+                Some sources may have sent only their most recent blocked lookups.
+              </span>
+              <button className="button secondary small" onClick={sources.reload}>
+                Try again
+              </button>
+            </div>
+          )}
+          {partial.map((source) => (
+            <div className="note yellow" key={source.id}>
+              <span>
+                <b>{source.name}</b>: only the most recent blocked lookups were read at its last
+                collection, so older ones are missing.
+              </span>
+            </div>
+          ))}
         </div>
       </header>
       <div className="bar">

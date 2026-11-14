@@ -11,18 +11,9 @@ import {
   SourceTag,
   kindIcon,
 } from '../components/ui';
+import { GROUPS, UNLISTED, type Group } from '../lib/counts';
 import { ago, useNow } from '../lib/format';
 import type { Person, Resource } from '../types';
-
-const GROUPS = {
-  all: { name: 'Everything', kinds: null },
-  devices: { name: 'Devices', kinds: ['client'] },
-  gear: { name: 'Network gear', kinds: ['gateway', 'switch', 'access_point'] },
-  networks: { name: 'Networks', kinds: ['network'] },
-  compute: { name: 'Hosts and workloads', kinds: ['host', 'bridge', 'workload'] },
-  rules: { name: 'Rules', kinds: ['policy', 'dns_profile'] },
-} as const;
-type Group = keyof typeof GROUPS;
 
 /** The kind as the table shows it. A kind Nyctr deduced says so, so it never reads as the source's word. */
 export function kindText(row: Resource) {
@@ -50,7 +41,7 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
   const [text, setText] = useState('');
   const now = useNow(60000);
   const all = useMemo(
-    () => (resources.data || []).filter((row) => row.kind !== 'domain' && row.kind !== 'site'),
+    () => (resources.data || []).filter((row) => !UNLISTED.has(row.kind)),
     [resources.data],
   );
   const rows = useMemo(() => {
@@ -72,7 +63,10 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
       <header className="page-head">
         <div>
           <h1 className="display d2">Inventory</h1>
-          <p className="lede">Everything your sources reported. Pick a row to see it on the map.</p>
+          <p className="lede">
+            Everything your sources reported, apart from blocked addresses, which the Briefing
+            counts. Pick a row to see it on the map.
+          </p>
         </div>
       </header>
       <div className="bar">
