@@ -126,9 +126,11 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   failed it, is claimed in the database so two copies do not both perform it;
   a restart may drop a claimed retry, and the next run covers the source. Expired
   exceptions are ended on every tick, separately from collection, and an entry
-  is claimed in the database before it is removed, so two copies, or the tick
-  and a person, remove and record it once. The nudge and the assistant's limit are still
-  per process.
+  is claimed in the database before it is read, added or removed, so two copies,
+  or the tick and a person, remove and record it once, and an opening and a
+  removal of one address cannot cross. Each change at a source ends within 60
+  seconds, as failed if it has not finished. The nudge and the assistant's limit
+  are still per process.
 - Scheduled collection is on by default and only an administrator can change it
   (`PUT /api/collection`); every change is audited with the old and new
   value. Collection only reads, but the guest cut-off rule and lock-out act at
