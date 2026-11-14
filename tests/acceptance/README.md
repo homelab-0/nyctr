@@ -77,7 +77,8 @@ gateway because it is the only equipment outside every range, has nothing
 above it and has the switch attached to it, and is marked as worked out by
 Nyctr. All provider-reported clients stay unassigned. The DNS observation has
 no trusted device ID and no score, because the fixture's block reason is one the
-scorer does not recognise. No source writes or exceptions are created.
+scorer does not recognise. No source writes or exceptions are created
+on the default start.
 
 Both fixtures serve every read their adapter makes, the optional ones included.
 Each collection must therefore record nothing it could not read: a gap count of
@@ -104,9 +105,106 @@ does not edit the host's resolver or hosts file and does not call NextDNS's real
 API. Good requests use the fixed server-side `fake-readonly` key; the rejected
 credential is `fake-rejected`. These values are disposable test inputs.
 
+The check then saves three more sources, collects each, checks what it records
+and shows, and removes it again, so the saved result above does not move: the
+site at real size (281 items, nothing unread), a key that may not read the Wi-Fi
+names (one gap, in the answer, on the source with its cause, and in the audit
+record) and a DNS profile holding more than one collection reads (stored and
+shown as partial with 4000 rows kept). They are described under Scenarios.
+
+Nyctr collects every saved source on its own schedule, first 30 seconds after it
+starts. That would add the failing sources' data to the counts above, so the
+check **turns scheduled collection off** before it saves anything. Turn it back
+on under Setup, Scheduled collection, when a scenario needs it; rerun the check
+only on a fresh project after that. Nyctr accepts ten sign-ins per account in 15
+minutes, and every run of the checker is one.
+
+## Scenarios
+
+Everything here is fabricated and runs on the stack started above. Add the three
+scenario sources and leave them in place for the browser with:
+
+```sh
+python3 tests/acceptance/check.py --scenarios
+```
+
+To add one by hand instead, use Sources, Add connection. The secret name is
+`NYCTR_CONNECTOR_SECRET_ACCEPTANCE` unless the table says otherwise, and the
+gateway address is `https://fixture/proxy/network/integration`.
+
+| Source | Settings | What the console should show |
+| --- | --- | --- |
+| Scenario - site at real size | UniFi Network, site `site-large` | 10 networks with address ranges; 13 pieces of equipment with uplinks, the gateway listed with switching only at an address outside every range and filed as the gateway by Nyctr; 67 devices, 63 placed on a network and 4 not (two report no address, two an address outside every range); 190 rules. On Guests: `Example Guest Wi-Fi` uses a sign-in page, with five guests on it, one still waiting |
+| Scenario - key that may not read Wi-Fi names | UniFi Network, site `site-one`, secret name `NYCTR_CONNECTOR_SECRET_LIMITED` | Connected, with gaps: the Wi-Fi names could not be read because the source refused the read |
+| Scenario - more lookups than one collection reads | NextDNS, profile `dddddd` | Partial: only the most recent blocked lookups were read. 4000 log rows are kept; each lookup is on ten rows, so Blocks gains 400 |
+| The cloud form of the address (by hand only) | UniFi Network, address `https://api.ui.com/v1/connector/consoles/example-console/proxy/network/integration`, site `site-large` | The same site, read the way a cloud console is. `api.ui.com` is the fixture inside the Docker network only |
+
+### Switches that make a source misbehave
+
+A switch applies to every source the fixture serves, until it is changed or the
+fixture restarts. Set one while the stack runs, from the repository root:
+
+```sh
+alias fixture-set='docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml exec fixture python /acceptance/fixture.py --set'
+fixture-set                          # print every switch
+fixture-set refuse=wifi/broadcasts   # set one
+fixture-set refuse= fail=limit:2     # clear one, set another
+```
+
+`FIXTURE_REFUSE`, `FIXTURE_ERROR`, `FIXTURE_FAIL`, `FIXTURE_RETRY_AFTER` and
+`FIXTURE_SLOW`, set where `docker compose up` is run, give the same switches a
+value from the start. The switch route is not published outside the Docker network.
+
+| Switch | What the source does | What the console should show |
+| --- | --- | --- |
+| `refuse=<part of a path>` | Refuses reads whose path contains it. Reads a collection can do without: `wifi/broadcasts`, `hotspot/vouchers`, `networks/` (address ranges), `devices/` (uplinks), `clients/` (guest details) | After Collect snapshot the source is Connected, with gaps; the gap is named and says the source refused the read |
+| `error=<part of a path>` | Answers those reads with a server error | The same gap, saying the source had an error of its own and the next collection may read it. Without the range of a network the gateway runs, a second gap says no device could be shown to be the gateway |
+| either, on a read every collection needs, such as `firewall/policies` | | The collection fails with its reason on the source and nothing is stored |
+| `fail=drop:N`, `fail=timeout:N`, `fail=limit:N` | The next N requests get no answer, no answer after 25 seconds, or a rate limit asking to wait `retry_after` seconds (90 unless set). One failed request fails one collection | Collect snapshot fails with the reason. A scheduled collection (set the schedule to 5 minutes under Setup) keeps the source's status, shows the reason, and tries again after 1, 2 and 4 minutes, or after the wait asked for if longer; Activity lists each attempt. It passes once N is used up, or ends as Error after the third retry |
+| `slow=<seconds>` | Holds every answer that long | A long collection. The site at real size takes nearly 40 requests, so `slow=1` is about 40 seconds; over 90 seconds in all it fails |
+
+### Changes at the fake sources
+
+The default start is read only: the fixture refuses every change. To allow them,
+start (or restart) with the kinds of source Nyctr may change:
+
+```sh
+export NYCTR_ACCEPTANCE_WRITES=unifi_network,nextdns
+docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml up --wait -d
+docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml restart ingress
+```
+
+The fixture then accepts and remembers each change until it restarts, and
+reports it on the next read: approve a request from Blocks to open an exception
+(the name appears on the DNS source's allowed list and leaves it when the
+exception is ended or runs out); on Guests, issue and end a pass, let the
+waiting guest on, cut one off. Three more switch values act on changes only:
+
+| Switch | What the source does | Use it to see |
+| --- | --- | --- |
+| `writes=fail` | Fails every change | A change recorded as failed, with nothing shown as applied |
+| `writes=pause:<seconds>` | Holds each change that long, then makes it | A change in flight: remove the source, or end the exception or pass, while it waits. Set `writes=fail` during the wait to make the undo fail |
+| `writes=on` | Accepts changes again | |
+
+For an exception that runs out while a collection is under way, set `slow=2`,
+open a 15 minute exception and collect the site at real size as it ends.
+
+### What this stack cannot show
+
+- A second kind of DNS source, or a third kind of source: only the gateway and
+  one DNS service are fabricated.
+- A request limit that counts: the cloud address is served without one, so
+  pacing is seen as a longer collection, and a rate limit only when switched on.
+- A guest signing in on the Wi-Fi's own page, using up a pass, moving between
+  access points, or making lookups that are tied to it.
+- Firewall events, single sign-on, and anything that depends on how a real
+  source behaves. What the fixture remembers is lost when it restarts, while
+  Nyctr's database keeps its own record; reset the volumes to start level.
+
 ## Verify persistence and leave the UI available
 
-Restart only the application, then run the read-only verification mode:
+Restart only the application, then run the read-only verification mode, which
+also requires scheduled collection to still be off:
 
 ```sh
 docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml restart nyctr
@@ -152,7 +250,7 @@ synthetic counts; use a fresh project for a repeatable run.
   filesystem, no capabilities, and temporary files in a small `/tmp` tmpfs;
   the image's configuration-modifying entrypoint scripts are bypassed.
 - A short-lived CA and leaf are generated in a named test volume. The leaf SANs
-  are exactly `fixture` and `api.nextdns.io`; `untrusted-fixture` is deliberately
+  are exactly `fixture`, `api.nextdns.io` and `api.ui.com`; `untrusted-fixture` is deliberately
   absent so the negative TLS case follows the production verification path.
 - The connector receives a read-only CA bundle combining public roots with this
   test CA. No insecure TLS switch or application test backdoor is used.
@@ -182,7 +280,8 @@ Stop while retaining synthetic PostgreSQL state and test certificates:
 docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml down
 ```
 
-Reset **only this disposable project**, deleting its synthetic database and CA:
+Reset **only this disposable project**, deleting its synthetic database and CA
+(add `--rmi local` to remove the image it built as well):
 
 ```sh
 docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml down -v
@@ -192,8 +291,9 @@ docker compose -p nyctr-acceptance -f tests/acceptance/compose.yaml down -v
 
 With the API development dependencies installed, the helper tests exercise real
 loopback TLS handshakes, valid and invalid certificate names, credential
-rejection, GET-only fixture behavior, normal production-parser compatibility,
-and rejection of remote checker URLs:
+rejection, the read-only default, the site at real size, each switch, every
+change Nyctr can make, normal production-parser compatibility, and rejection of
+remote checker URLs:
 
 ```sh
 python3 -m unittest discover -s tests/acceptance -p 'test_*.py' -v

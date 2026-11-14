@@ -18,7 +18,7 @@ EMAIL = "tester@nyctr.test"
 PASSWORD = "nyctr-acceptance-only"
 GOOD_SECRET_REF = "NYCTR_CONNECTOR_SECRET_ACCEPTANCE"
 BAD_SECRET_REF = "NYCTR_CONNECTOR_SECRET_REJECTED"
-PRIVATE_VALUES = ("fake-readonly", "fake-rejected", "fixture-private-error-marker")
+PRIVATE_VALUES = ("fake-readonly", "fake-rejected", "fake-limited", "fixture-private-error-marker")
 
 CONNECTIONS = {
     "unifi": {
@@ -57,6 +57,24 @@ CONNECTIONS = {
         "config": {"profile_id": "cccccc", "lookback_hours": 24},
         "secret_ref": GOOD_SECRET_REF,
     },
+}
+
+# Sources that show one thing each: (what to save, the collection's answer, status, gaps listed).
+# A normal run collects, checks and removes them, so the saved counts further down stay as they were.
+SCENARIOS = {
+    "site at real size": (
+        {**CONNECTIONS["unifi"], "name": "Scenario - site at real size",
+         "config": {**CONNECTIONS["unifi"]["config"], "site_id": "site-large"}},
+        {"ok": True, "resource_count": 281, "observation_count": 0, "partial": False, "gaps": 0}, "connected", []),
+    "one gap": (
+        {**CONNECTIONS["unifi"], "name": "Scenario - key that may not read Wi-Fi names",
+         "secret_ref": "NYCTR_CONNECTOR_SECRET_LIMITED"},
+        {"ok": True, "resource_count": 11, "observation_count": 0, "partial": False, "gaps": 1}, "connected",
+        ["unifi_wifi_unavailable"]),
+    "partial collection": (
+        {**CONNECTIONS["nextdns"], "name": "Scenario - more lookups than one collection reads",
+         "config": {"profile_id": "dddddd", "lookback_hours": 24}},
+        {"ok": True, "resource_count": 46, "observation_count": 400, "partial": True, "gaps": 0}, "partial", []),
 }
 
 
@@ -372,6 +390,38 @@ def collect_fixtures(client: Client, connections: dict[str, dict]) -> None:
     )
 
 
+def verify_scenarios(client: Client, *, keep: bool) -> None:
+    """Collect each scenario source and check what it recorded and shows, then remove it unless kept.
+
+    The gap must be on the collection's answer, on the source in plain words with its cause,
+    and in the audit record. A collection that stopped at its bound must be stored and shown
+    as partial with the number of rows kept, never as complete and never as failed.
+    """
+    for scenario, (specification, answer, status, gaps) in SCENARIOS.items():
+        saved = [row for row in client.json("/api/integrations") if row["name"] == specification["name"]]
+        row = saved[0] if saved else client.json("/api/integrations", method="POST", body=specification, expected=201)
+        require(client.json(source_path(row, "sync"), method="POST") == answer,
+                f"Collecting the {scenario} source returned unexpected counts.")
+        listed = next(item for item in client.json("/api/integrations") if item["id"] == row["id"])
+        assert_sanitized(listed)
+        require(
+            listed["status"] == status and [gap["id"] for gap in listed["gaps"]] == gaps
+            and all(gap["title"] and "refused the read" in gap["summary"] for gap in listed["gaps"]),
+            f"The {scenario} source does not show its status and what it could not read.",
+        )
+        record = next(event["details"] for event in client.json("/api/audit")
+                      if event.get("action") == "integration.collected" and event["target_id"] == row["id"])
+        require(
+            record.get("gaps") == gaps and record.get("partial") is answer["partial"]
+            and record.get("rows_kept") == (4000 if answer["partial"] else None),
+            f"The audit record of the {scenario} collection does not match what the source shows.",
+        )
+        if not keep:
+            removed = f"/api/integrations/{quote(row['id'], safe='')}"
+            client.json(removed, method="DELETE", body={"name": specification["name"]})
+        print(f"PASS scenario: {scenario}; {status}, {len(gaps)} gaps listed{'' if keep else '; removed again'}")
+
+
 def verify_placement(client: Client, graph: dict) -> None:
     """Check the gateway, each network's range, gear uplinks and where each device is placed.
 
@@ -511,6 +561,11 @@ def main() -> int:
         action="store_true",
         help="Verify existing synthetic connections and evidence without diagnostics or collection",
     )
+    parser.add_argument(
+        "--scenarios",
+        action="store_true",
+        help="Only add and collect the scenario sources and leave them for the browser",
+    )
     args = parser.parse_args()
     try:
         client = Client(args.url)
@@ -525,10 +580,20 @@ def main() -> int:
         require(b'id="root"' in client.request("/"), "The production web application was not served.")
         client.json("/api/integrations", expected=401)
         client.login()
+        if args.scenarios:
+            verify_scenarios(client, keep=True)
+            return 0
+        # Nyctr collects every saved source on its schedule, first 30 seconds after it starts. That
+        # would add the failing sources' data to the fixed counts below, so the check turns it off.
+        if not args.verify_persistence:
+            client.json("/api/collection", method="PUT", body={"enabled": False, "minutes": 15})
+        require(client.json("/api/collection").get("enabled") is False,
+                "Scheduled collection is on, so the saved counts cannot be relied on.")
         connections = saved_connections(client, create=not args.verify_persistence)
         if not args.verify_persistence:
             verify_diagnostics(client, connections)
             collect_fixtures(client, connections)
+            verify_scenarios(client, keep=False)
         verify_persisted_evidence(client, connections)
         print(
             "PASS acceptance checks; containers remain available for browser testing on the configured loopback URL"
