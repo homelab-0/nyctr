@@ -39,6 +39,12 @@ needs a test again. After that the form shows these as read only and the server
 refuses with 409: to read from somewhere else, add a new source, which starts
 with nothing from the old one.
 
+The other side of that rule: Nyctr changes nothing at a source until it has
+collected from it once. Opening an exception (by approval, by the access rule or
+as a permanent one), issuing a guest pass, and letting a guest on, cutting one
+off or locking one out are refused in plain words before anything is sent. So a
+source can never move while Nyctr is changing something there.
+
 A change is checked as a new source is, by the integration's own validation and
 the `NYCTR_CONNECTOR_HOSTS` allow-list. A refused change leaves the source and
 the audit history as they were. An edit is refused while a collection or

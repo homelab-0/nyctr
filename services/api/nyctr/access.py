@@ -72,6 +72,22 @@ def where_it_reads(integration: Integration) -> tuple[dict, str]:
         integration.secret_ref
 
 
+class NotCollected(IntegrationError):
+    """Nyctr was asked to change a source it has never collected from."""
+
+
+def require_collected(integration: Integration) -> None:
+    """Refuse, before any provider call, a change at a source Nyctr has never collected from.
+
+    Where a source reads can change only until its first stored collection (`last_sync`), and nothing
+    clears `last_sync`. So once this passes, the source cannot move while the call is in flight; only a
+    removal can still happen, which the check after the call handles. No lock is held: none is needed.
+    """
+    if integration.last_sync is None:
+        raise NotCollected(f"Nyctr has not collected from {integration.name} yet, so it changes nothing there. "
+                           "Collect from it first, then try again.", category="configuration")
+
+
 def source_held(db: Session, integration_id: str) -> bool:
     """Lock the source row until this transaction ends, and say whether it still exists.
 
@@ -87,6 +103,9 @@ def source_unchanged(db: Session, integration: Integration, place: tuple[dict, s
 
     When it does, its row stays locked until the caller commits. When it does not, the transaction is
     rolled back before returning, so no lock is held during the undo call that follows.
+
+    A move is a defence only: every change first passes `require_collected`, and a source that has
+    collected cannot move, so in practice only a removal makes this answer False.
     """
     if source_held(db, integration.id):
         db.refresh(integration)
@@ -137,6 +156,7 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     if mode == "simulated":
         execution, owned = "simulated", True
     elif mode == "enabled":
+        require_collected(integration)
         key = _secret(integration)
         if not key:
             raise IntegrationError(f"The secret for {integration.name} is not configured on the server.",
@@ -321,6 +341,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             row.integration_id = integration_id
             error.record(db)
             why = f"{error} A person decides."
+        except NotCollected as error:
+            why = f"{error} A person decides."
         except IntegrationError:
             why = f"Nyctr could not change {integration.name} just now, so a person decides."
     row.decision_note = why
@@ -449,7 +471,7 @@ async def act_on_suggestion(body: SuggestionInput, request: Request, user=Depend
             error.record(db)
             db.commit()
             raise HTTPException(409, str(error)) from None
-        raise HTTPException(502, str(error)) from None
+        raise HTTPException(409 if isinstance(error, NotCollected) else 502, str(error)) from None
     db.commit()
     return lease_json(lease, _names(db))
 

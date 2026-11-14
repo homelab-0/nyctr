@@ -280,12 +280,18 @@ async def apply_action(db: Session, settings: Settings, device: Resource, action
     side, which ties the grant to that exact device without any page being
     served to it. The device's own source carries the action out. After the call
     the source row is locked; if the source was removed meanwhile, SourceRemoved
-    is raised with the record written.
+    is raised with the record written. At a source never collected from, NotCollected
+    is raised before anything is sent or stored.
     """
     from .integrations import IntegrationError
 
     provider = registry.find(device.provider)
     mode = _mode(settings, device.provider, "guest.control")
+    if mode == "enabled":
+        from .access import require_collected
+        source = db.get(Integration, device.integration_id)
+        if source is not None:
+            require_collected(source)  # raises NotCollected before anything is sent or stored
     record = GuestAction(device_id=device.id, action=action, actor=actor, reason=reason[:500])
     allow = action in {"restore", "admit"}
 
@@ -371,8 +377,11 @@ async def enforce(db: Session, settings: Settings, due: list[tuple[str, str]]) -
         device = db.get(Resource, device_id)
         if not device:
             return 0
+        from .access import NotCollected
         try:
             await apply_action(db, settings, device, action, "rule", reason)
+        except NotCollected:
+            return 0  # nothing sent, nothing stored
         except SourceRemoved:
             pass  # recorded; the rest of the pass goes on
         db.commit()
@@ -492,6 +501,11 @@ async def issue_pass(body: PassInput, request: Request, user=Depends(admin), db:
         digits = "".join(secrets.choice("0123456789") for _ in range(10))
         row.code, row.execution = f"{digits[:5]}-{digits[5:]}", "simulated"
     else:
+        from .access import NotCollected, require_collected
+        try:
+            require_collected(integration)
+        except NotCollected as error:
+            raise HTTPException(409, str(error)) from None
         integration, site, key = _target(db, integration)
         if not key:
             raise HTTPException(409, f"The secret for {integration.name} is not configured on the server.")
@@ -575,6 +589,8 @@ async def end_pass(pass_id: str, request: Request, user=Depends(admin), db: Sess
 @router.post("/guests/actions")
 async def act(body: ActionInput, request: Request, user=Depends(admin), db: Session = Depends(get_db)):
     """Cut off, restore or lock out one guest device, and return its updated record."""
+    from .access import NotCollected
+
     settings: Settings = request.app.state.settings
     device = db.get(Resource, body.device_id)
     if not device or not is_guest(device):
@@ -588,6 +604,8 @@ async def act(body: ActionInput, request: Request, user=Depends(admin), db: Sess
                                     body.minutes or 240 if body.action == "admit" else None)
     except SourceRemoved as error:
         db.commit()
+        raise HTTPException(409, str(error)) from None
+    except NotCollected as error:
         raise HTTPException(409, str(error)) from None
     from .analysis import refresh_findings
 

@@ -122,9 +122,10 @@ def test_a_pass_issued_while_its_source_is_removed_is_ended_again(tmp_path, monk
             assert passes == []
 
 
-def make_permanent(tmp_path, monkeypatch, during_edit=None, **stand_in):
+def make_permanent(tmp_path, monkeypatch, during_edit=None, move_behind_the_api=False, **stand_in):
     """Make often.example.org permanent at the DNS source through the stand-in, with `during_edit` (new settings)
-    saved by a second browser while the call is in flight. Return the app, the answer and the stand-in."""
+    saved by a second browser while the call is in flight, or written straight to the database when the API
+    would refuse it. Return the app, the answer and the stand-in."""
     monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_DNS", "dns-secret")
     app = live_app(tmp_path, provider_writes="nextdns")
     client = TestClient(app).__enter__()
@@ -136,6 +137,11 @@ def make_permanent(tmp_path, monkeypatch, during_edit=None, **stand_in):
     headers = live_signin(client)
 
     def edit():
+        if move_behind_the_api:
+            with app.state.session_factory() as db:
+                db.get(Integration, "dns").config = during_edit
+                db.commit()
+            return
         other = TestClient(app, cookies=dict(client.cookies))
         body = {"name": "Home DNS", "secret_ref": "NYCTR_CONNECTOR_SECRET_DNS", "config": during_edit}
         answer = other.put("/api/integrations/dns", headers=headers, json=body)
@@ -161,7 +167,8 @@ def test_a_number_changed_during_the_call_does_not_move_the_source(tmp_path, mon
 
 
 def test_a_source_moved_during_the_call_is_undone_at_the_old_place_with_nothing_held(tmp_path, monkeypatch):
-    """Before its first collection a source may still be moved. Changed between the call and storing the
+    """A defence: the API cannot move a source that has collected, and changes only happen at one that has (see
+    the tests below), so the move is written straight to the database. Changed between the call and storing the
     exception: the undo goes to the place the call used, and while it is in flight the source row (indeed the
     whole database, on SQLite) is free for anything else, such as a collection taking its lease."""
     free = []
@@ -171,7 +178,7 @@ def test_a_source_moved_during_the_call_is_undone_at_the_old_place_with_nothing_
             other.execute("UPDATE integrations SET name = name WHERE id = 'dns'")
         free.append(True)
     app, client, response, stand_in = make_permanent(tmp_path, monkeypatch, {"profile_id": "fed789"},
-                                                     on_undo=take_the_row)
+                                                     move_behind_the_api=True, on_undo=take_the_row)
     assert response.status_code == 409 and "took that exception back out" in response.json()["detail"]
     assert stand_in.undone == [({"profile_id": "abc123"}, "often.example.org", True)] and free == [True]
     assert undo_records(app) == [("access.open_undone", "applied")]
@@ -294,7 +301,7 @@ def test_the_cut_off_rule_goes_on_with_the_next_guest_when_one_source_is_removed
         live_guest(app)
         now = utcnow()
         with app.state.session_factory() as db:
-            db.add(Integration(id="unifi2", provider="unifi_network", name="Barn", status="connected",
+            db.add(Integration(id="unifi2", provider="unifi_network", name="Barn", status="connected", last_sync=now,
                                config={"base_url": "https://barn.example"}, secret_ref="NYCTR_CONNECTOR_SECRET_UNIFI"))
             db.flush()
             for id_, kind in (("unifi2:site:s2", "site"), ("unifi2:client:g2", "client")):
