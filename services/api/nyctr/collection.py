@@ -236,7 +236,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
         ).values(status="syncing", sync_started_at=started).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
-            return None, "busy"
+            return None, "busy" if db.get(Integration, integration_id) else "missing"
         db.commit()
         # An edit may have been saved after the read above and before the lease. None can be while
         # the lease is held, so read the source again and use only the settings saved now.

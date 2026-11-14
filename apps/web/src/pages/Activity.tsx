@@ -38,6 +38,7 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
   'integration.collected': (name) => `Collected from ${name}`,
   'integration.collection_failed': (name) => `Could not collect from ${name}`,
   'integration.diagnosed': (name) => `Tested ${name}`,
+  'integration.removed': (name) => `Removed the source ${name}`,
 };
 
 /**

@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, access, assistant, guests, query, worker
+from . import __version__, access, assistant, guests, query, removal, worker
 from .collection import after_collection, apply_snapshot, collect_integration, parsed_date  # noqa: F401
 from .config import Settings
 from .database import make_engine, migrate, session_factory
@@ -105,6 +105,11 @@ class IntegrationEdit(InputModel):
     name: str = Field(min_length=1, max_length=160)
     config: dict
     secret_ref: str = Field(pattern=r"^NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}$")
+
+
+class RemovalInput(InputModel):
+    """The source's name, typed by the administrator to confirm its removal."""
+    name: str = Field(min_length=1, max_length=160)
 
 
 class IntegrationInput(IntegrationEdit):
@@ -405,6 +410,59 @@ def create_app(settings: Settings | None = None):
         db.commit()
         return integration_json(row)
 
+    @app.get("/api/integrations/{integration_id}/removal")
+    def removal_preview(integration_id: str, _user=Depends(admin), db: Session = Depends(get_db)):
+        """Count what removing this source would delete and keep, and what of Nyctr's own holds it back."""
+        row = db.get(Integration, integration_id)
+        if not row:
+            raise HTTPException(404, "Integration not found")
+        resources = list(db.scalars(select(Resource).where(Resource.integration_id == integration_id)))
+        counts = removal.plan(db, row, resources)
+        return {**counts, "refusal": removal.held_message(counts["held"]),
+                "notice": removal.let_on_message(counts["let_on"])}
+
+    @app.delete("/api/integrations/{integration_id}")
+    def remove_integration(integration_id: str, body: RemovalInput, user=Depends(admin),
+                           db: Session = Depends(get_db)):
+        """Remove a source and everything collected from it in one transaction, sending nothing to the source.
+
+        Locks: the source row first (refused while a collection or test holds its lease), then the
+        source's items in id order, then the rows that refer to them. Collection takes the source row
+        before its items too, and an assignment takes only its device, so no two paths wait on each
+        other in opposite order. Refused while Nyctr still has something of its own at the source.
+        """
+        if settings.mode == "demo":
+            raise HTTPException(409, "Sources cannot be removed in the demo workspace")
+        row = db.get(Integration, integration_id)
+        if not row:
+            raise HTTPException(404, "Integration not found")
+        locked = db.execute(update(Integration).where(
+            Integration.id == integration_id,
+            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
+        ).values(name=Integration.name).execution_options(synchronize_session=False))
+        if locked.rowcount != 1:
+            db.rollback()
+            if db.get(Integration, integration_id) is None:
+                raise HTTPException(404, "Integration not found")
+            raise HTTPException(409, "This source is being collected or tested right now. "
+                                     "Try again when that has finished.")
+        db.refresh(row)
+        if body.name.strip() != row.name:
+            db.rollback()
+            raise HTTPException(422, "Not removed. Type the source's name exactly as it is shown to remove it.")
+        resources = list(db.scalars(select(Resource).where(Resource.integration_id == integration_id)
+                                    .order_by(Resource.id).with_for_update()))
+        counts = removal.plan(db, row, resources)
+        refusal = removal.held_message(counts["held"])
+        if refusal:
+            db.rollback()
+            raise HTTPException(409, refusal)
+        removal.remove(db, row)
+        audit(db, user.id, "integration.removed", integration_id, name=counts["name"], provider=counts["provider"],
+              removed=counts["remove"])
+        db.commit()
+        return counts
+
     @app.post("/api/integrations/{integration_id}/diagnostics", response_model=DiagnosticReport)
     async def integration_diagnostics(integration_id: str, user=Depends(admin), db: Session = Depends(get_db)):
         """Inspect a saved live integration under the same lease as collection, without importing evidence.
@@ -550,7 +608,10 @@ def create_app(settings: Settings | None = None):
         query = select(AccessRequest).order_by(AccessRequest.created_at.desc())
         if auth[0].role != "admin":
             query = query.where(AccessRequest.requester_id == auth[0].id)
-        return [request_json(r) for r in db.scalars(query)]
+            return [request_json(r) for r in db.scalars(query)]
+        # Administrators see which source each came from, by the name it had if it was removed.
+        names = removal.removed_names(db)
+        return [{**request_json(r), "source_name": names.get(r.integration_id)} for r in db.scalars(query)]
 
     @app.post("/api/requests", status_code=201)
     async def create_request(body: RequestInput, auth=Depends(identity), db: Session = Depends(get_db)):

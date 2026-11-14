@@ -181,6 +181,8 @@ export interface AccessRequest {
   decision_note: string | null;
   /** The connected source whose block this request is about. */
   integration_id?: string | null;
+  /** That source's name, kept after it is removed. Sent to administrators only. */
+  source_name?: string | null;
 }
 /** What happened at the provider for a decision. Only `applied` means the provider was changed. */
 export type Execution = 'simulated' | 'applied' | 'not_applied' | 'failed';

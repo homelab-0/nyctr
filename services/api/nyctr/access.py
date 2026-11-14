@@ -16,6 +16,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import risk, schedule
@@ -448,7 +449,12 @@ def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(
             raise HTTPException(422, "Choose a device from your network inventory")
         db.add(DeviceLink(source_id=body.source_id, device_id=device.id, created_by=user.id))
     audit(db, user.id, "device.link_changed", body.source_id, device_id=body.device_id)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The device went (its source was removed) after it was read: nothing is stored.
+        db.rollback()
+        raise HTTPException(404, "That device is no longer in your inventory, so nothing was linked") from None
     return {"ok": True}
 
 

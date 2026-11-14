@@ -10,8 +10,9 @@ import {
   RefreshCw,
   ScanLine,
   Settings2,
+  Trash2,
 } from 'lucide-react';
-import { label, post, put, relativeTime, useApi } from '../api';
+import { api, label, post, put, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
 import { useNow } from '../lib/format';
 import { nextCollection, useSchedule } from '../lib/schedule';
@@ -281,6 +282,120 @@ function CapabilityTable({ catalog, connected }: { catalog: Catalog; connected: 
   );
 }
 
+/** What removing a source would delete and keep, counted by the server. */
+interface RemovalPlan {
+  name: string;
+  remove: Record<string, number>;
+  keep: Record<string, number>;
+  refusal: string | null;
+  notice: string | null;
+}
+
+const GOES: [string, string, string][] = [
+  ['devices', 'device', 'devices'],
+  ['networks', 'network', 'networks'],
+  ['rules', 'rule', 'rules'],
+  ['other_items', 'other item', 'other items'],
+  ['lookups', 'blocked lookup', 'blocked lookups'],
+  ['assignments', 'device assignment to a person', 'device assignments to people'],
+  ['links', 'link from a DNS label', 'links from DNS labels'],
+];
+const STAYS: [string, string, string][] = [
+  ['requests', 'request', 'requests'],
+  ['exceptions', 'exception', 'exceptions'],
+  ['passes', 'guest pass', 'guest passes'],
+];
+const counted = (counts: Record<string, number>, words: [string, string, string][]) =>
+  words
+    .filter(([key]) => counts[key] > 0)
+    .map(([key, one, many]) => `${counts[key]} ${counts[key] === 1 ? one : many}`);
+
+/**
+ * Confirms removing a source: what goes and what stays, by count, and the source's name typed in.
+ * Nothing is sent to the source; the server refuses while Nyctr still has something of its own there.
+ */
+function RemoveSource({
+  integration,
+  onClose,
+  onRemoved,
+}: {
+  integration: Integration;
+  onClose: () => void;
+  onRemoved: () => void;
+}) {
+  const path = `/integrations/${encodeURIComponent(integration.id)}`;
+  const plan = useApi<RemovalPlan>(`${path}/removal`);
+  const [typed, setTyped] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    setPending(true);
+    try {
+      await api(path, { method: 'DELETE', body: JSON.stringify({ name: typed.trim() }) });
+      onRemoved();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPending(false);
+    }
+  };
+  const goes = plan.data ? counted(plan.data.remove, GOES) : [];
+  const stays = plan.data ? counted(plan.data.keep, STAYS) : [];
+  return (
+    <Modal title="Remove source" onClose={onClose}>
+      <form className="modal-body form-stack" onSubmit={submit}>
+        {plan.loading && <Loading text="Counting what this removes…" />}
+        {plan.error && <ErrorState message={plan.error} retry={plan.reload} />}
+        {plan.data && (
+          <>
+            <Notice tone="amber">
+              Removing {plan.data.name} deletes everything Nyctr collected from it. Nothing at the
+              source itself changes, and this cannot be undone. To read from it again, add it as a
+              new source: it starts from nothing.
+            </Notice>
+            <p>
+              <b>Goes:</b> {goes.length ? goes.join(', ') : 'nothing has been collected from it'}.
+            </p>
+            <p>
+              <b>Stays:</b> {[...stays, 'the activity history'].join(', ')}, still naming{' '}
+              {plan.data.name}.
+            </p>
+            {plan.data.notice && <p>{plan.data.notice}</p>}
+            {plan.data.refusal ? (
+              <InlineError message={plan.data.refusal} />
+            ) : (
+              <Field label={`Type ${plan.data.name} to confirm`}>
+                <input
+                  value={typed}
+                  autoComplete="off"
+                  onChange={(e) => setTyped(e.target.value)}
+                />
+              </Field>
+            )}
+          </>
+        )}
+        <InlineError message={error} />
+        <div className="modal-actions">
+          <button className="button secondary" type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="button danger"
+            type="submit"
+            disabled={
+              pending || !plan.data || Boolean(plan.data.refusal) || typed.trim() !== plan.data.name
+            }
+          >
+            {pending ? 'Removing…' : 'Remove source'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 /** Lists connected sources, what each integration adds to Nyctr, and whether Nyctr may change it. */
 export default function Integrations({ sources = [] }: { sources?: Rules['sources'] } = {}) {
   const result = useApi<Integration[]>('/integrations');
@@ -294,6 +409,14 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const connected = new Set((result.data || []).map((item) => item.provider));
   const [add, setAdd] = useState<string | null>(null);
   const [edit, setEdit] = useState<Integration | null>(null);
+  const [removing, setRemoving] = useState<Integration | null>(null);
+  // Where the keyboard goes when the removal dialog closes: its Remove button, or, once the
+  // source and its card are gone, the Add connection button.
+  const removeButton = useRef<HTMLButtonElement | null>(null);
+  const addButton = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!removing) removeButton.current?.focus();
+  }, [removing]);
   const editButton = useRef<HTMLButtonElement | null>(null);
   // Per source: 'pending' while an edit of it is being saved, then the list as it was when that
   // save succeeded. Its form would open on the values from before the save and could undo it, so
@@ -349,6 +472,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
         description="Nyctr is the same product whatever you run. Each source you connect adds what its integration can read or change."
         actions={
           <button
+            ref={addButton}
             className="button primary"
             disabled={providers.length === 0}
             onClick={() => setAdd(providers[0].id)}
@@ -521,6 +645,20 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <RefreshCw size={14} className={pending === integration.id ? 'spin' : ''} />
                     {pending === integration.id ? 'Collecting…' : 'Collect snapshot'}
                   </button>
+                  {admin && (
+                    <button
+                      className="button secondary small"
+                      disabled={pending !== null || demo}
+                      onClick={(event) => {
+                        removeButton.current = event.currentTarget;
+                        setRemoving(integration);
+                      }}
+                      title={demo ? 'Demo sources cannot be removed.' : 'Remove this source'}
+                    >
+                      <Trash2 size={14} />
+                      Remove
+                    </button>
+                  )}
                 </div>
               </Card>
             );
@@ -621,6 +759,19 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
             result.reload();
             setError(null);
             setSuccess('Changes saved.');
+          }}
+        />
+      )}
+      {removing && (
+        <RemoveSource
+          integration={removing}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            removeButton.current = addButton.current;
+            setRemoving(null);
+            result.reload();
+            setError(null);
+            setSuccess(`${removing.name} was removed.`);
           }}
         />
       )}
