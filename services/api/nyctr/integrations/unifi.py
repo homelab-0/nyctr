@@ -194,6 +194,9 @@ def validate(config: dict[str, Any]) -> dict[str, Any]:
     parsed, host = core.validated_host(config.get("base_url"), "Console address")
     path = parsed.path.rstrip("/")
     local = path == "/proxy/network/integration"
+    if not local and host != CLOUD_HOST and _CLOUD_PATH.fullmatch(path):
+        raise IntegrationError("Console address uses the path of a console reached through the cloud, but names a "
+                               "console on your own network. There the address ends in /proxy/network/integration alone.")
     if not local and not (host == CLOUD_HOST and _CLOUD_PATH.fullmatch(path)):
         raise IntegrationError("Console address must be the integration path on your console: it ends in /proxy/network/integration.")
     clean = {"base_url": config["base_url"].rstrip("/")}

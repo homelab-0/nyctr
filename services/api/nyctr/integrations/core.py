@@ -262,17 +262,21 @@ def _validated_host(value: Any, label: str):
     Reject credential-bearing URLs and forbidden literal addresses before any
     API key can be sent to the destination. Returns the parsed URL and host.
     """
-    if not isinstance(value, str) or len(value) > 2048:
+    if not isinstance(value, str):
         raise IntegrationError(f"{label} must be an address that starts with https://.")
+    if len(value) > 2048:
+        raise IntegrationError(f"{label} is too long. An address holds at most 2048 characters.")
+    unreadable = IntegrationError(f"{label} is not an address Nyctr can read. Check it for a typing mistake.")
     try:
         parsed = urlsplit(value)
         host = (parsed.hostname or "").lower()
         port = parsed.port
     except ValueError:
-        raise IntegrationError(f"{label} is not an address Nyctr can read. Check it for a typing mistake.") from None
+        raise unreadable from None
+    if parsed.scheme == "https" and (not host or (port is not None and not 1 <= port <= 65535)):
+        raise unreadable  # no server name, or a port no server has: nothing the next sentence lists
     if (
         parsed.scheme != "https"
-        or not host
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
@@ -281,7 +285,6 @@ def _validated_host(value: Any, label: str):
         or "#" in value
         or "\\" in value
         or any(char.isspace() for char in value)
-        or (port is not None and not 1 <= port <= 65535)
     ):
         raise IntegrationError(f"{label} must start with https:// and hold no sign-in name, password, question mark, # or space.")
     if host in {"localhost", "metadata.google.internal", "metadata.azure.internal"} or host.endswith(".localhost"):
@@ -302,8 +305,9 @@ def _validated_host(value: Any, label: str):
         if entry.strip()
     }
     if host not in allowed:
-        raise IntegrationError(f"{label} names a server Nyctr is not yet allowed to connect to. Only whoever runs the Nyctr server "
-                               "can change that: ask them to add this server's name to the sources Nyctr may reach.")
+        raise IntegrationError(f"{label} names a server Nyctr is not yet allowed to connect to. Check it for a typing mistake first. "
+                               "Only whoever runs the Nyctr server can change which servers are allowed: ask them to add "
+                               "this server's name to the sources Nyctr may reach.")
     return parsed, host
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from test_collection import live_client
 
-from nyctr import diagnostics
+from nyctr import diagnostics, worker
 from nyctr.integrations import IntegrationError, registry, validate_config
 from nyctr.integrations.core import GAP_CAUSES, describe_gaps
 
@@ -44,6 +44,21 @@ def test_a_refused_setting_is_named_by_its_label_on_the_form(monkeypatch, provid
         assert value not in text
 
 
+@pytest.mark.parametrize("address, said", [
+    ("https:///proxy/network/integration", "is not an address Nyctr can read"),
+    ("https://allowed.example.net:0/proxy/network/integration", "is not an address Nyctr can read"),
+    ("https://allowed.example.net/" + "x" * 2048, "is too long"),
+    ("https://allowed.example.net/v1/connector/consoles/abc/proxy/network/integration", "reached through the cloud"),
+    ("http://allowed.example.net/proxy/network/integration", "must start with https://"),
+])
+def test_a_refused_address_is_told_what_is_wrong_with_it(monkeypatch, address, said):
+    """No sentence asks for something the address already does, or lists mistakes it does not hold."""
+    monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", ALLOWED)
+    with pytest.raises(IntegrationError) as refused:
+        validate_config("unifi_network", {"base_url": address})
+    assert said in str(refused.value) and not RAW.search(str(refused.value))
+
+
 def test_a_new_source_is_refused_in_the_same_words_as_an_edit(tmp_path, monkeypatch):
     """Saving answers with the integration's sentence and repeats no address, secret name or server setting."""
     monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", ALLOWED)
@@ -58,7 +73,8 @@ def test_a_new_source_is_refused_in_the_same_words_as_an_edit(tmp_path, monkeypa
         assert response.status_code == 422
         detail = response.json()["detail"]
         assert detail.startswith("Not saved. Pi-hole address names a server Nyctr is not yet allowed to connect to.")
-        assert "Only whoever runs the Nyctr server can change that" in detail and not RAW.search(detail)
+        assert "Check it for a typing mistake first. Only whoever runs the Nyctr server can change which" in detail
+        assert not RAW.search(detail)
         for value in ("elsewhere.example.org", *ALLOWED.split(","), body["secret_ref"], "CREATE_SECRET_SENTINEL"):
             assert value not in response.text
         hours = client.post("/api/integrations", headers=headers, json={
@@ -81,6 +97,22 @@ def test_every_audit_action_the_server_writes_has_a_sentence_on_the_activity_pag
     assert len(written) > 30
     worded = set(re.findall(r"^  '([a-z_]+\.[a-z_]+)':", ACTIVITY.read_text(), re.M))
     assert written - worded == set()
+
+
+def test_every_reason_code_the_server_records_has_a_sentence_on_the_activity_page():
+    """Walk every place a reason is given as a code; one with no wording on the page fails here."""
+    source = "\n".join(path.read_text() for path in sorted(API.rglob("*.py")))
+    given = re.findall(r"\bend_lease\(\s*db,[^,]+,[^,]+,\s*([^,)]+)", source)
+    given += re.findall(r"\b_stop_retries\(\s*db,[^,]+,\s*([^,)]+)", source)
+    given += re.findall(r"""\breason=("[^"]*"|[^,)\s]+)""", source)
+    codes = {text.strip('"') for text in given if re.fullmatch(r'"[a-z_]+"', text)}
+    # Anything else is a sentence a person or a rule wrote, or, for `error`, a code in worker.ENDED.
+    names = sorted({text for text in given if not text.startswith('"')})
+    assert names == ["body.reason", "error", "reason", "reason: str", "reason[:200]", "reason[:500]"]
+    codes |= worker.ENDED
+    assert {"expired", "revoked", "removed_by_hand", "schedule_off", "secret", "secret_ref"} <= codes
+    reasons = re.search(r"^const REASONS: [^=]+= \{\n(.*?)^\};", ACTIVITY.read_text(), re.M | re.S).group(1)
+    assert codes - set(re.findall(r"^  ([a-z_]+): '", reasons, re.M)) == set()
 
 
 def test_a_gap_text_never_states_a_cause_the_sentence_beside_it_may_contradict():
