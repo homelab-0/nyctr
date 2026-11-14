@@ -614,6 +614,32 @@ def create_app(settings: Settings | None = None):
         rows = db.scalars(select(Observation).where(Observation.expires_at > utcnow()).order_by(Observation.observed_at.desc()))
         return [observation_json(r) for r in rows if observation_permitted(db, r, auth[0])]
 
+    @app.get("/api/blocks/coverage")
+    def block_coverage(_auth=Depends(identity), db: Session = Depends(get_db)):
+        """Tell a signed-in person why their list of blocked sites may be empty or short, and nothing else.
+
+        Returns exactly two keys and is the same for every caller:
+
+        - `collected`: `none` when no connected source reports blocked lookups,
+          `failed` when the latest collection of any such source failed (even if an
+          earlier one worked), `no` when one has not been collected yet, else `yes`.
+        - `unassigned`: true when a stored lookup that has not expired is assigned to
+          no device. Members are shown assigned lookups only, so one of theirs may be
+          among these.
+
+        No source, count, address or device is given. A lookup assigned to a device
+        never changes the answer, so nobody can tell from it that a site was blocked
+        on another person's device.
+        """
+        from .integrations import registry
+        sources = [i for i in db.scalars(select(Integration)) if registry.provides(i.provider, "dns.blocks")]
+        failing = any(i.last_error or i.status == "error" for i in sources)
+        unassigned = db.scalar(select(Observation.id).where(
+            Observation.expires_at > utcnow(), Observation.attribution != "assigned").limit(1))
+        return {"collected": ("none" if not sources else "failed" if failing
+                              else "yes" if all(i.last_sync for i in sources) else "no"),
+                "unassigned": unassigned is not None}
+
     @app.get("/api/requests")
     def requests(auth=Depends(identity), db: Session = Depends(get_db)):
         """List all access requests for admins or only the authenticated member requests."""
