@@ -142,14 +142,17 @@ const FAILED: Record<string, string> = {
 function outcome(event: AuditEvent) {
   const d = event.details || {};
   if (event.action === 'access.close_failed')
-    return 'could not be removed at the source, so it is still open';
+    return d.record === true
+      ? 'the source could not be reached, so it stays listed as not confirmed'
+      : 'could not be removed at the source, so it is still open';
   if (d.execution === 'simulated') return 'simulated, nothing was sent to the source';
   if (d.execution === 'failed') return FAILED[event.action] || 'did not go through';
   // For an opening that was never confirmed, the record does say what closing it did at the source.
   if (event.action === 'access.closed' && d.reason === 'not_confirmed' && d.execution !== 'failed')
-    return d.execution === 'applied'
-      ? APPLIED['access.open_undone']
-      : 'nothing was removed at the source';
+    return (
+      REMOVAL[typeof d.removal === 'string' ? d.removal : ''] ||
+      (d.execution === 'applied' ? REMOVAL.removed : REMOVAL.nothing_removed)
+    );
   if (d.execution === 'not_applied')
     return event.action === 'access.open_undone' ? LEFT_ALONE : 'nothing changed at the source';
   if (d.execution !== 'applied') return undefined;
