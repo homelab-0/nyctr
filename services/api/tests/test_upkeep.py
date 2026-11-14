@@ -8,13 +8,13 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from conftest import live_app, seed_live_member
+from conftest import live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from nyctr import schedule, worker
+from nyctr import access, schedule, worker
 from nyctr.integrations import IntegrationError, Snapshot, core
-from nyctr.models import Audit, Integration, Lease, utcnow
+from nyctr.models import Audit, Integration, Lease, Setting, utcnow
 
 
 class Sources:
@@ -51,15 +51,22 @@ class Sources:
         self.go.set()
 
 
-def allowlist(monkeypatch, listed, broken=()):
-    """Serve a fabricated DNS allowlist. Each call yields mid-way; removing a name in `broken` fails oddly."""
+def allowlist(monkeypatch, listed, broken=(), gate=None):
+    """Serve a fabricated DNS allowlist and return the calls made. Each call yields mid-way; removing a
+    name in `broken` fails oddly; with `gate`, the first removal pauses mid-call until the gate is set."""
+    calls = []
+
     async def handler(request):
+        calls.append(request.method)
         await asyncio.sleep(0)  # Another task, or another copy, gets to run in the middle of the call.
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": name, "active": True} for name in listed]})
         name = request.url.path.rsplit("/", 1)[1]
         if name in broken:
             raise RuntimeError("fabricated cause text")
+        if gate and calls.count("DELETE") == 1:
+            gate["reached"].set()
+            await gate["go"].wait()
         if name in listed:
             listed.remove(name)
         return httpx.Response(204)
@@ -67,6 +74,13 @@ def allowlist(monkeypatch, listed, broken=()):
     monkeypatch.setattr(core, "make_http_client", lambda key, **_: httpx.AsyncClient(
         transport=httpx.MockTransport(handler), headers={"X-Api-Key": key}, follow_redirects=False,
         trust_env=False))
+    return calls
+
+
+def closings(app):
+    """Read the reason of every recorded ending."""
+    with app.state.session_factory() as db:
+        return [audit.details["reason"] for audit in db.scalars(select(Audit).where(Audit.action == "access.closed"))]
 
 
 def opened(app, listed, domain, expires):
@@ -269,9 +283,9 @@ def test_one_failure_stops_neither_the_other_endings_nor_the_collections(tmp_pat
 
 
 def test_two_copies_end_an_expired_exception_once_and_collect_each_source_once(tmp_path, monkeypatch):
-    """Both copies find it expired and are mid-call together; one records the end, the other writes nothing."""
+    """Both copies find it expired at the same moment; one ends it at the source, the other does nothing."""
     listed: list[str] = []
-    allowlist(monkeypatch, listed)
+    calls = allowlist(monkeypatch, listed)
     one, two = (live_app(tmp_path, provider_writes="nextdns") for _ in range(2))
     now = [utcnow()]
 
@@ -282,10 +296,82 @@ def test_two_copies_end_an_expired_exception_once_and_collect_each_source_once(t
             copy.tick()
         await asyncio.gather(*(task for copy in copies for task in (copy.collecting, copy.ending["dns"])))
         assert stored(two, Lease, lease) == "ended" and listed == []
+        assert calls == ["GET", "DELETE", "GET"]  # One copy asked the source; the other sent nothing.
         assert sorted(sources.asked) == ["dns", "unifi"]
 
     with TestClient(one), TestClient(two):
         seed_live_member(one)
         asyncio.run(scenario())
-        with one.state.session_factory() as db:
-            assert len(db.scalars(select(Audit).where(Audit.action == "access.closed")).all()) == 1
+        assert closings(one) == ["expired"]
+
+
+def test_the_tick_the_list_and_an_administrator_ending_one_exception_at_once_send_one_removal(tmp_path, monkeypatch):
+    """While the tick's removal is paused mid-call, opening the list and ending by hand send and record nothing."""
+    listed: list[str] = []
+    app = live_app(tmp_path, provider_writes="nextdns")
+    now = [utcnow()]
+
+    async def scenario(client, headers):
+        gate = {"reached": asyncio.Event(), "go": asyncio.Event()}
+        calls = allowlist(monkeypatch, listed, gate=gate)
+        Sources(monkeypatch)
+        lease = opened(app, listed, "raced.example", now[0] - timedelta(seconds=1))
+        up = upkeep(app, now)
+        up.tick()
+        await asyncio.wait_for(gate["reached"].wait(), 5)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+                                     cookies=client.cookies) as console:
+            assert [row["status"] for row in (await console.get("/api/leases")).json()] == ["active"]
+            by_hand = await console.post(f"/api/leases/{lease}/end", headers=headers)
+            assert by_hand.status_code == 409 and "already ending" in by_hand.json()["detail"]
+            assert calls == ["GET", "DELETE"] and closings(app) == [] and listed == ["raced.example"]
+            gate["go"].set()
+            await up.ending["dns"]
+            assert calls == ["GET", "DELETE", "GET"] and closings(app) == ["expired"] and listed == []
+            after = await console.post(f"/api/leases/{lease}/end", headers=headers)
+            assert after.status_code == 409 and "already ended" in after.json()["detail"]
+            assert [row["status"] for row in (await console.get("/api/leases")).json()] == ["ended"]
+        up.tick()
+        await up.collecting
+        assert calls == ["GET", "DELETE", "GET"] and closings(app) == ["expired"]
+        with app.state.session_factory() as db:
+            assert db.scalars(select(Setting).where(Setting.key.startswith("ending:"))).all() == []
+
+    with TestClient(app) as client:
+        seed_live_member(app)
+        asyncio.run(scenario(client, live_signin(client)))
+
+
+def test_an_ending_stopped_mid_call_gives_its_claim_back_and_one_left_by_a_killed_copy_runs_out(tmp_path, monkeypatch):
+    """Stopping cancels the removal and the next tick ends the exception; a leftover claim blocks for five minutes."""
+    listed: list[str] = []
+    app = live_app(tmp_path, provider_writes="nextdns")
+    now = [utcnow()]
+
+    async def scenario():
+        gate = {"reached": asyncio.Event(), "go": asyncio.Event()}
+        calls = allowlist(monkeypatch, listed, gate=gate)
+        Sources(monkeypatch)
+        lease = opened(app, listed, "stopped.example", now[0] - timedelta(seconds=1))
+        up = upkeep(app, now)
+        up.tick()
+        await asyncio.wait_for(gate["reached"].wait(), 5)
+        await up.stop()
+        assert stored(app, Lease, lease) == "active" and closings(app) == []
+        with app.state.session_factory() as db:
+            assert db.scalars(select(Setting).where(Setting.key.startswith("ending:"))).all() == []
+            claim = access._claim_entry(db, db.get(Lease, lease))  # As a copy killed mid-call leaves it.
+        up, sent = upkeep(app, now), len(calls)
+        up.tick()
+        await up.ending["dns"]
+        assert stored(app, Lease, lease) == "active" and len(calls) == sent
+        with app.state.session_factory() as db:
+            db.get(Setting, claim).updated_at -= access.ENDING_HOLD
+            db.commit()
+        up.tick()
+        await up.ending["dns"]
+        assert stored(app, Lease, lease) == "ended" and listed == [] and closings(app) == ["expired"]
+
+    with TestClient(app):
+        seed_live_member(app)
+        asyncio.run(scenario())

@@ -22,7 +22,7 @@ import logging
 from sqlalchemy import select, update
 
 from . import schedule
-from .access import end_lease
+from .access import BeingEnded, end_lease
 from .collection import after_collection, collect_integration
 from .guests import enforce
 from .models import Integration, Lease, utcnow
@@ -163,26 +163,21 @@ async def end_at_source(factory, settings, lease_ids: list[str]) -> None:
     """End one source's expired exceptions in turn, each in its own transaction.
 
     In turn, because two exceptions for one address share one entry at the source
-    and the entry goes only with the last of them. No row is locked during the
-    provider call. After it the exception's row is locked and read again, and the
-    outcome is recorded only if it is still open: another copy of Nyctr, or
-    someone reading the list, may have ended it meanwhile, and then nothing is
-    written here. A failure is logged without its cause text and the rest go on;
-    an exception that could not be ended stays open and is tried again next tick.
+    and the entry goes only with the last of them. `end_lease` sees to it that an
+    exception is ended once: one that someone else is ending right now, or has
+    ended, is left alone here. A failure is logged without its cause text and the
+    rest go on; an exception that could not be ended stays open and is tried
+    again next tick.
     """
     for lease_id in lease_ids:
         try:
             with factory() as db:
                 lease = db.get(Lease, lease_id)
-                if lease is None or lease.status != "active":
-                    continue
-                await end_lease(db, settings, lease, "expired")
-                with db.no_autoflush:  # Read what is stored, not what this session is about to write.
-                    stored = db.scalar(select(Lease.status).where(Lease.id == lease_id).with_for_update())
-                if stored != "active":
-                    db.rollback()
-                    continue
-                db.commit()
+                if lease is not None:
+                    await end_lease(db, settings, lease, "expired")
+                    db.commit()
+        except BeingEnded:
+            continue
         except Exception as error:  # noqa: BLE001 - one exception's failure must not keep the others open
             log.warning("Ending an expired exception failed: %s", type(error).__name__)
 

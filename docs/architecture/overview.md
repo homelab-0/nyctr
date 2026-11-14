@@ -45,13 +45,20 @@ this copy's previous pass is still going. So an exception is ended within one
 tick of its expiry plus its own call to the source, and the calls for
 exceptions ahead of it at that same source, however long a collection takes. A
 run or retry that comes due during a pass is not claimed until the pass ends;
-it stays due in the database for the next tick, or for another copy. Ending an
-exception locks no row during the provider call. Afterwards it locks the
-exception's row, reads it again and records the outcome only if it is still
-open, so two copies record one ending. Two copies can still both ask the source
-to remove the entry; a missing entry counts as removed. A collection locks its
-source's row and then the rows it stores, only while storing; ending an
-exception locks only the exception's row, so the two never wait on each other.
+it stays due in the database for the next tick, or for another copy.
+
+An exception is ended at the source once, whoever asks: the tick, someone
+opening the list of exceptions, an administrator ending it, or another copy.
+Before Nyctr removes an entry it added, it takes a claim on that source and
+address (a row in the settings table, as for a run) and saves it, so no
+database lock is held during the provider call. An attempt that finds the claim
+taken sends and records nothing; an administrator is told the exception is
+already being ended. With the claim held the exception is read again, and its
+row is locked and read once more before the ending is recorded. The claim is
+given back with the record, or when Nyctr is stopped mid-call; one left by a
+copy that was killed can be taken over after five minutes. A collection locks
+its source's row and then the rows it stores, only while storing, so the two
+never wait on each other. Opening an exception does not take this claim yet.
 Stopping Nyctr cancels a pass in progress: the source being read stays marked
 as collecting until its lease is five minutes old, and the next run then takes
 it over.

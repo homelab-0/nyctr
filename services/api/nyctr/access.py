@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import os
 from datetime import timedelta
+from hashlib import sha256
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,7 +25,18 @@ from .collection import SECRET_REF
 from .config import Settings
 from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
 from .integrations import IntegrationError, registry
-from .models import AccessRequest, DeviceLink, Integration, Lease, Observation, Resource, User, utc, utcnow
+from .models import (
+    AccessRequest,
+    DeviceLink,
+    Integration,
+    Lease,
+    Observation,
+    Resource,
+    Setting,
+    User,
+    utc,
+    utcnow,
+)
 from .policy import AccessRule, GuestRule, get_list, get_rule, put_list, put_rule
 from .security import audit
 
@@ -232,6 +244,42 @@ def source_removed(db: Session, lease: Lease) -> bool:
     return bool(lease.integration_id) and db.get(Integration, lease.integration_id) is None
 
 
+# How long a claim on a source entry is held if the copy ending it was killed mid-call.
+ENDING_HOLD = timedelta(minutes=5)
+
+
+class BeingEnded(Exception):
+    """Another attempt is removing this exception's entry at the source right now; this one did nothing."""
+
+
+def _claim_entry(db: Session, lease: Lease) -> str | None:
+    """Take the one claim on a source entry before it is removed there, or None while another attempt holds it.
+
+    The claim is a row in the settings table named after the source and the address, written by one
+    insert that a second attempt cannot repeat, and committed here so that no lock is held during the
+    provider call. Every exception for that address at that source shares it, so they are ended one
+    at a time. A claim left by a copy that was killed can be taken over after ENDING_HOLD.
+    """
+    key = "ending:" + sha256(f"{lease.integration_id}\n{lease.domain}".encode()).hexdigest()[:40]
+    now = utcnow()
+    taken = db.execute(update(Setting).where(Setting.key == key, Setting.updated_at <= now - ENDING_HOLD)
+                       .values(updated_at=now).execution_options(synchronize_session=False)).rowcount
+    try:
+        if not taken:
+            db.execute(insert(Setting).values(key=key, value={"lease": lease.id}, updated_at=now))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
+    return key
+
+
+def still_open(db: Session, lease_id: str) -> bool:
+    """Lock the exception's row until the caller commits, and say whether the database still has it open."""
+    with db.no_autoflush:  # What is stored, not what this session is about to write.
+        return db.scalar(select(Lease.status).where(Lease.id == lease_id).with_for_update()) == "active"
+
+
 async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, actor: str | None = None) -> bool:
     """Close a lease, removing the provider entry only if Nyctr created it and nothing else needs it.
 
@@ -240,6 +288,13 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
     An entry Nyctr added at a source since removed cannot be reached at all: it is
     neither called nor retried, and its message is kept until a person marks it
     as removed by hand.
+
+    Every ending comes through here, and an exception is ended once. Before an entry of Nyctr's is
+    removed its claim is taken (and committed; callers hold nothing unsaved): a second attempt while
+    the first is in flight raises BeingEnded, having sent and recorded nothing. With the claim held
+    the exception is read again, and before the ending is recorded its row is locked and read once
+    more; an attempt that finds it already ended sends and records nothing and returns True. The
+    claim is given back in the transaction the caller commits. No lock is held during the call.
     """
     from .integrations import IntegrationError
 
@@ -250,11 +305,16 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             f"The source was removed, so Nyctr cannot reach it. Remove the exception for {lease.domain} there "
             "by hand.")
         return False
+    claim = None
     if lease.execution == "applied" and lease.owned:
+        claim = _claim_entry(db, lease)
+        if claim is None:
+            raise BeingEnded
+        db.refresh(lease)
         others = db.scalar(select(func.count()).select_from(Lease).where(
             Lease.status == "active", Lease.id != lease.id, Lease.domain == lease.domain,
             Lease.integration_id == lease.integration_id, Lease.execution == "applied"))
-        if not others:
+        if lease.status == "active" and not others:
             integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
             key = _secret(integration) if integration else None
             opener = _opener(integration)
@@ -266,7 +326,18 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             except IntegrationError as error:
                 lease.last_error = str(error)
                 audit(db, actor, "access.close_failed", lease.id, domain=lease.domain)
+                db.execute(delete(Setting).where(Setting.key == claim))
                 return False
+            except BaseException:  # Stopped mid-call: give the claim back so the next start can end it.
+                db.rollback()
+                db.execute(delete(Setting).where(Setting.key == claim))
+                db.commit()
+                raise
+    if claim:
+        db.execute(delete(Setting).where(Setting.key == claim))
+    if not still_open(db, lease.id):
+        db.refresh(lease)
+        return True
     lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", reason, utcnow(), None
     audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=lease.execution)
     return True
@@ -278,7 +349,10 @@ async def reconcile(db: Session, settings: Settings) -> int:
                                               Lease.expires_at <= utcnow())))
     closed = 0
     for lease in due:
-        closed += await end_lease(db, settings, lease, "expired")
+        try:
+            closed += await end_lease(db, settings, lease, "expired")
+        except BeingEnded:
+            continue  # In flight elsewhere, which records it; it is listed as open until then.
         db.commit()
     return closed
 
@@ -426,13 +500,18 @@ async def end(lease_id: str, request: Request, body: EndInput | None = None, use
         raise HTTPException(409, "Nyctr can still reach this source, so end the exception here instead.")
     if gone and not by_hand:
         raise HTTPException(409, f"{lease.last_error or 'Its source was removed.'} Then mark it as removed by hand.")
+    if gone and not still_open(db, lease.id):
+        raise HTTPException(409, "This access has already ended")
     if gone:
         lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", "removed_by_hand", utcnow(), None
         audit(db, user.id, "access.closed", lease.id, domain=lease.domain, reason="removed_by_hand",
               execution="applied")
         db.commit()
         return lease_json(lease, _names(db))
-    done = await end_lease(db, request.app.state.settings, lease, "revoked", user.id)
+    try:
+        done = await end_lease(db, request.app.state.settings, lease, "revoked", user.id)
+    except BeingEnded:
+        raise HTTPException(409, "Nyctr is already ending this exception. Look again in a moment.") from None
     db.commit()
     if not done:
         raise HTTPException(502, "Nyctr could not remove the entry at the provider. It is still open and will be retried.")
