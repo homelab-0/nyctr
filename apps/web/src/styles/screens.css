@@ -476,13 +476,17 @@ textarea.gql-editor:focus {
   stroke: var(--panel);
   stroke-width: 2;
 }
+/* The box is a control, not something a source reported, so it has no outline: line style
+   is kept for evidence. It is a flat tile, lit when it holds the selection. */
 .map .node.more .box {
-  fill: transparent;
-  stroke-dasharray: 3 3;
+  fill: var(--line);
+  stroke: none;
 }
-.map .node.more:hover .box,
+.map .node.more:hover .box {
+  fill: var(--line2);
+}
 .map .node.more.sel .box {
-  fill: var(--raise);
+  fill: var(--accent-bg);
 }
 /* What a full square could not draw, listed beside the map. Comes after the map in the
    page so it follows the box that opens it, and is shown on its left. */

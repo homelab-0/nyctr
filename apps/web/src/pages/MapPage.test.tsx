@@ -110,6 +110,23 @@ describe('what a full square on the Map could not draw', () => {
     expect(document.querySelector('.map .dim')).toBeNull();
   });
 
+  it('brings an opened list into sight, and clears a selection left in another box', async () => {
+    const scroll = vi.fn(() => Promise.resolve());
+    Object.assign(Element.prototype, { scrollIntoView: scroll });
+    await show(bigSite());
+    fireEvent.click(screen.getByRole('button', { name: '28 more devices on Network 0' }));
+    const list = screen.getByRole('complementary', { name: /28 more devices/ });
+    // Nothing is selected, so the list itself is what is scrolled to.
+    expect(scroll.mock.contexts).toEqual([list]);
+    fireEvent.click(within(list).getByRole('button', { name: /Device 29/ }));
+    expect(panel()!.getAttribute('aria-label')).toBe('About Device 29');
+    // Opening another box would shut the list showing Device 29, so it stops being selected.
+    fireEvent.click(screen.getByRole('button', { name: /more rules not tied to one network/ }));
+    expect(screen.getByRole('complementary', { name: /more rules/ })).toBeTruthy();
+    expect(panel()).toBeNull();
+    expect(document.querySelector('.map .sel')).toBeNull();
+  });
+
   it('opens the box, selects the item and shows its panel when arriving at one not drawn', async () => {
     // A current browser answers a scroll with a promise; the test browser has no scroll at all.
     const scroll = vi.fn(() => Promise.resolve());

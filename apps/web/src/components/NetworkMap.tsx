@@ -74,9 +74,11 @@ export default function NetworkMap({
     }
     return ids;
   }, [selected, holder, layout, graph]);
-  // Opening a list moves the keyboard to it, and the selected row is kept in sight.
+  // Opening a list moves the keyboard to it and brings it into sight: on a narrow screen it
+  // sits under the map. The selected row, if it holds one, is then kept in sight.
   useEffect(() => {
     list.current?.focus({ preventScroll: true });
+    list.current?.scrollIntoView?.({ block: 'nearest' });
   }, [open?.id]);
   useEffect(() => {
     list.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView?.({ block: 'nearest' });
