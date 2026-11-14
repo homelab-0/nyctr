@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import timedelta
 
 from conftest import signin
-from sqlalchemy import insert, select, update
+from sqlalchemy import event, insert, select, update
 
 from nyctr import blocks as block_list
 from nyctr.deps import observation_permitted
@@ -165,24 +165,40 @@ def test_rights_applied_before_paging_match_the_check_made_on_one_lookup(client,
         assert 0 < len(set(db.scalars(select(Observation.id).where(*block_list.visible(db, member))))) < 117
 
 
-def test_first_page_of_twenty_thousand_is_quick_and_small_and_other_readers_see_them_all(client, app, admin_headers):
-    """With 20,000 lookups stored the first page is under a second and 300 KB; the Briefing still counts all.
+def test_first_page_of_twenty_thousand_does_one_page_of_work_and_other_readers_see_them_all(client, app, admin_headers):
+    """With 20,000 lookups stored, only one page of them is read in full and sent; the Briefing still counts all.
 
-    The first page is asked for three times and the quickest is held to the bound, because on a
-    machine at full load one reading measures the other work as well (the same request read 0.4
-    to 1.1 seconds there). Nothing the server keeps between requests makes a later one quicker
-    than the first, apart from the handful of distinct reasons already explained. All are printed.
+    What is held here does not depend on how busy the machine is: how many stored lookups are
+    loaded whole, how many statements run, and the size of the answer. The measured times are
+    stated in the pull request, not asserted here.
     """
     store(app, 20_000, step=4)
-    took = []
-    for _ in range(3):
+    whole, statements = [], []
+    engine = app.state.session_factory.kw["bind"]
+
+    def loaded(row, _context):
+        whole.append(row.id)
+
+    def ran(_connection, _cursor, statement, *_rest):
+        statements.append(statement)
+
+    event.listen(Observation, "load", loaded)
+    event.listen(engine, "before_cursor_execute", ran)
+    try:
         started = time.perf_counter()
         response = client.get("/api/blocks")
-        took.append(time.perf_counter() - started)
+        took = time.perf_counter() - started
+    finally:
+        event.remove(Observation, "load", loaded)
+        event.remove(engine, "before_cursor_execute", ran)
     body = response.json()
-    print(f"\n20,000 stored: first page in {', '.join(f'{t * 1000:.0f}' for t in took)} ms, "
-          f"{len(response.content) / 1024:.1f} KB, {len(body['rows'])} rows of {body['total']}")
-    assert min(took) < 1.0 and len(response.content) < 300_000
-    assert len(body["rows"]) == block_list.PAGE and body["total"] == 20_015
-    assert sum(body["counts"]["band"].values()) == 20_015
+    print(f"\n20,000 stored: first page in {took * 1000:.0f} ms, {len(response.content) / 1024:.1f} KB, "
+          f"{len(whole)} lookups loaded whole, {len(statements)} statements, {len(body['rows'])} rows of {body['total']}")
+    # One page of lookups is loaded whole, however many are stored, and nothing is asked per lookup.
+    assert len(whole) == len(body["rows"]) == block_list.PAGE and len(statements) < 20
+    assert len(response.content) < 300_000
+    assert body["total"] == 20_015 and sum(body["counts"]["band"].values()) == 20_015
+    # A guard, not the measurement: several times the slowest reading seen on an overloaded machine
+    # (1.1 s), so it fails only if a query or a full load per stored lookup comes back.
+    assert took < 8.0
     assert client.get("/api/overview").json()["recent_block_count"] == 20_015
