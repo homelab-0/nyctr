@@ -12,12 +12,23 @@ import type { EvidenceKind, Graph, Relationship, Resource } from '../types';
 export type MapView = string;
 
 export const BANDS = [
-  { id: 'dns', name: 'DNS', kinds: ['dns_profile'] },
-  { id: 'net', name: 'Networks and firewall', kinds: ['gateway', 'network', 'policy'] },
-  { id: 'wifi', name: 'Switching and Wi-Fi', kinds: ['switch', 'access_point'] },
-  { id: 'dev', name: 'Devices', kinds: ['client'] },
-  { id: 'hyp', name: 'Hypervisor', kinds: ['host', 'bridge'] },
-  { id: 'work', name: 'Workloads', kinds: ['workload'] },
+  { id: 'dns', name: 'DNS', kinds: ['dns_profile'], noun: 'DNS profiles' },
+  {
+    id: 'net',
+    name: 'Networks and firewall',
+    kinds: ['gateway', 'network', 'policy'],
+    // Gateways and networks are always drawn, so only rules are ever left over here.
+    noun: 'rules',
+  },
+  {
+    id: 'wifi',
+    name: 'Switching and Wi-Fi',
+    kinds: ['switch', 'access_point'],
+    noun: 'switches and access points',
+  },
+  { id: 'dev', name: 'Devices', kinds: ['client'], noun: 'devices' },
+  { id: 'hyp', name: 'Hypervisor', kinds: ['host', 'bridge'], noun: 'hosts and virtual switches' },
+  { id: 'work', name: 'Workloads', kinds: ['workload'], noun: 'workloads' },
 ] as const;
 
 const NODE_W = 172;
@@ -30,7 +41,12 @@ const BAND_PAD = 16;
 /** Kinds left off the map: sites are the whole picture, and domains would bury it. */
 const HIDDEN = new Set(['site', 'domain']);
 /** Relationships the grid already expresses, or that would only add noise. */
-const UNDRAWN = new Set(['contains', 'member_of', 'blocked_dns_query']);
+export const UNDRAWN = new Set(['contains', 'member_of', 'blocked_dns_query']);
+/** Kinds every cell draws however full it is: the map is read from these. */
+const ALWAYS = new Set(['gateway', 'network']);
+/** The order a cell fills in, and its list reads in: by name, with 2 before 10. */
+const byName = (a: Resource, b: Resource) =>
+  a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
 export const SHARED = '__shared__';
 /** Devices no source places on a network. Never the same as belonging to the whole site. */
 export const UNPLACED = '__unplaced__';
@@ -47,8 +63,11 @@ export interface MapNode {
   y: number;
   w: number;
   h: number;
-  /** Set on a stand-in node that represents this many nodes not drawn. */
-  more?: number;
+  /**
+   * Set on the box that stands for what its cell had no room to draw: everything it holds, in
+   * the order the cell fills in. Its name says how many of what, and where.
+   */
+  held?: Resource[];
   resource?: Resource;
 }
 export interface MapEdge {
@@ -81,6 +100,8 @@ export interface MapLayout {
   bands: MapBand[];
   nodes: MapNode[];
   edges: MapEdge[];
+  /** For each item that is not drawn, the id of the box that holds it. */
+  holder: Map<string, string>;
 }
 
 const vlanOf = (network: Resource) => {
@@ -179,17 +200,29 @@ export function layoutMap(graph: Graph, view: MapView = 'all', perCell = 6): Map
     cells.set(key, [...(cells.get(key) || []), node]);
   }
   const nodes: MapNode[] = [];
+  const holder = new Map<string, string>();
   const bands: MapBand[] = [];
   let y = HEAD_H;
   for (const band of BANDS) {
     let tallest = 1;
     for (const lane of lanes) {
       const items = (cells.get(`${band.id}|${lane.id}`) || []).sort(
-        (a, b) =>
-          Number(b.kind === 'network' || b.kind === 'gateway') -
-            Number(a.kind === 'network' || a.kind === 'gateway') || a.name.localeCompare(b.name),
+        (a, b) => Number(ALWAYS.has(b.kind)) - Number(ALWAYS.has(a.kind)) || byName(a, b),
       );
-      const drawn = items.length > perCell ? items.slice(0, perCell - 1) : items;
+      // A full cell keeps its last place for the box. Gateways and networks are drawn even
+      // past that, and a box is never made for one item: that item is drawn instead.
+      const fixed = items.filter((item) => ALWAYS.has(item.kind)).length;
+      const room = items.length > perCell ? Math.max(perCell - 1, fixed) : items.length;
+      const drawn = items.length - room > 1 ? items.slice(0, room) : items;
+      const held = items.slice(drawn.length);
+      const at = (index: number) => ({
+        lane: lane.id,
+        band: band.id,
+        x: lane.x + (LANE_W - NODE_W) / 2,
+        y: y + BAND_PAD + index * (NODE_H + GAP),
+        w: NODE_W,
+        h: NODE_H,
+      });
       drawn.forEach((item, index) => {
         nodes.push({
           id: item.id,
@@ -197,32 +230,30 @@ export function layoutMap(graph: Graph, view: MapView = 'all', perCell = 6): Map
           kind: item.kind,
           provider: item.provider,
           evidence: item.evidence_kind,
-          lane: lane.id,
-          band: band.id,
-          x: lane.x + (LANE_W - NODE_W) / 2,
-          y: y + BAND_PAD + index * (NODE_H + GAP),
-          w: NODE_W,
-          h: NODE_H,
+          ...at(index),
           resource: item,
         });
       });
-      if (items.length > drawn.length) {
+      if (held.length) {
+        const id = `more:${band.id}:${lane.id}`;
+        const where =
+          lane.id === SHARED
+            ? 'not tied to one network'
+            : lane.id === UNPLACED
+              ? 'with no network reported'
+              : `on ${lane.name}`;
         nodes.push({
-          id: `more:${band.id}:${lane.id}`,
-          name: `${items.length - drawn.length} more`,
+          id,
+          name: `${held.length} more ${band.noun} ${where}`,
           kind: 'more',
           provider: '',
           evidence: 'observed',
-          lane: lane.id,
-          band: band.id,
-          x: lane.x + (LANE_W - NODE_W) / 2,
-          y: y + BAND_PAD + drawn.length * (NODE_H + GAP),
-          w: NODE_W,
-          h: NODE_H,
-          more: items.length - drawn.length,
+          ...at(drawn.length),
+          held,
         });
+        for (const item of held) holder.set(item.id, id);
       }
-      tallest = Math.max(tallest, Math.min(items.length, perCell));
+      tallest = Math.max(tallest, drawn.length + (held.length ? 1 : 0));
     }
     const height = BAND_PAD * 2 + tallest * NODE_H + (tallest - 1) * GAP;
     bands.push({ id: band.id, name: band.name, y, h: height });
@@ -253,6 +284,7 @@ export function layoutMap(graph: Graph, view: MapView = 'all', perCell = 6): Map
     bands,
     nodes,
     edges,
+    holder,
   };
 }
 

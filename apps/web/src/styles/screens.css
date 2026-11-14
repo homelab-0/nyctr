@@ -346,12 +346,15 @@ textarea.gql-editor:focus {
 }
 .map-frame {
   position: relative;
+  display: flex;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--well);
   overflow: hidden;
 }
 .map-scroll {
+  flex: 1;
+  min-width: 0;
   overflow: auto;
   max-height: calc(100dvh - 190px);
   min-height: 420px;
@@ -473,17 +476,45 @@ textarea.gql-editor:focus {
   stroke: var(--panel);
   stroke-width: 2;
 }
-.map .node.more {
-  cursor: default;
-}
-.map .node.more rect {
-  fill: none;
-  stroke: var(--line2);
+.map .node.more .box {
+  fill: transparent;
   stroke-dasharray: 3 3;
 }
-.map .node.more text {
-  fill: var(--fg3);
-  font-size: 12px;
+.map .node.more:hover .box,
+.map .node.more.sel .box {
+  fill: var(--raise);
+}
+/* What a full square could not draw, listed beside the map. Comes after the map in the
+   page so it follows the box that opens it, and is shown on its left. */
+.map-list {
+  order: -1;
+  flex: none;
+  width: min(300px, 40%);
+  max-height: calc(100dvh - 190px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+/* The keyboard is moved here when the list opens; the list itself is not a control. */
+.map-list:focus {
+  outline: none;
+}
+/* The heading stays put and the rows scroll under it. */
+.map-list .rows {
+  min-height: 0;
+  overflow-y: auto;
+}
+.map-list > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.map-list h2 {
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
 }
 .inspector {
   position: absolute;
@@ -945,9 +976,20 @@ button.text-link {
     border-radius: 0;
     box-shadow: none;
   }
+  .map-frame {
+    flex-direction: column;
+  }
   .map-scroll {
+    flex: none;
     max-height: 60dvh;
     min-height: 320px;
+  }
+  .map-list {
+    order: 0;
+    width: auto;
+    max-height: 50dvh;
+    border-right: 0;
+    border-top: 1px solid var(--line);
   }
   .row {
     padding: 12px 14px;

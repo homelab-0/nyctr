@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SHARED, UNPLACED, assignLanes, layoutMap } from './map-layout';
+import { bigSite } from '../test/map-site';
 import type { Graph, Relationship, Resource } from '../types';
 
 const node = (
@@ -156,6 +157,51 @@ describe('map layout', () => {
     const layout = layoutMap(many, 'all', 6);
     const devices = layout.nodes.filter((item) => item.band === 'dev');
     expect(devices).toHaveLength(6);
-    expect(devices.at(-1)).toMatchObject({ kind: 'more', more: 35, name: '35 more' });
+    const box = devices.at(-1)!;
+    expect(box).toMatchObject({ kind: 'more', name: '35 more devices on lan' });
+    // By name with 2 before 10: c0 to c4 are drawn, and the box holds the rest in that order.
+    expect(devices.slice(0, 5).map((item) => item.id)).toEqual(['c0', 'c1', 'c2', 'c3', 'c4']);
+    expect(box.held!.map((item) => item.id).slice(0, 3)).toEqual(['c5', 'c6', 'c7']);
+    expect(box.held).toHaveLength(35);
+    expect(layout.holder.get('c39')).toBe(box.id);
+    expect(layout.holder.has('c0')).toBe(false);
+  });
+
+  it('always draws gateways and networks, says where a box is, and never boxes one item', () => {
+    const rules = (count: number) =>
+      Array.from({ length: count }, (_, i) => node(`r${i}`, 'policy', 'unifi_network'));
+    const gateways = Array.from({ length: 8 }, (_, i) => node(`gw${i}`, 'gateway', 'x'));
+    const crowded = layoutMap({ nodes: [...rules(20), ...gateways], edges: [] }, 'all', 6);
+    const cell = crowded.nodes.filter((item) => item.band === 'net');
+    expect(cell.slice(0, 8).every((item) => item.kind === 'gateway')).toBe(true);
+    expect(cell.at(-1)!.name).toBe('20 more rules not tied to one network');
+    expect(crowded.bands.find((band) => band.id === 'net')!.h).toBeGreaterThan(9 * 44);
+    // Six gateways and one rule: a box for the one rule would take the room the rule needs.
+    const seven = layoutMap({ nodes: [...gateways.slice(0, 6), ...rules(1)], edges: [] }, 'all', 6);
+    expect(seven.nodes.map((item) => item.kind)).toEqual([...Array(6).fill('gateway'), 'policy']);
+    const loose = layoutMap(
+      { nodes: Array.from({ length: 9 }, (_, i) => node(`d${i}`, 'client', 'x')), edges: [] },
+      'all',
+      6,
+    );
+    expect(loose.nodes.at(-1)!.name).toBe('4 more devices with no network reported');
+  });
+
+  it('keeps every item of a site of real size on a card or in exactly one box', () => {
+    const site = bigSite();
+    const started = performance.now();
+    const layout = layoutMap(site);
+    const took = performance.now() - started;
+    const cards = layout.nodes.filter((item) => !item.held);
+    const boxed = layout.nodes.flatMap((item) => item.held || []);
+    expect(site.nodes).toHaveLength(280);
+    expect([...cards, ...boxed].map((item) => item.id).sort()).toEqual(
+      site.nodes.map((item) => item.id).sort(),
+    );
+    expect(boxed.every((item) => layout.holder.has(item.id))).toBe(true);
+    expect(cards.some((item) => item.id === 'gw')).toBe(true);
+    // The drawing stays small however much there is: at most six places in a square.
+    expect(cards.length).toBeLessThan(110);
+    expect(took).toBeLessThan(250);
   });
 });

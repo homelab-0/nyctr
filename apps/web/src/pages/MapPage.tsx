@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Minus, Plus, X } from 'lucide-react';
 import { label, useApi } from '../api';
 import NetworkMap from '../components/NetworkMap';
@@ -98,6 +98,12 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
       setView('all');
     }
   }, [params]);
+  // On a narrow screen the panel sits under the map, so picking something brings it into sight.
+  const inspector = useRef<HTMLElement>(null);
+  useEffect(() => {
+    // Newer browsers answer a scroll with a promise, which an effect must not hand back.
+    inspector.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [selected, graph.data]);
   const open = useMemo(
     () => (findings.data || []).filter((item) => item.status === 'open'),
     [findings.data],
@@ -185,7 +191,7 @@ export default function MapPage({ params }: { params: URLSearchParams }) {
           pinned={pinned}
         />
         {node && (
-          <aside className="inspector" aria-label={`About ${node.name}`}>
+          <aside className="inspector" ref={inspector} aria-label={`About ${node.name}`}>
             <header>
               <div>
                 <h2>{node.name}</h2>
