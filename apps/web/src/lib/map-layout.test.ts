@@ -34,16 +34,16 @@ const edge = (
   provider: evidence === 'inferred' ? 'nyctr' : 'unifi_network',
   evidence_kind: evidence,
   observed_at: '2026-11-10T00:00:00Z',
-  attributes: evidence === 'inferred' ? { basis: 'Network card tagged VLAN 66' } : {},
+  attributes: evidence === 'inferred' ? { basis: 'Network card tagged VLAN 20' } : {},
 });
 
 const graph: Graph = {
   nodes: [
     node('site', 'site', 'unifi_network'),
     node('gw', 'gateway', 'unifi_network'),
-    node('guest', 'network', 'unifi_network', { vlan: 80 }),
-    node('lan', 'network', 'unifi_network', { vlan: 65 }),
-    node('servers', 'network', 'unifi_network', { vlan: 66 }),
+    node('guest', 'network', 'unifi_network', { vlan: 40 }),
+    node('lan', 'network', 'unifi_network', { vlan: 10 }),
+    node('servers', 'network', 'unifi_network', { vlan: 20 }),
     node('laptop', 'client', 'unifi_network'),
     node('nic', 'client', 'unifi_network'),
     node('pve', 'host', 'proxmox'),
@@ -70,9 +70,9 @@ describe('map layout', () => {
     const layout = layoutMap(graph);
     expect(layout.lanes.map((lane) => lane.id)).toEqual([SHARED, 'lan', 'servers', 'guest']);
     expect(layout.lanes.map((lane) => lane.sub).slice(1)).toEqual([
-      'VLAN 65',
-      'VLAN 66',
-      'VLAN 80',
+      'VLAN 10',
+      'VLAN 20',
+      'VLAN 40',
     ]);
   });
 

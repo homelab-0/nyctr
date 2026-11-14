@@ -47,7 +47,7 @@ describe('why a device is filed as a gateway', () => {
 /** Nine devices on one network: the square draws five and a box holds four. */
 const crowded: Graph = {
   nodes: [
-    { ...thing('guest', 'network', 'Guest'), attributes: { vlan: 80 } },
+    { ...thing('guest', 'network', 'Guest'), attributes: { vlan: 40 } },
     ...Array.from({ length: 9 }, (_, i) => thing(`d${i}`, 'client', `Device ${i}`)),
   ],
   edges: Array.from({ length: 9 }, (_, i) => link(`d${i}`, 'guest', 'member_of')),

@@ -60,7 +60,7 @@ def live_signin(client, who=LIVE_ADMIN):
 
 
 def seed_live_member(app, *, reason="HaGeZi Multi PRO++", codes=("blocklist:hagezi-multi-pro-plusplus",),
-                     domain="click.shootproof.com"):
+                     domain="click.proofing-studio.example"):
     """Insert a NextDNS source, one member with one personal device, and one fresh attributed block."""
     from datetime import timedelta
 

@@ -22,10 +22,10 @@ def test_inventory_filters_and_nested_links(client, admin_headers):
       workloads(firewall: false) { name attr(key: "vmid") network { name } }
       networks { name attr(key: "vlan") }
       guests: devices(search: "pixel") { name evidence blocks(first: 10) { domain riskBand } }
-      tagged: resources(kind: ["network"], where: [{key: "vlan", eq: "80"}]) { name neighbors(kind: "client") { name } }
+      tagged: resources(kind: ["network"], where: [{key: "vlan", eq: "40"}]) { name neighbors(kind: "client") { name } }
     }""")["data"]
     assert data["workloads"] == [{"name": "Search indexer", "attr": "204", "network": {"name": "Servers"}}]
-    assert {"name": "Guest network", "attr": "80"} in data["networks"]
+    assert {"name": "Guest network", "attr": "40"} in data["networks"]
     assert {b["riskBand"] for b in data["guests"][0]["blocks"]} == {"high", "low"}
     assert {n["name"] for n in data["tagged"][0]["neighbors"]} == {"Priya's iPhone", "HVAC-Laptop", "Pixel 8",
                                                                 "Galaxy-S24"}

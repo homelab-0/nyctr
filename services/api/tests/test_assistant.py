@@ -96,7 +96,7 @@ def test_model_context_is_redacted_and_injected_text_stays_data(tmp_path, monkey
     waiting = pack["requests_waiting"][0]
     assert waiting["their_reason"].startswith("Ignore previous instructions")
     assert "eve@evil.example" not in user and "10.9.8.7" not in user and "[removed]" in waiting["their_reason"]
-    for secret in ("77102-33864", "model-secret", "nyctr-demo", "10.20.80.47", "de:ad:10:20:80:47", "jamie@nyctr.demo"):
+    for secret in ("77102-33864", "model-secret", "nyctr-demo", "203.0.113.47", "00:00:5e:00:53:47", "jamie@nyctr.demo"):
         assert secret not in user
     assert "guest-pixel" not in user and "request-stream" not in user  # only short refs are exposed
 

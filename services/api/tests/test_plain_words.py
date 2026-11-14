@@ -1,5 +1,7 @@
 """Sentences an administrator reads: refusals in the form's own words, every audit action worded, gaps that agree."""
 
+import ast
+import ipaddress
 import re
 from pathlib import Path
 
@@ -144,16 +146,16 @@ SHOWN = ("/api/integrations", "/api/resources", "/api/blocks", "/api/requests", 
          "/api/guests", "/api/findings", "/api/users", "/api/devices", "/api/attention", "/api/overview")
 
 
-def _words(value, key=""):
+def _words(value, key="", keyed=False):
     """Every text a page could show from a response: values only, and never an id or a reference to one."""
     if isinstance(value, dict):
         for name, item in value.items():
-            yield from _words(item, name)
+            yield from _words(item, name, keyed)
     elif isinstance(value, list):
         for item in value:
-            yield from _words(item, key)
+            yield from _words(item, key, keyed)
     elif isinstance(value, str) and not re.search(r"(^|_)ids?$|^(uplink|source|target|email|href|link)$", key):
-        yield value
+        yield (key, value) if keyed else value
 
 
 def test_the_demo_names_no_real_installation_and_uses_no_home_wording(client, admin_headers):
@@ -167,3 +169,33 @@ def test_the_demo_names_no_real_installation_and_uses_no_home_wording(client, ad
     assert sorted({text for text in shown if HOUSEHOLD.search(text)}) == []
     surnames = [row["name"].split()[-1] for row in client.get("/api/users").json()]
     assert len(set(surnames)) == len(surnames), "people who share a surname read as one family"
+
+
+# Names nobody can register: the endings kept for examples and tests.
+RESERVED = (".example", ".test", ".invalid", ".localhost")
+HOST = re.compile(r"(?<![\w@.-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?![\w-])")
+# The address ranges kept for documentation, and the hardware addresses kept for it.
+DOCUMENTED = [ipaddress.ip_network(block) for block in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")]
+ADDRESS = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+HARDWARE = re.compile(r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b", re.I)
+
+
+def test_the_demo_shows_no_real_host_name_address_or_hardware_address(client, admin_headers):
+    """Every host name ends in a reserved name, and every address is from a block kept for documentation."""
+    seeded = [node.value for node in ast.walk(ast.parse((API / "seed.py").read_text()))
+              if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    # An audit action and a capability are codes with a dot, worded by the page and never shown as stored.
+    shown = [text for path in (*SHOWN, "/api/graph", "/api/audit")
+             for key, text in _words(client.get(path).json(), keyed=True) if key not in {"action", "provides"}]
+    assert len(seeded) > 400 and len(shown) > 800
+    products = [provider.name for provider in registry.providers().values()]
+    hosts, addresses, hardware = set(), set(), set()
+    for text in (*seeded, *shown):
+        for product in products:  # an integration's own product may be written with a dot
+            text = text.replace(product, "")
+        hosts |= {host for host in HOST.findall(text) if not host.endswith(RESERVED)}
+        addresses |= {found for found in ADDRESS.findall(text)
+                      if not any(ipaddress.ip_address(found) in block for block in DOCUMENTED)}
+        hardware |= {found for found in HARDWARE.findall(text) if not found.lower().startswith("00:00:5e:00:53:")}
+    assert (sorted(hosts), sorted(addresses), sorted(hardware)) == ([], [], [])
+    assert any(HOST.search(text) for text in shown) and any(ADDRESS.search(text) for text in shown)

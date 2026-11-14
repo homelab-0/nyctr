@@ -15,8 +15,8 @@ TOKEN = "nyctr@pve!reader=0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,firewall=1,tag=66",
-     {"bridge": "vmbr0", "mac": "bc:24:11:aa:bb:cc", "vlan": 66, "firewall": True, "link_down": False}),
+    ("virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,firewall=1,tag=20",
+     {"bridge": "vmbr0", "mac": "bc:24:11:aa:bb:cc", "vlan": 20, "firewall": True, "link_down": False}),
     ("name=eth0,bridge=vmbr1,hwaddr=BC:24:11:00:00:01,ip=dhcp,type=veth",
      {"bridge": "vmbr1", "mac": "bc:24:11:00:00:01", "vlan": None, "firewall": False, "link_down": False}),
     ("e1000=BC:24:11:00:00:02,bridge=vmbr0,tag=9999,link_down=1",
@@ -64,11 +64,11 @@ def test_collection_reads_only_and_models_cards_as_configuration(monkeypatch):
                                {"type": "storage", "node": "pve1", "id": "storage/pve1/local"}],
         "/cluster/firewall/options": {"enable": 1},
         "/nodes/pve1/network": [{"iface": "vmbr0", "type": "bridge", "active": 1, "bridge_vlan_aware": 1,
-                                 "cidr": "10.20.66.3/24", "bridge_ports": "enp3s0"},
+                                 "cidr": "198.51.100.3/24", "bridge_ports": "enp3s0"},
                                 {"iface": "enp3s0", "type": "eth"}],
-        "/nodes/pve1/qemu/101/config": {"name": "photos", "net0": "virtio=BC:24:11:10:66:11,bridge=vmbr0,tag=66,firewall=1"},
+        "/nodes/pve1/qemu/101/config": {"name": "photos", "net0": "virtio=00:00:5e:00:53:11,bridge=vmbr0,tag=20,firewall=1"},
         "/nodes/pve1/qemu/101/firewall/options": {"enable": 1},
-        "/nodes/pve1/lxc/204/config": {"hostname": "indexer", "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:10:66:44,tag=66"},
+        "/nodes/pve1/lxc/204/config": {"hostname": "indexer", "net0": "name=eth0,bridge=vmbr0,hwaddr=00:00:5e:00:53:44,tag=20"},
     }
     calls = []
 
@@ -90,14 +90,14 @@ def test_collection_reads_only_and_models_cards_as_configuration(monkeypatch):
     kinds = sorted(node["kind"] for node in snapshot.resources)
     assert kinds == ["bridge", "host", "workload", "workload"] and snapshot.blocks == []
     by_name = {node["name"]: node for node in snapshot.resources}
-    assert by_name["pve1"]["attributes"]["addresses"] == ["10.20.66.3"]
+    assert by_name["pve1"]["attributes"]["addresses"] == ["198.51.100.3"]
     assert by_name["photos"]["attributes"]["firewall_enabled"] is True
     # The container's firewall option read failed: its state is unknown, never assumed off.
     assert by_name["indexer"]["attributes"]["firewall_enabled"] is None
     assert by_name["indexer"]["attributes"]["nics"][0]["firewall"] is False
     assert "proxmox_firewall_options_unavailable" in evidence.gaps
     card = next(e for e in snapshot.relationships if e["kind"] == "connects_to" and e["source"] == by_name["photos"]["id"])
-    assert card["evidence_kind"] == "configured" and card["attributes"]["vlan"] == 66
+    assert card["evidence_kind"] == "configured" and card["attributes"]["vlan"] == 20
     assert all(edge["kind"] in {"hosted_by", "connects_to"} for edge in snapshot.relationships)
 
 
@@ -106,14 +106,14 @@ def test_cross_source_links_need_a_unique_match():
     def row(id_, provider, kind, **attrs):
         return {"id": id_, "provider": provider, "kind": kind, "attributes": attrs, "observed_at": "2026-11-10T00:00:00+00:00"}
 
-    vm = row("vm", "proxmox", "workload", nics=[{"mac": "BC:24:11:00:00:01", "vlan": 66}])
+    vm = row("vm", "proxmox", "workload", nics=[{"mac": "BC:24:11:00:00:01", "vlan": 20}])
     client = row("c1", "unifi_network", "client", mac="bc:24:11:00:00:01")
-    lan = row("n66", "unifi_network", "network", vlan=66)
+    lan = row("n20", "unifi_network", "network", vlan=20)
     links = derived_links([vm, client, lan])
     assert {(e["source"], e["target"], e["kind"], e["evidence_kind"]) for e in links} == {
-        ("vm", "c1", "same_device", "inferred"), ("vm", "n66", "member_of", "inferred")}
+        ("vm", "c1", "same_device", "inferred"), ("vm", "n20", "member_of", "inferred")}
     twin = row("c2", "unifi_network", "client", mac="bc:24:11:00:00:01")
-    other = row("n66b", "unifi_network", "network", vlan=66)
+    other = row("n20b", "unifi_network", "network", vlan=20)
     assert derived_links([vm, client, twin, lan, other]) == []
 
 

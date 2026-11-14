@@ -20,7 +20,7 @@ from nyctr import access
 from nyctr.integrations import IntegrationError, actions, core
 from nyctr.models import AccessRequest, Audit, Integration, Lease, Observation, Setting, utcnow
 
-DOMAIN = "click.shootproof.com"
+DOMAIN = "click.proofing-studio.example"
 GATEWAY = {"base_url": "https://unifi.example/proxy/network/integration"}
 
 
