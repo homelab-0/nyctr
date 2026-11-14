@@ -496,7 +496,7 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
                 raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
                                        category="authentication")
             if response.status_code == 429:
-                raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit",
+                raise IntegrationError("The source's request limit was reached. Try collecting again later.", category="rate_limit",
                                        retry_after=_retry_after(response.headers.get("retry-after")))
             if response.status_code >= 400:
                 # A 408 is the source giving up on a read it could not finish: like a 5xx, it may pass.

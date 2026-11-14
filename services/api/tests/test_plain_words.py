@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from test_collection import live_client
 
+from nyctr import diagnostics
 from nyctr.integrations import IntegrationError, registry, validate_config
 from nyctr.integrations.core import GAP_CAUSES, describe_gaps
 
@@ -89,6 +90,17 @@ def test_a_gap_text_never_states_a_cause_the_sentence_beside_it_may_contradict()
             assert not re.search(r"refused|not available|unusable|failed|this key|error", text, re.I), (code, text)
             for cause, sentence in GAP_CAUSES.items():
                 assert describe_gaps(provider.gap_notes, {code: [cause]})[0][2] == f"{text} {sentence}"
+
+
+def test_a_request_limit_is_told_in_the_pages_own_words():
+    """Whether Nyctr held a request back or the source turned one away, the sentence says source and collect."""
+    core = (API / "integrations" / "core.py").read_text()
+    raised = re.findall(r'IntegrationError\("([^"]+)",\s*category="rate_limit"', core)
+    assert raised == ["The source's request limit is in use. Try again shortly.",
+                      "The source's request limit was reached. Try collecting again later."]
+    for text in (*raised, *diagnostics._FAILURES["rate_limit"]):
+        assert "request limit" in text or text.startswith("Try again shortly.")
+        assert not re.search(r"provider|sync|rate.limit|integration scope|frequency", text, re.I), text
 
 
 HOUSEHOLD = re.compile(
