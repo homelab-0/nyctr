@@ -638,6 +638,9 @@ describe('what the member portal says happened', () => {
       screen.getByText(/^Nothing was opened: the demonstration never changes a real network\./),
     ).toBeDefined();
     expect(document.body.textContent).not.toMatch(/It's open|One more step|works for the next/);
+    // The rule's note, "Opened for 60 minutes…", is not repeated under "Nothing was opened".
+    expect(screen.getByText('The access rule said yes to this one.')).toBeDefined();
+    expect(document.body.textContent).not.toContain('Opened for 60 minutes');
     // The same in both lists: no countdown and no "Opened" for something that opened nothing.
     for (const link of [/My requests/, /Blocked sites/]) {
       await user.click(screen.getAllByRole('link', { name: link })[0]);

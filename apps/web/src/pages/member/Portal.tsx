@@ -729,9 +729,12 @@ function Result({ data, id }: { data: Data; id: string }) {
           <div>
             <h2>What Nyctr found when it checked {row.domain}</h2>
             <p>
-              {row.status === 'auto_approved'
-                ? row.decision_note
-                : 'This is the score the administrator will see too.'}
+              {row.status !== 'auto_approved'
+                ? 'This is the score the administrator will see too.'
+                : // The rule's own note says "Opened": true only of an opening applied at the source.
+                  lease?.execution === 'applied'
+                  ? row.decision_note
+                  : 'The access rule said yes to this one.'}
             </p>
           </div>
         </div>
