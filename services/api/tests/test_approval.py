@@ -17,7 +17,7 @@ from nyctr import access
 from nyctr.integrations import IntegrationError, actions
 from nyctr.models import AccessRequest, Integration, Lease, Observation, Setting, utcnow
 
-GONE = {"name": "Home DNS"}
+GONE = {"name": "Office DNS"}
 
 
 def gates(app):
