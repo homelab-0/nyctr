@@ -221,3 +221,25 @@ def test_a_refusal_before_anything_is_sent_leaves_no_record(tmp_path, monkeypatc
 
         assert asyncio.run(scenario()) == (409, 502)
         assert source.calls == [] and rows(app) == [] and claims(app) == []
+
+
+def test_a_record_never_keeps_a_real_exceptions_entry_in_place(tmp_path, monkeypatch):
+    """A real exception ends while a record for the same address is unsettled: its entry is removed all the same."""
+    with started(tmp_path) as (app, *_):
+        source = Source(monkeypatch)
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                real = Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=True)
+                db.add(real)
+                db.commit()  # Its entry was taken off at the source by hand, so the next opening leaves a record.
+                await access.hold_entry(db, app.state.settings, db.get(Integration, "dns"), DOMAIN)
+                source.listed.append(DOMAIN)
+                db.execute(update(Setting).values(updated_at=utcnow() - access.ENDING_HOLD))
+                db.commit()
+                assert await access.end_lease(db, app.state.settings, real, "revoked")
+                db.commit()
+
+        asyncio.run(scenario())
+        assert source.calls == ["GET", "GET", "DELETE", "GET"] and source.listed == []
+        assert sorted(rows(app)) == [("ended", "revoked", True), ("unconfirmed", None, True)]
