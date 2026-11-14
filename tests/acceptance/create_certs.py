@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 CERTIFICATE_FILES = ("ca.pem", "fixture.pem", "fixture-key.pem", "combined-ca.pem")
-FIXTURE_NAMES = {"fixture", "api.nextdns.io"}
+FIXTURE_NAMES = {"fixture", "api.nextdns.io", "api.ui.com"}
 
 
 def write_public_test_file(path: Path, content: bytes) -> None:
@@ -51,7 +51,7 @@ def existing_certificates_valid(directory: Path) -> bool:
 def create_certificates(directory: Path) -> None:
     """Generate a CA-signed HTTPS leaf and a combined public/test trust bundle.
 
-    Only fixture and api.nextdns.io are valid names. The Docker alias
+    Only fixture, api.nextdns.io and api.ui.com are valid names. The Docker alias
     untrusted-fixture intentionally fails normal hostname verification.
     """
     directory.mkdir(parents=True, exist_ok=True, mode=0o755)

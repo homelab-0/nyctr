@@ -50,6 +50,15 @@ services:
   fixture:
     <<: *application-image
     command: [python, /acceptance/fixture.py, --cert-directory, /acceptance-certs]
+    # Switches that make the sources misbehave (README.md). All off unless set where Compose is run.
+    # The fixture accepts changes only when the stack is started with changes allowed.
+    environment:
+      - FIXTURE_REFUSE
+      - FIXTURE_ERROR
+      - FIXTURE_FAIL
+      - FIXTURE_RETRY_AFTER
+      - FIXTURE_SLOW
+      - FIXTURE_WRITES=${NYCTR_ACCEPTANCE_WRITES:+on}
     volumes:
       - ./fixture.py:/acceptance/fixture.py:ro
       - test-certificates:/acceptance-certs:ro
@@ -61,6 +70,7 @@ services:
         aliases:
           - fixture
           - api.nextdns.io
+          - api.ui.com
           - untrusted-fixture
     read_only: true
     cap_drop: [ALL]
@@ -87,10 +97,13 @@ services:
       NYCTR_COOKIE_SECURE: "false"
       NYCTR_BOOTSTRAP_ADMIN_EMAIL: tester@nyctr.test
       NYCTR_BOOTSTRAP_ADMIN_PASSWORD: nyctr-acceptance-only
-      NYCTR_CONNECTOR_HOSTS: fixture,untrusted-fixture
+      NYCTR_CONNECTOR_HOSTS: fixture,untrusted-fixture,api.ui.com
       NYCTR_CONNECTOR_CA_BUNDLE: /acceptance-certs/combined-ca.pem
       NYCTR_CONNECTOR_SECRET_ACCEPTANCE: fake-readonly
       NYCTR_CONNECTOR_SECRET_REJECTED: fake-rejected
+      NYCTR_CONNECTOR_SECRET_LIMITED: fake-limited
+      # Empty keeps every source read only. Name the kinds of source Nyctr may change to allow it.
+      NYCTR_PROVIDER_WRITES: ${NYCTR_ACCEPTANCE_WRITES:-}
     volumes:
       - test-certificates:/acceptance-certs:ro
     depends_on:
