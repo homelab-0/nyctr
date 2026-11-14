@@ -319,6 +319,41 @@ describe('member portal', () => {
     expect(sent?.body).toEqual({ block_id: 'b1', reason: 'Wedding photos', duration_minutes: 60 });
   });
 
+  it('opens a block found by its address that is older than the page it holds', async () => {
+    const latest = block('b1', 'photos.example', 'laptop');
+    const old = { ...block('b9', 'older.example', 'laptop'), risk_explanation: 'A privacy list.' };
+    const { user, calls } = open(
+      {
+        'GET /blocks': blockList([latest], { total: 250 }),
+        'GET /blocks/one?id=b9': old,
+        'POST /requests': request({}),
+      },
+      '/portal?block=b9',
+    );
+    expect(await screen.findByText('older.example')).toBeDefined();
+    expect(screen.queryByText('That block is no longer listed')).toBeNull();
+    await user.type(screen.getByLabelText('What do you need it for?'), 'Needed for work');
+    await user.click(screen.getByRole('button', { name: 'Ask to open it' }));
+    const sent = calls.find((call) => call.method === 'POST' && call.path === '/requests');
+    expect(sent?.body).toEqual({ block_id: 'b9', reason: 'Needed for work', duration_minutes: 60 });
+  });
+
+  it('says the same of a block the member may not see as of one that does not exist', async () => {
+    const refused = { __status: 404, detail: 'Block event not found' };
+    const said = [];
+    for (const id of ['someone-elses', 'never-stored']) {
+      open({ [`GET /blocks/one?id=${id}`]: refused }, `/portal?block=${id}`);
+      expect(await screen.findByText('That block is no longer listed')).toBeDefined();
+      said.push(document.body.textContent);
+      cleanup();
+    }
+    expect(said[0]).toBe(said[1]);
+    // A read that failed for another reason is not called a block that has gone.
+    open({ 'GET /blocks/one?id=b9': { __status: 500, detail: 'Unavailable' } }, '/portal?block=b9');
+    expect(await screen.findByText('This block could not be read just now.')).toBeDefined();
+    expect(screen.queryByText('That block is no longer listed')).toBeNull();
+  });
+
   it('says a block with no score is unknown, not safe', async () => {
     open(
       {

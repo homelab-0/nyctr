@@ -10,7 +10,7 @@ import {
   ShieldAlert,
   X,
 } from 'lucide-react';
-import { post, useApi } from '../../api';
+import { api, ApiError, post, useApi } from '../../api';
 import { everyText, useScheduleSummary } from '../../lib/schedule';
 import { useAuth } from '../../auth';
 import {
@@ -352,14 +352,41 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
-  if (data.blocks.loading) return <Loading />;
-  const block = (data.blocks.data || []).find((item) => item.id === id);
+  const listed = (data.blocks.data || []).find((item) => item.id === id);
+  // The list is only the latest page. One found by its address may be older than that, so a
+  // block that is not on the page is asked for by itself; the server applies the same rights.
+  const [older, setOlder] = useState<Block | 'gone' | 'failed' | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const waiting = data.blocks.loading;
+  useEffect(() => {
+    if (listed || waiting) return;
+    const controller = new AbortController();
+    setOlder(null);
+    api<Block>(`/blocks/one?id=${encodeURIComponent(id)}`, { signal: controller.signal })
+      .then((found) => setOlder(found))
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setOlder(err instanceof ApiError && err.status === 404 ? 'gone' : 'failed');
+      });
+    return () => controller.abort();
+  }, [id, listed, waiting, attempt]);
+  if (waiting || (!listed && older === null)) return <Loading />;
+  if (!listed && older === 'failed')
+    return (
+      <div className="m-col">
+        <ErrorState
+          message="This block could not be read just now."
+          retry={() => setAttempt((value) => value + 1)}
+        />
+      </div>
+    );
+  const block = listed || (typeof older === 'object' ? older : null);
   if (!block)
     return (
       <div className="m-col">
         <Empty
           title="That block is no longer listed"
-          text="Blocks stay for a day. Open the page again and it will reappear."
+          text="Blocks stay for a day. Open the page again on your device and it will reappear."
           action={
             <a className="button primary" href="#/portal">
               Back to blocked sites

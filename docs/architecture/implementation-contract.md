@@ -74,6 +74,8 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   `reviewed` and `denied` change nothing on the network. `approved` opens a
   temporary lease whose `execution` says whether the provider was changed.
 - `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
+- `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
+  missing, expired or not visible to the caller answers the same 404.
 - `GET /api/me/device` -> `{device_id,name,simulated}`; only among the caller's devices.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`

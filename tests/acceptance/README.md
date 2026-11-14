@@ -283,9 +283,10 @@ open a 15 minute exception and collect the site at real size as it ends.
   block here has a reason the scorer does not know, so nothing is ever scored.
 - Real lookup volume. A real profile at the bound has a different time on every
   row, so the 4000 rows kept are about 4000 blocks, ten times what this one
-  stores. The fixture repeats each lookup on ten rows because 4000 different
-  ones make an answer larger than the checker accepts and a Blocks screen that
-  draws every row.
+  stores. The fixture repeats each lookup on ten rows because, when it was
+  written, 4000 different ones made an answer larger than the checker accepts
+  and a Blocks screen that drew every row. Blocks now answers and draws one page,
+  so the fixture can be brought to real size; that has not been done yet.
 - The lookback setting: the fake log read ignores the time window it is asked
   for, so changing it shows nothing.
 - Paging of any gateway list but the rules; the others fit in one page.

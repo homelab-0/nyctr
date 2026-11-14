@@ -238,7 +238,11 @@ def source_path(connection: dict, action: str) -> str:
 
 
 def evidence_snapshot(client: Client) -> str:
-    """Capture inventory, graph, and fresh block state for a strict no-import comparison."""
+    """Capture inventory, graph, and fresh block state for a strict no-import comparison.
+
+    Blocks are compared by the first page and the total, which is every lookup while the
+    run holds less than a page of them at this point (it holds one).
+    """
     graph = client.json("/api/graph")
     stored = client.json("/api/blocks")
     state = {

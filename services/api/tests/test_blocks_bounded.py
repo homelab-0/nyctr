@@ -187,14 +187,17 @@ def test_member_opens_a_lookup_from_an_older_page_by_its_address_and_nothing_the
     asked = client.post("/api/requests", headers=headers,
                         json={"block_id": "mine-00240", "reason": "Needed for work", "duration_minutes": 30})
     assert asked.status_code == 201 and asked.json()["domain"] == "host-00240.mine.example"
-    # Another person's, one with no device, an expired one of their own, and one that never existed.
+    # Another person's, one with no device, one of their own that has just expired, and one that never existed.
+    with app.state.session_factory() as db:
+        db.execute(update(Observation).where(Observation.id == "mine-00241").values(expires_at=utcnow()))
+        db.commit()
     refusals = [client.get("/api/blocks/one", params={"id": id_})
-                for id_ in ("other-00001", "block-admin", "block-unattributed", "block-expired", "never-stored", "a\x00b")]
+                for id_ in ("other-00001", "block-admin", "block-unattributed", "mine-00241", "never-stored", "a\x00b")]
     assert {(r.status_code, r.text) for r in refusals} == {(404, '{"detail":"Block event not found"}')}
     assert client.post("/api/blocks/find", headers=headers, json={"domain": "host-00001.other.example"}).json() == []
     signin(client)
     assert client.get("/api/blocks/one", params={"id": "other-00001"}).json()["device_name"] == "Alex's workstation"
-    assert client.get("/api/blocks/one", params={"id": "block-expired"}).status_code == 404
+    assert client.get("/api/blocks/one", params={"id": "mine-00241"}).status_code == 404
     client.cookies.clear()
     assert client.get("/api/blocks/one", params={"id": "mine-00240"}).status_code == 401
 
