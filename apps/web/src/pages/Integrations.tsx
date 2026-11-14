@@ -1,16 +1,17 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowRight,
   Check,
   Layers2,
   LockKeyhole,
   Minus,
+  Pencil,
   Plus,
   RefreshCw,
   ScanLine,
   Settings2,
 } from 'lucide-react';
-import { label, post, relativeTime, useApi } from '../api';
+import { label, post, put, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
 import { useNow } from '../lib/format';
 import { nextCollection, useSchedule } from '../lib/schedule';
@@ -36,6 +37,10 @@ import {
 } from '../components/IntegrationDiagnostics';
 
 /** Shown wherever a collection stopped at its read limit, so it is never taken for a complete one. */
+/** Shown on the edit form of a source that has collected; the server refuses with the same words. */
+const FIXED_SOURCE =
+  'This source has already collected, so where it reads can no longer change. To read from somewhere else, add a new source. Its name and numeric settings can still change.';
+
 const PARTIAL_NOTE =
   "Only the most recent blocked lookups were read. Older ones in this source's time window were not.";
 
@@ -44,54 +49,77 @@ const PARTIAL_NOTE =
  * The fields come from the integration's own declaration, so a new integration gets a form
  * without any change here. The form never requests the provider key itself; the API validates
  * endpoint and credential-reference restrictions and rejects live connections in demo mode.
+ * Given a saved source it becomes the edit form: the same fields filled in, with the kind of
+ * source fixed. Only the name of the secret is shown; the secret itself never reaches the page.
  */
 function AddIntegration({
   providers,
   provider,
+  editing,
   onClose,
   onSaved,
+  onPending,
 }: {
   providers: CatalogProvider[];
   provider: string;
+  editing?: Integration;
   onClose: () => void;
   onSaved: () => void;
+  onPending?: (pending: boolean) => void;
 }) {
   const { user } = useAuth();
   const [selected, setSelected] = useState(provider);
-  const [name, setName] = useState('');
-  const [secret, setSecret] = useState('');
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [name, setName] = useState(editing?.name || '');
+  const [secret, setSecret] = useState(editing?.secret_ref || '');
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      Object.entries(editing?.config || {}).map(([key, value]) => [
+        `${provider}.${key}`,
+        String(value ?? ''),
+      ]),
+    ),
+  );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const demo = user?.mode === 'demo';
   const chosen = providers.find((item) => item.id === selected) || providers[0];
+  // Once a source has collected, where it reads (every setting that is not a number, and the
+  // secret name) is fixed; the server refuses a change with the same sentence.
+  const fixed = Boolean(editing?.last_sync);
+  // A save that finishes after this form was dismissed must not close whichever form is open now.
+  const open = useRef(true);
+  useEffect(() => {
+    open.current = true;
+    return () => {
+      open.current = false;
+    };
+  }, []);
   /** Persists connection metadata, leaving source collection to a separate explicit action. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError(null);
     setPending(true);
+    onPending?.(true);
     const config: Record<string, string | number> = {};
     for (const field of chosen.fields) {
       const value = (values[`${chosen.id}.${field.key}`] || '').trim();
       if (value) config[field.key] = field.kind === 'number' ? Number(value) : value;
     }
     try {
-      await post('/integrations', {
-        provider: chosen.id,
-        name: name.trim(),
-        config,
-        secret_ref: secret.trim(),
-      });
+      const saved = { name: name.trim(), config, secret_ref: secret.trim() };
+      if (editing) await put(`/integrations/${encodeURIComponent(editing.id)}`, saved);
+      else await post('/integrations', { provider: chosen.id, ...saved });
       onSaved();
-      onClose();
+      if (open.current) onClose();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setPending(false);
+      onPending?.(false);
     }
   };
   return (
-    <Modal title="Connect a source" onClose={onClose}>
+    <Modal title={editing ? 'Edit source' : 'Connect a source'} onClose={onClose}>
       <form className="modal-body form-stack" onSubmit={submit}>
         {demo && (
           <Notice tone="amber">
@@ -99,8 +127,19 @@ function AddIntegration({
             source.
           </Notice>
         )}
-        <Field label="Integration" hint={chosen.summary}>
-          <select value={chosen.id} onChange={(e) => setSelected(e.target.value)}>
+        <Field
+          label="Integration"
+          hint={
+            editing
+              ? 'The kind of source cannot be changed. To use another kind, connect a new source.'
+              : chosen.summary
+          }
+        >
+          <select
+            value={chosen.id}
+            disabled={Boolean(editing)}
+            onChange={(e) => setSelected(e.target.value)}
+          >
             {providers.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
@@ -136,6 +175,7 @@ function AddIntegration({
                 setValues({ ...values, [`${chosen.id}.${field.key}`]: e.target.value })
               }
               placeholder={field.placeholder}
+              readOnly={fixed && field.kind !== 'number'}
             />
           </Field>
         ))}
@@ -150,19 +190,25 @@ function AddIntegration({
             placeholder="NYCTR_CONNECTOR_SECRET_HEAD_OFFICE"
             pattern="NYCTR_CONNECTOR_SECRET_[A-Z0-9_]+"
             className="mono"
+            readOnly={fixed}
           />
         </Field>
-        <Notice>
-          Collection only reads. Saving records the connection; collect a snapshot afterwards.
-          Whether Nyctr may change this source is a separate server setting.
-        </Notice>
+        {fixed ? (
+          <Notice tone="amber">{FIXED_SOURCE}</Notice>
+        ) : (
+          <Notice>
+            {editing
+              ? 'This source has not collected yet, so every field can still be corrected. A new address, setting or secret name means it must be tested again.'
+              : 'Collection only reads. Saving records the connection; collect a snapshot afterwards. Whether Nyctr may change this source is a separate server setting.'}
+          </Notice>
+        )}
         <InlineError message={error} />
         <div className="modal-actions">
           <button className="button secondary" type="button" onClick={onClose}>
             Cancel
           </button>
           <button className="button primary" disabled={pending || demo} type="submit">
-            {pending ? 'Saving…' : 'Save connection'}
+            {pending ? 'Saving…' : editing ? 'Save changes' : 'Save connection'}
             <ArrowRight size={15} />
           </button>
         </div>
@@ -247,6 +293,21 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const allowed = sources.filter((item) => item.write_mode === 'enabled').map((item) => item.name);
   const connected = new Set((result.data || []).map((item) => item.provider));
   const [add, setAdd] = useState<string | null>(null);
+  const [edit, setEdit] = useState<Integration | null>(null);
+  const editButton = useRef<HTMLButtonElement | null>(null);
+  // Per source: 'pending' while an edit of it is being saved, then the list as it was when that
+  // save succeeded. Its form would open on the values from before the save and could undo it, so
+  // the source stays shut until a newer list has arrived. Every save starts a fresh read and
+  // drops any older one, so the next list to arrive was read after the save.
+  const [saving, setSaving] = useState<Record<string, 'pending' | Integration[] | null>>({});
+  const listed = useRef(result.data);
+  listed.current = result.data;
+  const shut = (id: string) =>
+    id in saving && (saving[id] === 'pending' || saving[id] === result.data);
+  /** Puts the keyboard back on the card's Edit button once the edit form has closed. */
+  useEffect(() => {
+    if (!edit) editButton.current?.focus();
+  }, [edit]);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -402,6 +463,30 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                   {admin && (
                     <button
                       className="button secondary small"
+                      disabled={pending !== null || demo || !item}
+                      aria-disabled={shut(integration.id)}
+                      onClick={(event) => {
+                        if (shut(integration.id)) return;
+                        editButton.current = event.currentTarget;
+                        setEdit(integration);
+                      }}
+                      title={
+                        demo
+                          ? 'Demo sources cannot be changed.'
+                          : !item
+                            ? 'This release has no integration for this source.'
+                            : shut(integration.id)
+                              ? 'Your last change to this source is still being saved.'
+                              : 'Change this source'
+                      }
+                    >
+                      <Pencil size={14} />
+                      Edit
+                    </button>
+                  )}
+                  {admin && (
+                    <button
+                      className="button secondary small"
                       disabled={
                         pending !== null || diagnostics.state?.pending === true || demo || !item
                       }
@@ -513,6 +598,29 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
             setSuccess(
               'Connection saved. Run diagnostics to verify supported reads, then collect a snapshot to import evidence.',
             );
+          }}
+        />
+      )}
+      {edit && (
+        <AddIntegration
+          providers={providers}
+          provider={edit.provider}
+          editing={edit}
+          onClose={() => setEdit(null)}
+          onPending={(busy) =>
+            setSaving(({ [edit.id]: was, ...rest }) =>
+              busy
+                ? { ...rest, [edit.id]: 'pending' }
+                : was === 'pending'
+                  ? rest
+                  : { ...rest, [edit.id]: was },
+            )
+          }
+          onSaved={() => {
+            setSaving((all) => ({ ...all, [edit.id]: listed.current }));
+            result.reload();
+            setError(null);
+            setSuccess('Changes saved.');
           }}
         />
       )}

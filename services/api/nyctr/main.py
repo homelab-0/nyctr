@@ -95,12 +95,21 @@ def _settled_status(db: Session, integration: Integration) -> str:
     return "partial" if last is not None and last.details.get("partial") is True else "connected"
 
 
-class IntegrationInput(InputModel):
-    """Accept any registered integration and a constrained server-side secret reference."""
-    provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]+$")
+# The edit form shows the same sentence (FIXED_SOURCE in the web app's Integrations page).
+MOVED_SOURCE = ("This source has already collected, so where it reads can no longer change. "
+                "To read from somewhere else, add a new source. Its name and numeric settings can still change.")
+
+
+class IntegrationEdit(InputModel):
+    """Accept what may change on a saved source. The kind of source is not among it."""
     name: str = Field(min_length=1, max_length=160)
     config: dict
     secret_ref: str = Field(pattern=r"^NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}$")
+
+
+class IntegrationInput(IntegrationEdit):
+    """Accept any registered integration and a constrained server-side secret reference."""
+    provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]+$")
 
 
 class RequestInput(InputModel):
@@ -338,6 +347,64 @@ def create_app(settings: Settings | None = None):
         db.commit()
         return integration_json(row)
 
+    @app.put("/api/integrations/{integration_id}")
+    def edit_integration(integration_id: str, body: IntegrationEdit, user=Depends(admin),
+                         db: Session = Depends(get_db)):
+        """Change a saved source, validated as a new one is; a refused change leaves the row untouched.
+
+        Name and numeric settings change at any time and keep the status. Where it reads (other
+        settings, secret name) changes only until it first stores a collection (`last_sync` set,
+        partial included) and sends it back to "configured"; after that, add a new source. The
+        audit record names changed fields, never values. No credential is read here.
+        """
+        if settings.mode == "demo":
+            raise HTTPException(409, "Sources cannot be changed in the demo workspace")
+        from .integrations import IntegrationError, registry, validate_config
+        row = db.get(Integration, integration_id)
+        if not row:
+            raise HTTPException(404, "Integration not found")
+        provider = registry.find(row.provider)
+        if provider is None:
+            raise HTTPException(422, "This release has no integration for this source, so it cannot be changed")
+        try:
+            config = validate_config(row.provider, body.config)
+        except IntegrationError as error:
+            # The integration's own wording: it states the rule that failed and repeats no value.
+            raise HTTPException(422, f"Not saved. {error}") from None
+        except ValueError:
+            raise HTTPException(422, "Not saved. Check the settings and try again.") from None
+        # Take the row's write lock first, with the collection lease's guard, then read it again:
+        # nothing can change it until this request commits, and no running read is changed under.
+        locked = db.execute(update(Integration).where(
+            Integration.id == integration_id,
+            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
+        ).values(name=Integration.name).execution_options(synchronize_session=False))
+        if locked.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, "This source is being collected or tested right now. "
+                                     "Try again when that has finished.")
+        db.refresh(row)
+        try:
+            before = validate_config(row.provider, row.config)
+        except (IntegrationError, ValueError):
+            before = row.config
+        settings_changed = sorted(key for key in set(before) | set(config) if before.get(key) != config.get(key))
+        fields = ((["name"] if body.name != row.name else []) + [f"config.{key}" for key in settings_changed]
+                  + (["secret_ref"] if body.secret_ref != row.secret_ref else []))
+        kinds = {field.key: field.kind for field in provider.fields}
+        moves = "secret_ref" in fields or any(kinds.get(key) != "number" for key in settings_changed)
+        if not fields or (moves and row.last_sync is not None):
+            db.rollback()
+            if not fields:
+                return integration_json(row)
+            raise HTTPException(409, MOVED_SOURCE)
+        row.name, row.config, row.secret_ref = body.name, config, body.secret_ref
+        if moves:
+            row.status, row.last_error, row.sync_started_at = "configured", None, None
+        audit(db, user.id, "integration.updated", integration_id, provider=row.provider, fields=fields, retest=moves)
+        db.commit()
+        return integration_json(row)
+
     @app.post("/api/integrations/{integration_id}/diagnostics", response_model=DiagnosticReport)
     async def integration_diagnostics(integration_id: str, user=Depends(admin), db: Session = Depends(get_db)):
         """Inspect a saved live integration under the same lease as collection, without importing evidence.
@@ -368,6 +435,12 @@ def create_app(settings: Settings | None = None):
             db.rollback()
             raise HTTPException(409, "A collection or diagnostic is already running")
         db.commit()
+        read = (integration.config, integration.secret_ref)
+        db.refresh(integration)
+        if (integration.config, integration.secret_ref) != read:
+            # An edit was saved just before the lease: probe what is saved now, and afterwards
+            # hand back the status that edit left, not the one read before it.
+            previous_status, previous_started_at = _settled_status(db, integration), None
         try:
             report = await diagnose_integration(integration.provider, integration_id,
                                                 integration.config, integration.secret_ref)
@@ -407,6 +480,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(409, "The integration secret is not configured on the server")
         if error == "busy":
             raise HTTPException(409, "A collection is already running")
+        if error == "replaced":
+            raise HTTPException(409, "The source was changed while it was being read, so nothing was stored")
         if error:
             raise HTTPException(502, error)
         # Deterministic analysis and the written guest rule run on the stored evidence.

@@ -274,6 +274,8 @@ async function openIntegrations({
   source = connection,
   partial,
   schedule = scheduleFixture(),
+  save = async () => jsonResponse(source),
+  others = [],
 }: {
   mode?: Mode;
   role?: Role;
@@ -281,6 +283,8 @@ async function openIntegrations({
   source?: Integration;
   partial?: boolean;
   schedule?: CollectionSchedule;
+  save?: (path: string) => Promise<Response>;
+  others?: Integration[];
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -293,10 +297,11 @@ async function openIntegrations({
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, options) => {
     const path = String(input);
     if (path === '/api/auth/me') return jsonResponse(user);
-    if (path === '/api/integrations') return jsonResponse([source]);
+    if (path === '/api/integrations') return jsonResponse([source, ...others]);
     if (path === '/api/integrations/catalog') return jsonResponse(catalog);
     if (path === '/api/collection') return jsonResponse(schedule);
     if (path === `/api/integrations/${connection.id}/diagnostics`) return diagnose();
+    if (path.startsWith('/api/integrations/') && options?.method === 'PUT') return save(path);
     if (path === `/api/integrations/${connection.id}/sync`) {
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
     }
@@ -698,5 +703,145 @@ describe('integrations add capabilities', () => {
       config: { base_url: 'https://resolver.example', lookback_hours: 12 },
       secret_ref: 'NYCTR_CONNECTOR_SECRET_BRANCH',
     });
+  });
+});
+
+/** A fabricated saved source of the made-up resolver kind, collected once. */
+const resolver: Integration = {
+  ...connection,
+  provider: 'acme_resolver',
+  provider_name: 'Acme Resolver',
+  status: 'connected',
+  last_sync: '2026-01-01T12:00:00Z',
+  config: { base_url: 'https://resolver.example/api', lookback_hours: 24 },
+  secret_ref: 'NYCTR_CONNECTOR_SECRET_RESOLVER',
+};
+
+/** Covers the edit form: what it shows, what it sends, how a refusal reads, and where focus lands. */
+describe('editing a saved source', () => {
+  it("opens the form filled in, keeps the kind and a collected source's address fixed, and saves a number", async () => {
+    const { fetchMock, interaction, user } = await openIntegrations({ source: resolver });
+    const button = screen.getByRole('button', { name: 'Edit' });
+    button.focus();
+    await interaction.keyboard('{Enter}');
+    const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    expect(within(dialog).getByLabelText(/^Integration/)).toHaveProperty('disabled', true);
+    expect(within(dialog).getByLabelText(/^Integration/)).toHaveProperty('value', 'acme_resolver');
+    expect(within(dialog).getByText(/kind of source cannot be changed/)).toBeDefined();
+    expect(within(dialog).getByLabelText(/^Connection name/)).toHaveProperty(
+      'value',
+      resolver.name,
+    );
+    expect(within(dialog).getByLabelText(/^Address/)).toHaveProperty(
+      'value',
+      'https://resolver.example/api',
+    );
+    expect(within(dialog).getByLabelText(/^Credential environment reference/)).toHaveProperty(
+      'value',
+      'NYCTR_CONNECTOR_SECRET_RESOLVER',
+    );
+    // It has collected, so where it reads is fixed and the form says why; numbers stay editable.
+    expect(within(dialog).getByLabelText(/^Address/)).toHaveProperty('readOnly', true);
+    expect(within(dialog).getByLabelText(/^Credential environment reference/)).toHaveProperty(
+      'readOnly',
+      true,
+    );
+    expect(within(dialog).getByText(/already collected, so where it reads/)).toBeDefined();
+    const hours = within(dialog).getByLabelText(/^Hours to read/);
+    expect(hours).toHaveProperty('value', '24');
+    expect(hours).toHaveProperty('readOnly', false);
+    await interaction.clear(hours);
+    await interaction.type(hours, '6');
+    await interaction.click(within(dialog).getByRole('button', { name: /Save changes/ }));
+    await screen.findByText('Changes saved.');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const sent = fetchMock.mock.calls.find(([, options]) => options?.method === 'PUT')!;
+    expect(sent[0]).toBe(`/api/integrations/${resolver.id}`);
+    expect(new Headers(sent[1]?.headers).get('X-CSRF-Token')).toBe(user.csrf_token);
+    expect(JSON.parse(String(sent[1]?.body))).toEqual({
+      name: resolver.name,
+      config: { base_url: 'https://resolver.example/api', lookback_hours: 6 },
+      secret_ref: 'NYCTR_CONNECTOR_SECRET_RESOLVER',
+    });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+  });
+
+  it('lets every field of a source that has not collected yet be corrected', async () => {
+    const { interaction } = await openIntegrations({
+      source: { ...resolver, status: 'error', last_sync: null, last_error: 'Unreachable.' },
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    expect(within(dialog).getByLabelText(/^Address/)).toHaveProperty('readOnly', false);
+    expect(within(dialog).getByLabelText(/^Credential environment reference/)).toHaveProperty(
+      'readOnly',
+      false,
+    );
+    expect(within(dialog).getByText(/has not collected yet, so every field/)).toBeDefined();
+    expect(within(dialog).queryByText(/already collected/)).toBeNull();
+  });
+
+  it('keeps a source shut while its save is unfinished, and a late save closes no other form', async () => {
+    const response = deferredResponse();
+    const { interaction } = await openIntegrations({
+      source: resolver,
+      save: () => response.promise,
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    const first = await screen.findByRole('dialog', { name: 'Edit source' });
+    await interaction.click(within(first).getByRole('button', { name: /Save changes/ }));
+    await interaction.click(within(first).getByRole('button', { name: 'Cancel' }));
+    // Reopening now would fill the form with the values from before the save and could undo it.
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Edit' }).getAttribute('aria-disabled')).toBe('true');
+    await interaction.click(screen.getByRole('button', { name: /Add connection/ }));
+    const other = await screen.findByRole('dialog', { name: 'Connect a source' });
+    await interaction.type(within(other).getByLabelText(/^Connection name/), 'Second');
+    await act(async () => response.resolve(jsonResponse(resolver)));
+    await screen.findByText('Changes saved.');
+    expect(within(other).getByLabelText(/^Connection name/)).toHaveProperty('value', 'Second');
+    await interaction.click(within(other).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit' }).getAttribute('aria-disabled')).toBe(
+        'false',
+      ),
+    );
+    await interaction.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(await screen.findByRole('dialog', { name: 'Edit source' })).toBeDefined();
+  });
+
+  it('keeps each of two sources shut for its own unfinished save', async () => {
+    const saves = { first: deferredResponse(), second: deferredResponse() };
+    const { interaction } = await openIntegrations({
+      source: resolver,
+      others: [{ ...resolver, id: 'second', name: 'Second resolver' }],
+      save: (path) => (path.endsWith('/second') ? saves.second : saves.first).promise,
+    });
+    const edits = () => screen.getAllByRole('button', { name: 'Edit' });
+    const shut = () => edits().map((button) => button.getAttribute('aria-disabled'));
+    for (const index of [0, 1]) {
+      await interaction.click(edits()[index]);
+      const form = await screen.findByRole('dialog', { name: 'Edit source' });
+      await interaction.click(within(form).getByRole('button', { name: /Save changes/ }));
+      await interaction.click(within(form).getByRole('button', { name: 'Cancel' }));
+    }
+    // The second save must not take over the first one's mark.
+    expect(shut()).toEqual(['true', 'true']);
+    await act(async () => saves.first.resolve(jsonResponse(resolver)));
+    // The first is read back and opens again; its reload must not open the second.
+    await waitFor(() => expect(shut()).toEqual(['false', 'true']));
+    await interaction.click(edits()[1]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await act(async () => saves.second.resolve(jsonResponse(resolver)));
+    await waitFor(() => expect(shut()).toEqual(['false', 'false']));
+  });
+
+  it('hides Edit from members and disables it in the demo workspace', async () => {
+    await openIntegrations({ role: 'member' });
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    cleanup();
+    await openIntegrations({ mode: 'demo' });
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveProperty('disabled', true);
   });
 });
