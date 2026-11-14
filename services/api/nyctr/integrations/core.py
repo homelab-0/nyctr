@@ -7,12 +7,16 @@ caller of the non-GET exchange below and is gated by explicit configuration.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import ssl
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -27,6 +31,9 @@ MAX_REQUESTS = 128
 MAX_RECORDS = 10_000
 MAX_BODY_BYTES = 2 * 1024 * 1024
 PAGE_SIZE = 200
+# The longest one collection may spend waiting for its turn at a source that declares a request
+# limit: two full windows of a limit counted by the minute. A longer wait ends as a rate limit.
+LONGEST_WAIT = 120.0
 
 
 class IntegrationError(Exception):
@@ -36,7 +43,7 @@ class IntegrationError(Exception):
                  retry_after: int | None = None):
         """Retain a sanitized collector message and classify failure without parsing its text.
 
-        `transient` marks a server error at the source, which may pass by waiting; its
+        `transient` marks a server error or a request timeout (408) at the source, which may pass by waiting; its
         category is unchanged, so optional reads and diagnostics treat it as before.
         `retry_after` is the wait in seconds a rate-limited source asked for, if it said.
         """
@@ -352,6 +359,77 @@ def _retry_after(value: str | None) -> int | None:
     return min(int(seconds), MAX_RETRY_AFTER) if RETRY_AFTER_SECONDS.fullmatch(seconds) else None
 
 
+@dataclass(frozen=True)
+class Pace:
+    """A request limit an integration declares for one destination.
+
+    At most `requests` are sent in any `seconds`. Every reader given a pace with
+    the same `key` shares one count, whatever it is reading for. The count lives
+    in this process: two copies of Nyctr each keep their own.
+    """
+    key: str
+    requests: int
+    seconds: float = 60.0
+
+
+@dataclass
+class _Patience:
+    """How long the work in this context may still wait for a turn, and who to tell when it waits."""
+    left: float
+    waited: Callable[[float], None] | None = None
+
+
+# When each paced request was answered, by pace key. A request still in flight holds infinity.
+_turns: dict[str, list[list[float]]] = {}
+_patience: ContextVar[_Patience | None] = ContextVar("nyctr_pace_patience", default=None)
+monotonic = time.monotonic
+pause = asyncio.sleep
+
+
+@contextmanager
+def patience(seconds: float | None = None, waited: Callable[[float], None] | None = None):
+    """Bound the total time requests in this context may wait for a turn at a paced source.
+
+    Without `seconds` the bound already in force is kept, or `LONGEST_WAIT`.
+    `waited` is called with each wait just before it starts, so a caller that
+    limits reading time can leave waiting out of it.
+    """
+    outer = _patience.get()
+    token = _patience.set(_Patience(
+        seconds if seconds is not None else outer.left if outer else LONGEST_WAIT, waited))
+    try:
+        yield
+    finally:
+        _patience.reset(token)
+
+
+async def _take_turn(pace: Pace) -> list[float]:
+    """Wait until one more request fits the declared limit, and claim its place.
+
+    A wait longer than this context may still spend is not started: the request
+    fails as a rate limit carrying that wait, so a retry comes back when it fits.
+    """
+    turns = _turns.setdefault(pace.key, [])
+    while True:
+        now = monotonic()
+        turns[:] = [turn for turn in turns if now - turn[0] < pace.seconds]
+        if len(turns) < pace.requests:
+            turn = [math.inf]
+            turns.append(turn)
+            return turn
+        # Only a limit smaller than the requests in flight leaves nothing answered to wait for.
+        # The floor keeps a wait that rounding made too short from being repeated without end.
+        wait = max(min(min(turn[0] for turn in turns) + pace.seconds - now, pace.seconds), 0.001)
+        allowed = _patience.get() or _Patience(LONGEST_WAIT)
+        if wait > allowed.left:
+            raise IntegrationError("The source's request limit is in use. Try again shortly.",
+                                   category="rate_limit", retry_after=math.ceil(wait))
+        allowed.left -= wait
+        if allowed.waited:
+            allowed.waited(wait)
+        await pause(wait)
+
+
 def must_stop(error: IntegrationError) -> bool:
     """Say whether an error on an optional read must fail the collection instead of becoming a gap.
 
@@ -365,10 +443,14 @@ def must_stop(error: IntegrationError) -> bool:
 class ReadClient:
     """GET-only, same-origin requests; external pagination URLs are never followed."""
 
-    def __init__(self, client: httpx.AsyncClient, base_url: str):
-        """Bind a validated provider origin to per-collection request and record budgets."""
+    def __init__(self, client: httpx.AsyncClient, base_url: str, pace: Pace | None = None):
+        """Bind a validated provider origin to per-collection request and record budgets.
+
+        With `pace`, each request first waits for its turn under that declared limit.
+        """
         self.client = client
         self.base_url = base_url.rstrip("/")
+        self.pace = pace
         self.requests = 0
         self.records = 0
 
@@ -401,6 +483,7 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
     if self.requests > MAX_REQUESTS:
         raise BudgetExceeded("Collection exceeded its request budget; narrow the site scope.")
     _fault(None)
+    turn = await _take_turn(self.pace) if self.pace else None
     try:
         async with self.client.stream(method, self.base_url + path, params=params, json=body) as response:
             if (evidence := _probe_evidence.get()) is not None:
@@ -415,9 +498,10 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
                 raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit",
                                        retry_after=_retry_after(response.headers.get("retry-after")))
             if response.status_code >= 400:
-                _fault("source_error" if response.status_code >= 500 else None)
-                raise IntegrationError(f"Provider returned HTTP {response.status_code}.",
-                                       transient=response.status_code >= 500)
+                # A 408 is the source giving up on a read it could not finish: like a 5xx, it may pass.
+                passing = response.status_code >= 500 or response.status_code == 408
+                _fault("source_error" if passing else None)
+                raise IntegrationError(f"Provider returned HTTP {response.status_code}.", transient=passing)
             chunks: list[bytes] = []
             size = 0
             async for chunk in response.aiter_bytes():
@@ -432,6 +516,10 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
                                category=_transport_category(exc)) from None
     except (ValueError, UnicodeError):
         raise IntegrationError("Provider returned invalid JSON.") from None
+    finally:
+        if turn is not None:
+            # Counted from the answer, so the limit holds by the source's clock as well as ours.
+            turn[0] = monotonic()
     if not isinstance(payload, dict):
         raise IntegrationError("Provider response must be a JSON object.")
     if payload.get("errors"):
