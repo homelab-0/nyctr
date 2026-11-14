@@ -55,7 +55,9 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
           <p className="lede">
             {open.length
               ? `${plural(open.length, 'exception')} open. Temporary ones close themselves when their time is up.`
-              : 'Nothing is open. Temporary access appears here while it lasts.'}
+              : active.length
+                ? "Nothing is open on Nyctr's record. What is listed below was not confirmed and may still be open at the source, until Nyctr removes it or, where it cannot tell, a person checks there."
+                : 'Nothing is open. Temporary access appears here while it lasts.'}
           </p>
         </div>
       </header>

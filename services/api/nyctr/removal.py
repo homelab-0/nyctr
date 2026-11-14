@@ -89,7 +89,8 @@ def plan(db, integration: Integration, resources: list[Resource]) -> dict:
     }
     keep = {
         "requests": _count(db, AccessRequest, AccessRequest.integration_id == iid),
-        "exceptions": _count(db, Lease, Lease.integration_id == iid),
+        "exceptions": _count(db, Lease, Lease.integration_id == iid, Lease.status != "unconfirmed",  # Not records.
+                             or_(Lease.ended_reason.is_(None), Lease.ended_reason != "not_confirmed")),
         "passes": _count(db, GuestPass, GuestPass.integration_id == iid) - _count(db, GuestPass,
                                                                                   *_live_read_passes(iid)),
     }

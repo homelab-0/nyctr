@@ -67,10 +67,12 @@ it. One left by a copy that was killed can be taken over after five minutes.
 
 An opening that fails never leaves an entry at the source that nothing on
 record points at. With the claim held and before any add, Nyctr asks the
-source whether the address is already allowed there. If it is, Nyctr adds
-nothing and never removes it. If it is not, the attempt goes on record first:
-a lease with status `unconfirmed`, which is never access and is counted
-nowhere as an open exception. A stored exception replaces the record. If the
+source whether the address is already allowed there, and puts the attempt on
+record with the answer: a lease with status `unconfirmed`, which is never
+access and is counted nowhere as an open exception. An address that was
+already there is never removed, unless the add itself then finds it gone and
+sends its own add: the add's answer wins over the first one, also when the
+add fails afterwards. A stored exception replaces the record. If the
 opening fails after its add may have been sent, or Nyctr is killed, the
 record stays: Nyctr reads the source, removes the entry if it is there and
 checks that it is gone, once before the opening answers and then on every
@@ -80,6 +82,29 @@ told nothing was opened, the source cannot be removed, and a new opening of
 that address first settles it or is refused. A source that offers no such
 read gets a record Nyctr never acts on: it says Nyctr cannot tell whether it
 put the entry there, and an administrator checks and ends it.
+
+An entry Nyctr added has an exception or a record that will remove it, within
+the known limits listed in docs/security-model.md. An opening that comes back
+to find its claim taken over (it stood still for more than five minutes)
+stores nothing, and cannot know what became of its entry meanwhile: its
+record says so, Nyctr never acts on it, and an administrator is asked to
+check at the source and end it. When an exception
+of Nyctr's own ends while another open exception uses the entry, the duty to
+remove it passes to that one, whatever it was recorded as. Nyctr tells its
+own entry from a person's by the add's own read: the entry is Nyctr's if the
+address was absent when Nyctr added it. Where a source cannot say, Nyctr
+removes nothing and asks an administrator to check there.
+
+A decision on a request holds nothing unsaved while a source is called. It
+first takes a claim on the request (the same kind of row, always before the
+entry's claim), and so does the access rule when it opens one by itself. A
+second decision meanwhile is answered at once that the request is being
+approved, and never waits on a database lock. The decision,
+the exception and both claims are stored together; every failure gives the
+claims back and leaves the request waiting with a note. A claim left by a
+killed copy is cleared by the tick after five minutes. Automatic openings for
+one person go one at a time, so the daily limit holds for requests sent at
+the same moment.
 
 Every change at a source (opening or removing an exception, issuing or ending
 a pass, letting a guest on or cutting one off, and each undo) has an overall
