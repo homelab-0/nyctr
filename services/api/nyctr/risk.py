@@ -85,8 +85,8 @@ def _name_factors(domain: str) -> list[dict]:
     if any(label.startswith("xn--") for label in labels):
         factors.append({"label": "The name uses look-alike characters from another alphabet", "points": 20})
     longest = max(labels[:-1] or labels, key=len)
-    digits = sum(c.isdigit() for c in longest)
-    if len(longest) >= 16 and (_entropy(longest) > 3.6 or digits >= len(longest) // 3):
+    if len(longest) >= 16 and (_entropy(longest) > 3.6
+                               or sum(c.isdigit() for c in longest) >= len(longest) // 3):
         factors.append({"label": "Part of the name looks randomly generated", "points": 12})
     if len(labels) >= 6:
         factors.append({"label": "The address is unusually deep", "points": 6})
@@ -94,32 +94,22 @@ def _name_factors(domain: str) -> list[dict]:
 
 
 @lru_cache(maxsize=4096)
-def _explain(source: str | None, text: str) -> tuple[str, int | None, str] | None:
-    """Explain one reason from one kind of source. A source repeats a few reasons over thousands of lookups."""
+def _reasoned(source: str | None, reason: str, codes: tuple[str, ...]) -> tuple[int | None, str, str]:
+    """Score the reasons a source gave, apart from the name: (base score, category, plain-language label).
+
+    A source repeats a few reasons over thousands of lookups, so each distinct set is
+    explained once. A base score of None means unknown, and the label says why.
+    """
     from .integrations import registry
 
     provider = registry.find(source)
-    return (provider.classify if provider and provider.classify else _generic)(text)
-
-
-def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
-           source: str | None = None) -> Assessment:
-    """Score a blocked domain from its block reason and name.
-
-    `source` is the kind of integration that reported the block. Its own
-    classifier explains each reason, by identifier and by name; a source
-    without one falls back to a short generic table. The highest base score
-    sets the category and name-shape factors add to it. No recognised reason,
-    or a source that says it cannot tell, returns an unknown assessment. So
-    does a privacy-list score beside a reason that could not be explained.
-    """
-    codes = [code for code in (reason_codes or []) if isinstance(code, str)]
+    explain = provider.classify if provider and provider.classify else _generic
     names = [part.strip() for part in reason.split(";") if part.strip()]
     best: tuple[int, str, str] | None = None
     cannot_tell: str | None = None
     scored: set[str] = set()
-    for text in codes + names:
-        found = _explain(source, text)
+    for text in [*codes, *names]:
+        found = explain(text)
         if found is None:
             continue
         category, score, label = found
@@ -133,14 +123,29 @@ def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
     # must cover every reason on the block: opening the address lifts all of them at once.
     # Identifiers decide when the source gave any, because names are free-form list names.
     if best is not None and best[1] == PRIVACY and any(text not in scored for text in codes or names):
-        return Assessment(None, UNKNOWN, [{
-            "label": cannot_tell or "A privacy list blocked this, and so did something Nyctr does not "
-                                    "recognise, so it cannot score it", "points": None}])
+        return None, UNKNOWN, (cannot_tell or "A privacy list blocked this, and so did something Nyctr does not "
+                                              "recognise, so it cannot score it")
     if best is None:
-        return Assessment(None, UNKNOWN, [{
-            "label": cannot_tell or "Nyctr does not recognise the reason this was blocked, so it cannot score it",
-            "points": None}])
-    score, category, label = best
+        return None, UNKNOWN, (cannot_tell
+                               or "Nyctr does not recognise the reason this was blocked, so it cannot score it")
+    return best
+
+
+def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
+           source: str | None = None) -> Assessment:
+    """Score a blocked domain from its block reason and name.
+
+    `source` is the kind of integration that reported the block. Its own
+    classifier explains each reason, by identifier and by name; a source
+    without one falls back to a short generic table. The highest base score
+    sets the category and name-shape factors add to it. No recognised reason,
+    or a source that says it cannot tell, returns an unknown assessment. So
+    does a privacy-list score beside a reason that could not be explained.
+    """
+    score, category, label = _reasoned(
+        source, reason, tuple(code for code in (reason_codes or []) if isinstance(code, str)))
+    if score is None:
+        return Assessment(None, UNKNOWN, [{"label": label, "points": None}])
     factors = [{"label": label, "points": score}] + _name_factors(domain)
     total = max(0, min(100, sum(f["points"] for f in factors)))
     return Assessment(total, category, factors)

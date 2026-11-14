@@ -65,8 +65,8 @@ describe('Blocks', () => {
       'Showing the latest 200 of 3,000 stored lookups.',
     );
     // The counts and the note are about all 3,000, though only 200 rows are on the page.
-    expect(screen.getByRole('button', { name: /^All/ }).textContent).toBe('All3000');
-    expect(screen.getByRole('button', { name: /^High/ }).textContent).toBe('High1000');
+    expect(screen.getByRole('button', { name: /^All/ }).textContent).toBe('All3,000');
+    expect(screen.getByRole('button', { name: /^High/ }).textContent).toBe('High1,000');
     expect(document.body.textContent).toContain('None of its 3,000 stored lookups');
     expect(document.body.textContent).toContain('3,000 blocked lookups stored');
     fireEvent.click(screen.getByRole('button', { name: 'Show older' }));
@@ -74,6 +74,11 @@ describe('Blocks', () => {
     expect(drawn()).toBe(400);
     expect(screen.getByRole('status').textContent).toContain('Showing the latest 400 of 3,000');
     fireEvent.click(screen.getByRole('button', { name: /^High/ }));
+    // Until the server answers, the line still describes the rows on screen, not the new filter.
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the latest 400 of 3,000 stored lookups. Reading…',
+    );
+    expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull();
     await waitFor(() =>
       expect(screen.getByRole('status').textContent).toBe(
         'Showing the latest 200 of 1,000 that match, out of 3,000 stored lookups.',

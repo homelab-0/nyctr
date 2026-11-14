@@ -28,6 +28,7 @@ import {
   X,
 } from 'lucide-react';
 import { label } from '../api';
+import { number } from '../lib/counts';
 
 export type IconComponent = ComponentType<
   SVGProps<SVGSVGElement> & { size?: number; strokeWidth?: number }
@@ -411,7 +412,7 @@ export function Seg<T extends string>({
           onClick={() => onChange(option.id)}
         >
           {option.name}
-          {option.count !== undefined && <span className="n">{option.count}</span>}
+          {option.count !== undefined && <span className="n">{number(option.count)}</span>}
         </button>
       ))}
     </div>

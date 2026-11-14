@@ -7,10 +7,12 @@ ever worked out over a lookup the caller may not see.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from functools import lru_cache
 
 from fastapi import HTTPException
-from sqlalchemy import and_, exists, func, or_, select, true
+from sqlalchemy import Text, and_, cast, exists, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from . import risk
@@ -44,6 +46,12 @@ def visible(db: Session, user) -> list:
     return [*fresh, Observation.attribution == "assigned", Observation.device_id.in_(devices), at_the_time]
 
 
+@lru_cache(maxsize=4096)
+def _codes(stored: str | None) -> list | None:
+    """Read one lookup's stored reason identifiers. A source repeats a few sets over thousands of lookups."""
+    return json.loads(stored) if stored else None
+
+
 def _cursor(value: str) -> tuple[datetime, str]:
     """Read the place a previous page ended: the time and identifier of its last lookup."""
     when, _, id_ = value.partition("~")
@@ -73,7 +81,7 @@ def page(db: Session, user, band: str | None = None, text: str = "", before: str
         older = or_(Observation.observed_at < when, and_(Observation.observed_at == when, Observation.id < last))
     # Read as plain rows: every stored lookup the caller may see is looked at once to be counted.
     rows = db.connection().execute(
-        select(Observation.id, Observation.domain, Observation.reason, Observation.reason_codes,
+        select(Observation.id, Observation.domain, Observation.reason, cast(Observation.reason_codes, Text),
                Observation.source, Observation.attribution, Observation.device_name, older.label("older"))
         .where(*allowed).order_by(Observation.observed_at.desc(), Observation.id.desc())).all()
     oldest, newest = db.execute(select(func.min(Observation.observed_at), func.max(Observation.observed_at))
@@ -82,7 +90,7 @@ def page(db: Session, user, band: str | None = None, text: str = "", before: str
     sources: dict[str, dict[str, int]] = {}
     matching, unnamed, wanted, more = 0, 0, [], False
     for id_, domain, reason, codes, source, attribution, device_name, is_older in rows:
-        scored = risk.assess(domain, reason, codes, source).band
+        scored = risk.assess(domain, reason, _codes(codes), source).band
         bands[scored] += 1
         by_source = sources.setdefault(source, {"total": 0, "unnamed": 0})
         by_source["total"] += 1

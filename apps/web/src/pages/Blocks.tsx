@@ -27,7 +27,9 @@ export default function Blocks() {
   const [text, setText] = useState('');
   const [needle, setNeedle] = useState('');
   const [band, setBand] = useState<'all' | RiskBand>('all');
-  const [list, setList] = useState<BlockList | null>(null);
+  // The answer on screen and the filter it answers, which is not the one being asked for
+  // while a new answer is on its way.
+  const [list, setList] = useState<(BlockList & { asked: string }) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [older, setOlder] = useState<'idle' | 'loading' | 'failed'>('idle');
   const [attempt, setAttempt] = useState(0);
@@ -51,7 +53,7 @@ export default function Blocks() {
     api<BlockList>(`/blocks${query && `?${query}`}`, { signal: controller.signal })
       .then((answer) => {
         if (controller.signal.aborted) return;
-        setList(answer);
+        setList({ ...answer, asked: query });
         setError(null);
       })
       .catch((err: Error) => {
@@ -69,7 +71,7 @@ export default function Blocks() {
       const answer = await api<BlockList>(`/blocks?${asked}`);
       // A filter chosen while this was on its way has its own first page; drop this one.
       if (current.current !== query) return;
-      setList({ ...answer, rows: [...list.rows, ...answer.rows] });
+      setList({ ...answer, asked: query, rows: [...list.rows, ...answer.rows] });
       setOlder('idle');
     } catch {
       if (current.current === query) setOlder('failed');
@@ -92,7 +94,9 @@ export default function Blocks() {
   );
   const stored = list?.total || 0;
   const rows = list?.rows || [];
-  const filtered = band !== 'all' || !!needle;
+  // What the line under the table says is about the rows drawn, so it follows the answer.
+  const filtered = !!list?.asked;
+  const reading = !!list && list.asked !== query && !error;
   if (error && !list)
     return <ErrorState message={error} retry={() => setAttempt((value) => value + 1)} />;
   if (!list) return <Loading text="Loading blocked lookups…" />;
@@ -263,8 +267,9 @@ export default function Blocks() {
               ? ` that match, out of ${counted(stored, 'stored lookup')}.`
               : ` stored ${list.matching === 1 ? 'lookup' : 'lookups'}.`}
             {older === 'failed' && ' Older lookups could not be read.'}
+            {reading && ' Reading…'}
           </p>
-          {list.next && (
+          {list.next && !reading && (
             <button
               className="button secondary small"
               onClick={showOlder}
