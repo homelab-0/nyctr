@@ -12,6 +12,7 @@ import {
   SourceTag,
   sourceOf,
 } from '../components/ui';
+import { guestState } from '../lib/format';
 import { drawn, type MapView } from '../lib/map-layout';
 import type { Finding, Graph, Resource, Rules } from '../types';
 
@@ -77,7 +78,15 @@ function facts(resource: Resource): [string, string][] {
     ]);
   const guest = a.guest as { authorized?: boolean } | undefined;
   if (guest && typeof guest === 'object')
-    rows.push(['Guest Wi-Fi', guest.authorized ? 'Has access' : 'No access']);
+    rows.push([
+      'Guest Wi-Fi',
+      // The state from the record where the Map was given one; else only what the source reported.
+      resource.guest_state
+        ? guestState(resource.guest_state).text
+        : guest.authorized
+          ? 'Has access'
+          : 'No access',
+    ]);
   return rows;
 }
 

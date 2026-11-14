@@ -9,6 +9,7 @@ import {
   type MapNode,
   type MapView,
 } from '../lib/map-layout';
+import { guestState } from '../lib/format';
 import type { Graph, Resource } from '../types';
 import { SourceTag, kindIcon, sourceOf, sourcesLearned } from './ui';
 
@@ -29,9 +30,17 @@ const KIND: Record<string, string> = {
   switch: 'Switch',
   network: 'Network',
 };
-/** A device a guest sign-in was taken away from: shown as cut off wherever it appears. */
-const cutOff = (resource?: Resource) =>
-  (resource?.attributes.guest as { authorized?: boolean } | undefined)?.authorized === false;
+/**
+ * What the record says of a guest that is not simply online, and whether to draw it as cut off.
+ * Only a cut-off or lock-out applied at the source is drawn so: a guest waiting on the sign-in
+ * page never had access taken away, and a simulated change took nothing away either.
+ */
+export function guestMark(resource?: Resource) {
+  const guest = resource?.guest_state;
+  if (!guest || guest.state === 'online' || guest.state === 'offline') return null;
+  const off = !guest.simulated && (guest.state === 'cut' || guest.state === 'locked');
+  return { text: guestState(guest).text, off };
+}
 
 /** Makes an SVG group act as a button for the mouse and the keyboard. */
 const act = (run: () => void) => ({
@@ -127,13 +136,14 @@ const Card = memo(function Card({
 }) {
   const Icon = kindIcon(node.kind);
   const source = sourceOf(node.provider);
-  const off = cutOff(node.resource);
+  const mark = guestMark(node.resource);
+  const off = !!mark?.off;
   return (
     <g
       className={`node ${source.tone} ${on ? 'sel' : ''} ${dim ? 'dim' : ''} ${off ? 'off' : ''} ${node.evidence}`}
       transform={`translate(${node.x},${node.y})`}
       aria-pressed={on}
-      aria-label={`${node.name}, ${KIND[node.kind] || node.kind}, from ${from || source.name}${pin ? ', has a finding' : ''}`}
+      aria-label={`${node.name}, ${KIND[node.kind] || node.kind}, from ${from || source.name}${mark ? `, ${mark.text}` : ''}${pin ? ', has a finding' : ''}`}
       {...act(() => onSelect(node.id))}
     >
       <rect className="box" width={node.w} height={node.h} rx={9} />
@@ -145,7 +155,7 @@ const Card = memo(function Card({
       </text>
       <text className="sub" x={37} y={34}>
         {/* Two cards with one name differ only by their source, so that is what is said. */}
-        {off ? 'Cut off' : from ? short(from, 22) : KIND[node.kind] || node.kind}
+        {mark ? mark.text : from ? short(from, 22) : KIND[node.kind] || node.kind}
       </text>
       {(pin || off) && <circle className="pin" cx={node.w - 12} cy={12} r={4.5} />}
     </g>
@@ -200,17 +210,18 @@ const Row = memo(function Row({
   pin: boolean;
   onSelect: (id: string | null) => void;
 }) {
+  const mark = guestMark(item);
   return (
     <button className={`row ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => onSelect(item.id)}>
       <SourceTag provider={item.provider} />
       <span>
         <span className="t">{item.name}</span>
         <span className="d">
-          {cutOff(item) ? 'Cut off' : KIND[item.kind] || item.kind}
+          {mark ? mark.text : KIND[item.kind] || item.kind}
           {pin ? ', has a finding' : ''}
         </span>
       </span>
-      {(pin || cutOff(item)) && <i className="dot red" />}
+      {(pin || mark?.off) && <i className="dot red" />}
     </button>
   );
 });

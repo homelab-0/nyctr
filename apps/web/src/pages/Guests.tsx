@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Ban, Check, Copy, Lock, RotateCcw, Ticket } from 'lucide-react';
 import { post, put, useApi } from '../api';
 import { everyText, useSchedule } from '../lib/schedule';
@@ -14,17 +14,33 @@ import {
   Stepper,
   Switch,
 } from '../components/ui';
-import { ago, bytes, clock, left, plural, someNames, span, useNow } from '../lib/format';
+import {
+  ago,
+  bytes,
+  clock,
+  guestAttempt,
+  guestState,
+  left,
+  plural,
+  someNames,
+  span,
+  useNow,
+} from '../lib/format';
+import { bringIntoView } from '../lib/links';
 import { useAuth } from '../auth';
 import type { GuestDevice, GuestOverview, GuestPass, GuestRule } from '../types';
 
-const STATE: Record<GuestDevice['state'], { text: string; tone: string }> = {
-  online: { text: 'Online', tone: 'green' },
-  waiting: { text: 'On the sign-in page', tone: 'yellow' },
-  cut: { text: 'Cut off', tone: 'red' },
-  locked: { text: 'Locked out', tone: 'red' },
-  offline: { text: 'Gone', tone: '' },
-};
+/** A device's state as the record has it, with any change that did not take effect said under it. */
+function State({ device }: { device: GuestDevice }) {
+  const state = guestState(device);
+  const attempt = guestAttempt(device);
+  return (
+    <>
+      <span className={`tag ${state.tone}`}>{state.text}</span>
+      {attempt && <div className="muted tiny">{attempt}</div>}
+    </>
+  );
+}
 const LENGTHS = [60, 240, 480, 1440, 4320, 10080];
 
 /** Copies a pass code, falling back silently where the clipboard is unavailable. */
@@ -175,6 +191,12 @@ export default function Guests({
   useEffect(() => {
     if (params.get('id')) setSelected(params.get('id'));
   }, [params]);
+  // On a narrow screen the device's panel sits far below the list: bring it into view when one is chosen.
+  const panel = useRef<HTMLDivElement>(null);
+  const shown = data?.devices.some((item) => item.id === selected) ? selected : null;
+  useEffect(() => {
+    if (shown) bringIntoView(panel.current);
+  }, [shown]);
 
   /** Runs one change and then shows the server's view; errors are shown, never swallowed. */
   const run = async (action: () => Promise<unknown>) => {
@@ -323,9 +345,7 @@ export default function Guests({
                           </button>
                         </th>
                         <td>
-                          <span className={`tag ${STATE[item.state].tone}`}>
-                            {STATE[item.state].text}
-                          </span>
+                          <State device={item} />
                         </td>
                         <td>
                           <Score value={item.risk.score} />
@@ -466,13 +486,13 @@ export default function Guests({
             )}
           </Panel>
         </div>
-        <div className="stack">
+        <div className="stack into-view" ref={panel}>
           {device ? (
             <Panel
               title={device.name}
               action={
-                <span className={`tag ${STATE[device.state].tone}`}>
-                  {STATE[device.state].text}
+                <span>
+                  <State device={device} />
                 </span>
               }
             >

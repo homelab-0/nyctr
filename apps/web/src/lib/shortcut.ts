@@ -16,6 +16,15 @@ export function shortcutEnabled(): boolean {
   }
 }
 
+/** True on a screen worked by touch alone, where there is no key to press. False when it cannot tell. */
+export function touchOnly(): boolean {
+  try {
+    return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  } catch {
+    return false;
+  }
+}
+
 /** Remembers the choice for this browser. A failed write only means it is not remembered. */
 export function rememberShortcut(enabled: boolean) {
   try {

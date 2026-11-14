@@ -38,14 +38,15 @@ import Requests from './pages/Requests';
 import Setup from './pages/Setup';
 import SignIn from './pages/SignIn';
 import Portal from './pages/member/Portal';
-import { isAssistantKey, rememberShortcut, shortcutEnabled } from './lib/shortcut';
+import { isAssistantKey, rememberShortcut, shortcutEnabled, touchOnly } from './lib/shortcut';
 import { mayChange } from './lib/format';
 
 interface NavItem {
   id: string;
   name: string;
   icon: IconComponent;
-  count?: number;
+  /** A number, or "?" when the list behind it could not be read. */
+  count?: number | string;
 }
 interface NavGroup {
   title: string;
@@ -90,11 +91,15 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
   const [navOpen, setNavOpen] = useState(false);
   const [assistant, setAssistant] = useState(false);
   const [shortcut, setShortcut] = useState(shortcutEnabled);
+  // A screen worked by touch alone has no A key to press, so the key is not offered there.
+  const [keys] = useState(() => !touchOnly());
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const sidebar = useRef<HTMLElement>(null);
-  const items = attention.data || [];
-  const count = (kind: string) => items.filter((item) => item.kind === kind).length || undefined;
+  // A list that could not be read is not an empty one: nothing is shown from it and each count says so.
+  const items = attention.error ? [] : attention.data || [];
+  const count = (kind: string) =>
+    attention.error ? '?' : items.filter((item) => item.kind === kind).length || undefined;
   const navigation: NavGroup[] = [
     {
       title: 'Network',
@@ -212,7 +217,14 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
                 >
                   <item.icon size={16} strokeWidth={1.8} />
                   <span>{item.name}</span>
-                  {item.count !== undefined && <span className="count">{item.count}</span>}
+                  {item.count !== undefined && (
+                    <span
+                      className="count"
+                      title={item.count === '?' ? 'Could not be counted' : undefined}
+                    >
+                      {item.count}
+                    </span>
+                  )}
                 </a>
               ))}
             </section>
@@ -260,7 +272,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             onClick={() => setAssistant((value) => !value)}
             aria-pressed={assistant}
           >
-            <Sparkles size={15} /> Ask Nyctr {shortcut && <kbd>A</kbd>}
+            <Sparkles size={15} /> Ask Nyctr {shortcut && keys && <kbd>A</kbd>}
           </button>
         </header>
         <main id="main-content" className="content" tabIndex={-1}>
@@ -269,6 +281,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             params={params}
             attention={items}
             loading={attention.loading}
+            error={attention.error}
             refresh={refresh}
             sources={rules.data?.sources}
           />
@@ -279,10 +292,14 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
         onClose={() => setAssistant(false)}
         attention={items}
         shortcut={shortcut}
-        onShortcut={(value) => {
-          rememberShortcut(value);
-          setShortcut(value);
-        }}
+        onShortcut={
+          keys
+            ? (value) => {
+                rememberShortcut(value);
+                setShortcut(value);
+              }
+            : undefined
+        }
       />
     </div>
   );
@@ -294,6 +311,7 @@ function Screen({
   params,
   attention,
   loading,
+  error,
   refresh,
   sources,
 }: {
@@ -301,12 +319,13 @@ function Screen({
   params: URLSearchParams;
   attention: AttentionItem[];
   loading: boolean;
+  error: string | null;
   refresh: () => void;
   sources?: Rules['sources'];
 }) {
   switch (page) {
     case 'briefing':
-      return <Briefing attention={attention} loading={loading} />;
+      return <Briefing attention={attention} loading={loading} error={error} retry={refresh} />;
     case 'map':
       return <MapPage params={params} sources={sources} />;
     case 'inventory':

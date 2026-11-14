@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 import { post, useApi } from '../api';
 import {
@@ -13,8 +13,9 @@ import {
   Score,
   Seg,
 } from '../components/ui';
-import { ago, span, useNow } from '../lib/format';
-import type { AccessRequest, Person, Rules } from '../types';
+import { ago, atSource, span, useNow, writtenNote } from '../lib/format';
+import { bringIntoView } from '../lib/links';
+import type { AccessRequest, Lease, Person, Rules } from '../types';
 
 const STATUS: Record<string, { text: string; tone: string }> = {
   pending: { text: 'Waiting', tone: 'yellow' },
@@ -38,6 +39,7 @@ export default function Requests({
   const requests = useApi<AccessRequest[]>('/requests');
   const people = useApi<Person[]>('/users');
   const rules = useApi<Rules>('/rules');
+  const leases = useApi<Lease[]>('/leases');
   const [tab, setTab] = useState<'waiting' | 'decided'>('waiting');
   const [selected, setSelected] = useState<string | null>(params.get('id'));
   const [note, setNote] = useState('');
@@ -66,6 +68,12 @@ export default function Requests({
     }
   }, [requests.data, params]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // On a narrow screen the request's panel sits under the list: bring it into view when one is chosen.
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (selected && row?.id === selected) bringIntoView(panel.current);
+  }, [selected, row?.id]);
+
   /** Records the decision. Approval opens a lease; the server reports what really happened. */
   const decide = async (decision: 'approved' | 'denied') => {
     if (!row) return;
@@ -74,10 +82,12 @@ export default function Requests({
     try {
       await post(`/requests/${row.id}/review`, {
         decision,
-        note: note.trim() || (decision === 'approved' ? 'Approved' : 'Not approved'),
+        // A note left empty stays empty: the decision is not repeated as if someone had written it.
+        note: note.trim(),
         ...(decision === 'approved' ? { minutes } : {}),
       });
       requests.reload();
+      leases.reload();
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -89,6 +99,22 @@ export default function Requests({
   if (requests.error) return <ErrorState message={requests.error} retry={requests.reload} />;
   // The connected source this request's block came from, with whether Nyctr may open addresses there.
   const source = rules.data?.sources.find((item) => item.id === row?.integration_id);
+  // What a decided request did at its source, from the exception's own record: the decision alone
+  // never says whether anything was opened.
+  const lease = (leases.data || []).find((item) => item.request_id === row?.id);
+  const happened =
+    !row || row.status === 'pending'
+      ? ''
+      : lease
+        ? `${atSource(lease)}${lease.status === 'ended' ? ' It has ended since.' : ''}`
+        : leases.error
+          ? 'Nyctr could not read what happened at the source.'
+          : leases.loading
+            ? ''
+            : row.status === 'denied' || row.status === 'reviewed'
+              ? 'Nothing was changed at the source.'
+              : 'Nyctr has no record of a change at the source.';
+  const written = writtenNote(row?.review_note);
   return (
     <div className="page">
       <header className="page-head">
@@ -147,100 +173,104 @@ export default function Requests({
             </div>
           </Panel>
           {row && (
-            <Panel title={<span className="dom">{row.domain}</span>}>
-              <div className="stack">
-                <div className="bar">
-                  <Score value={row.risk_score} big />
-                  <span className={`tag ${STATUS[row.status]?.tone || ''}`}>
-                    {STATUS[row.status]?.text || row.status}
-                  </span>
-                </div>
-                <RiskScale
-                  value={row.risk_score}
-                  limit={rules.data?.access.enabled ? rules.data.access.max_score : undefined}
-                />
-                {row.risk_factors && <Factors items={row.risk_factors} />}
-                {row.decision_note && <p className="aside">{row.decision_note}</p>}
-                <KV
-                  items={[
-                    ['Who', names.get(row.requester_id) || 'Unknown'],
-                    ['Device', row.device_name],
-                    ...(row.source_name
-                      ? ([['Source', row.source_name]] as [string, string][])
-                      : []),
-                    ['Their reason', row.reason],
-                    ['Asked for', span(row.duration_minutes)],
-                    ...(row.review_note
-                      ? ([['Your note', row.review_note]] as [string, string][])
-                      : []),
-                  ]}
-                />
-                {row.status === 'pending' && (
-                  <>
-                    <div className="note yellow">
-                      <div>
-                        <b>This opens it for everyone on the DNS profile.</b>
-                        <p>
-                          A DNS exception applies to everyone using{' '}
-                          {source?.name || 'the DNS source'}, not to one person or device.
-                        </p>
-                      </div>
-                    </div>
-                    {(source?.write_mode === 'disabled' || source?.write_mode === 'none') && (
-                      <div className="note">
+            <div className="into-view" ref={panel}>
+              <Panel title={<span className="dom">{row.domain}</span>}>
+                <div className="stack">
+                  <div className="bar">
+                    <Score value={row.risk_score} big />
+                    <span className={`tag ${STATUS[row.status]?.tone || ''}`}>
+                      {STATUS[row.status]?.text || row.status}
+                    </span>
+                  </div>
+                  <RiskScale
+                    value={row.risk_score}
+                    limit={rules.data?.access.enabled ? rules.data.access.max_score : undefined}
+                  />
+                  {row.risk_factors && <Factors items={row.risk_factors} />}
+                  {row.decision_note && <p className="aside">{row.decision_note}</p>}
+                  <KV
+                    items={[
+                      ['Who', names.get(row.requester_id) || 'Unknown'],
+                      ['Device', row.device_name],
+                      ...(row.source_name
+                        ? ([['Source', row.source_name]] as [string, string][])
+                        : []),
+                      ['Their reason', row.reason],
+                      ['Asked for', span(row.duration_minutes)],
+                      ...(written ? ([['Your note', written]] as [string, string][]) : []),
+                      ...(happened ? ([['At the source', happened]] as [string, string][]) : []),
+                    ]}
+                  />
+                  {row.status === 'pending' && (
+                    <>
+                      <div className="note yellow">
                         <div>
-                          <b>
-                            {source.write_mode === 'none'
-                              ? `Nyctr cannot open addresses at ${source.name}.`
-                              : `Nyctr is read-only for ${source.name}.`}
-                          </b>
+                          <b>This opens it for everyone on the DNS profile.</b>
                           <p>
-                            Approving records your decision and the time window. You open the
-                            address at the source yourself.
+                            A DNS exception applies to everyone using{' '}
+                            {source?.name || 'the DNS source'}, not to one person or device.
                           </p>
                         </div>
                       </div>
-                    )}
-                    <label className="field">
-                      <span>Note for the record (optional)</span>
-                      <textarea
-                        rows={2}
-                        value={note}
-                        maxLength={500}
-                        onChange={(e) => setNote(e.target.value)}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Open for</span>
-                      <select value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
-                        {[15, 30, 60, 120, 240].map((value) => (
-                          <option key={value} value={value}>
-                            {span(value)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <InlineError message={error} />
-                    <div className="button-row">
-                      <button
-                        className="button primary"
-                        disabled={pending}
-                        onClick={() => void decide('approved')}
-                      >
-                        <Check size={16} /> Approve
-                      </button>
-                      <button
-                        className="button danger"
-                        disabled={pending}
-                        onClick={() => void decide('denied')}
-                      >
-                        <X size={16} /> Say no
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            </Panel>
+                      {(source?.write_mode === 'disabled' || source?.write_mode === 'none') && (
+                        <div className="note">
+                          <div>
+                            <b>
+                              {source.write_mode === 'none'
+                                ? `Nyctr cannot open addresses at ${source.name}.`
+                                : `Nyctr is read-only for ${source.name}.`}
+                            </b>
+                            <p>
+                              Approving records your decision and the time window. You open the
+                              address at the source yourself.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      <label className="field">
+                        <span>Note for the record (optional)</span>
+                        <textarea
+                          rows={2}
+                          value={note}
+                          maxLength={500}
+                          onChange={(e) => setNote(e.target.value)}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Open for</span>
+                        <select
+                          value={minutes}
+                          onChange={(e) => setMinutes(Number(e.target.value))}
+                        >
+                          {[15, 30, 60, 120, 240].map((value) => (
+                            <option key={value} value={value}>
+                              {span(value)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <InlineError message={error} />
+                      <div className="button-row">
+                        <button
+                          className="button primary"
+                          disabled={pending}
+                          onClick={() => void decide('approved')}
+                        >
+                          <Check size={16} /> Approve
+                        </button>
+                        <button
+                          className="button danger"
+                          disabled={pending}
+                          onClick={() => void decide('denied')}
+                        >
+                          <X size={16} /> Say no
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </Panel>
+            </div>
           )}
         </div>
       )}
