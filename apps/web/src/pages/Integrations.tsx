@@ -620,7 +620,14 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>
                 )}
-                <InlineError message={refused?.id === integration.id ? refused.message : null} />
+                {/* A collection that failed is stored and answered in the same words: say them once. */}
+                <InlineError
+                  message={
+                    refused?.id === integration.id && refused.message !== integration.last_error
+                      ? refused.message
+                      : null
+                  }
+                />
                 <div className="integration-footer">
                   <span>
                     <LockKeyhole size={12} />

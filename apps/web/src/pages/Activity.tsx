@@ -12,7 +12,7 @@ const WORDS: Record<string, string> = {
   'auth.sent_to_portal': 'Was sent to the member portal to sign in',
   'access.requested': 'Asked for access',
   'access.opened': 'Access opened',
-  'access.open_undone': 'Took back access opened while its source was being removed or changed',
+  'access.open_undone': 'Access opened while its source was being removed or changed',
   'access.closed': 'Access closed',
   'access.close_failed': 'Access could not be closed',
   'access.approved': 'Approved a request',
@@ -22,8 +22,7 @@ const WORDS: Record<string, string> = {
   'rule.guest_changed': 'Changed the guest cut-off rule',
   'guest.pass_issued': 'Issued a guest pass',
   'guest.pass_ended': 'Ended a guest pass',
-  'guest.pass_undone':
-    'Took back a guest pass issued while its source was being removed or changed',
+  'guest.pass_undone': 'A guest pass issued while its source was being removed or changed',
   'guest.admit': 'Let a waiting guest on',
   'guest.cut': 'Cut a guest off',
   'guest.restore': 'Let a guest back on',
@@ -68,19 +67,56 @@ function what(event: AuditEvent, sources: Map<string, string> | null) {
   );
 }
 
-/** Reasons the server records as a code; any other reason is already a sentence. */
+/**
+ * Reasons the server records as a code; any other reason is a sentence a person or a rule wrote.
+ * A server test checks every code has a sentence here.
+ */
 const REASONS: Record<string, string> = {
   expired: 'its time ran out',
   revoked: 'ended early by a person',
   removed_by_hand: 'removed at the source by hand, so nothing was sent',
   schedule_off: 'scheduled collection was turned off',
+  secret: 'its secret is no longer set on the server',
+  secret_ref: 'the name of its secret on the server is not a valid one',
+  missing: 'the source is no longer there',
 };
-const EXECUTIONS: Record<string, string> = {
-  simulated: 'simulated',
-  applied: 'changed at the source',
-  not_applied: 'nothing changed at the source',
-  failed: 'the source refused',
+
+/**
+ * What an applied change left at the source, said per action and true however it got there: an
+ * address already allowed, or a guest already without access, is recorded as applied with nothing
+ * sent. An action not listed says nothing, so a change is never claimed that the record cannot show.
+ */
+const APPLIED: Record<string, string> = {
+  'access.opened': 'allowed at the source',
+  'access.approved': 'allowed at the source',
+  'access.open_undone': 'taken back out at the source',
+  // The record keeps how the exception was opened, not whether closing it removed an entry.
+  'access.closed': 'this record does not say what was sent to the source',
+  'guest.cut': 'without access at the source',
+  'guest.lock': 'without access at the source',
+  'guest.restore': 'let on at the source',
+  'guest.admit': 'let on at the source',
+  'guest.pass_issued': 'issued at the source',
+  'guest.pass_ended': 'ended at the source',
+  'guest.pass_undone': 'ended again at the source',
 };
+const LEFT_ALONE = 'already allowed at the source, left as it was';
+/** A failure is any error: the source may have refused, not answered, or never been asked. */
+const FAILED: Record<string, string> = {
+  'access.open_undone': 'could not be taken back out, so remove it at the source by hand',
+  'guest.pass_undone': 'could not be ended, so end it at the source by hand',
+};
+
+/** What happened at the source, kept apart from the decision; nothing reads as changed unless it was. */
+function outcome(event: AuditEvent) {
+  const d = event.details || {};
+  if (d.execution === 'simulated') return 'simulated, nothing was sent to the source';
+  if (d.execution === 'failed') return FAILED[event.action] || 'did not go through';
+  if (d.execution === 'not_applied')
+    return event.action === 'access.open_undone' ? LEFT_ALONE : 'nothing changed at the source';
+  if (d.execution !== 'applied') return undefined;
+  return event.action === 'access.opened' && d.owned === false ? LEFT_ALONE : APPLIED[event.action];
+}
 
 /** Renders the few audit details worth reading, never raw provider text. */
 function summary(event: AuditEvent) {
@@ -88,8 +124,8 @@ function summary(event: AuditEvent) {
   const parts: string[] = [];
   if (typeof d.domain === 'string') parts.push(d.domain);
   // An entry ended by hand was changed by a person at the source, not by Nyctr: the reason says so.
-  if (typeof d.execution === 'string' && EXECUTIONS[d.execution] && d.reason !== 'removed_by_hand')
-    parts.push(EXECUTIONS[d.execution]);
+  const happened = d.reason === 'removed_by_hand' ? undefined : outcome(event);
+  if (happened) parts.push(happened);
   if (d.by_rule === true || d.decided_by === 'rule') parts.push('by a written rule');
   if (typeof d.minutes === 'number') parts.push(`${d.minutes} min`);
   if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
@@ -144,8 +180,8 @@ export default function Activity() {
         <div>
           <h1 className="display d2">Activity</h1>
           <p className="lede">
-            The last 500 recorded actions. Rows with no person were done by Nyctr under a written
-            rule.
+            The last 500 recorded actions. Rows marked Nyctr have no signed-in person behind them: a
+            written rule, the collection schedule, or a sign-in that failed.
           </p>
         </div>
         <SearchInput

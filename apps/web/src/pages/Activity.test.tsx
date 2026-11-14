@@ -99,12 +99,12 @@ describe('Activity rows the reviews found unworded', () => {
     expect(await row('Changed the collection schedule')).toContain('now every 30 minutes');
     expect(await row('Edited the source Lab hypervisor')).toContain('2 fields changed');
     expect(await row('Removed the source Old resolver')).toBeTruthy();
+    expect(await row('Access opened while its source was being removed or changed')).toContain(
+      'docs.example · taken back out at the source',
+    );
     expect(
-      await row('Took back access opened while its source was being removed or changed'),
-    ).toContain('docs.example · changed at the source');
-    expect(
-      await row('Took back a guest pass issued while its source was being removed or changed'),
-    ).toContain('the source refused');
+      await row('A guest pass issued while its source was being removed or changed'),
+    ).toContain('could not be ended, so end it at the source by hand');
     expect(await row('Access closed')).toContain(
       'files.example · removed at the source by hand, so nothing was sent',
     );
@@ -113,6 +113,85 @@ describe('Activity rows the reviews found unworded', () => {
     expect(await row('Started a collection when the server was asked to')).toBeTruthy();
     expect(await row('Something this version of the page cannot describe')).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/[a-z]+\.[a-z]+_|[a-z]_[a-z]|lookback/);
+  });
+});
+
+describe('Activity rows about a change at a source', () => {
+  it('says no more than the record knows, and never a change that was not applied', async () => {
+    const closed = { domain: 'files.example', reason: 'revoked' };
+    mockApi({
+      'GET /audit': [
+        event('a', 'access.opened', { domain: 'new.example', execution: 'applied', owned: true }),
+        // Already allowed at the source before the exception: recorded as applied, nothing added.
+        event('b', 'access.opened', { domain: 'was.example', execution: 'applied', owned: false }),
+        event('c', 'access.opened', { domain: 'demo.example', execution: 'simulated' }),
+        event('d', 'access.opened', { domain: 'read.example', execution: 'not_applied' }),
+        // A close keeps how the exception was opened; it may have sent nothing.
+        event('e', 'access.closed', { ...closed, execution: 'applied' }),
+        event('f', 'access.closed', { ...closed, domain: 'sim.example', execution: 'simulated' }),
+        event('g', 'access.open_undone', { domain: 'stuck.example', execution: 'failed' }),
+        event('h', 'access.open_undone', { domain: 'left.example', execution: 'not_applied' }),
+        // Recorded as applied when the guest was already without access and nothing was sent.
+        event('i', 'guest.cut', { execution: 'applied', reason: 'Asked to leave' }),
+        // Any error: the secret not set, no site found, a timeout. The source may never be asked.
+        event('j', 'guest.lock', { execution: 'failed' }),
+        event('k', 'guest.pass_issued', { execution: 'simulated', minutes: 60 }),
+        event('l', 'guest.pass_ended', { execution: 'applied' }),
+        event('m', 'access.approved', { execution: 'applied' }),
+        event('n', 'access.denied', { execution: 'not_performed' }),
+        event('o', 'made.up_later', { execution: 'applied' }),
+        ...['secret', 'secret_ref', 'missing'].map((reason) =>
+          event(reason, 'integration.retries_stopped', { name: `Source ${reason}`, reason }),
+        ),
+      ],
+      'GET /users': [],
+      'GET /integrations': [],
+    });
+    render(<Activity />);
+    await screen.findAllByText('Access opened');
+    const detail = (text: string) =>
+      screen.getByText(text, { selector: 'th' }).closest('tr')!.lastElementChild!.textContent;
+    const about = (domain: string) =>
+      screen.getByText(new RegExp(`^${domain.replace('.', '\\.')} · `)).textContent;
+    expect(about('new.example')).toBe('new.example · allowed at the source');
+    expect(about('was.example')).toBe(
+      'was.example · already allowed at the source, left as it was',
+    );
+    expect(about('demo.example')).toBe('demo.example · simulated, nothing was sent to the source');
+    expect(about('read.example')).toBe('read.example · nothing changed at the source');
+    expect(about('files.example')).toBe(
+      'files.example · this record does not say what was sent to the source · ended early by a person',
+    );
+    expect(about('sim.example')).toBe(
+      'sim.example · simulated, nothing was sent to the source · ended early by a person',
+    );
+    expect(about('stuck.example')).toBe(
+      'stuck.example · could not be taken back out, so remove it at the source by hand',
+    );
+    expect(about('left.example')).toBe(
+      'left.example · already allowed at the source, left as it was',
+    );
+    expect(detail('Cut a guest off')).toBe('without access at the source · Asked to leave');
+    expect(detail('Locked a guest out')).toBe('did not go through');
+    expect(detail('Issued a guest pass')).toBe(
+      'simulated, nothing was sent to the source · 60 min',
+    );
+    expect(detail('Ended a guest pass')).toBe('ended at the source');
+    expect(detail('Approved a request')).toBe('allowed at the source');
+    expect(detail('Said no to a request')).toBe('');
+    // An action this page does not know claims nothing about the source.
+    expect(detail('Something this version of the page cannot describe')).toBe('');
+    expect(detail('Stopped retrying Source secret and showed it as failed')).toBe(
+      'its secret is no longer set on the server',
+    );
+    expect(detail('Stopped retrying Source secret_ref and showed it as failed')).toBe(
+      'the name of its secret on the server is not a valid one',
+    );
+    expect(detail('Stopped retrying Source missing and showed it as failed')).toBe(
+      'the source is no longer there',
+    );
+    expect(document.body.textContent).not.toMatch(/changed at the source ·|the source refused/);
+    expect(document.body.textContent).toContain('a sign-in that failed');
   });
 });
 

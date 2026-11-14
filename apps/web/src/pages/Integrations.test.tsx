@@ -624,6 +624,25 @@ describe('integration connection diagnostics', () => {
     expect(document.body.textContent).not.toContain('Request failed');
   });
 
+  /** A failed collection is stored on the source and answered in the same words: the card says them once. */
+  it('says a failed collection once, not again under the stored error', async () => {
+    const detail = 'The source returned an answer Nyctr could not read.';
+    const { interaction } = await openIntegrations({
+      source: { ...connection, status: 'error', last_error: detail },
+      collect: async () => jsonResponse({ detail }, 502),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Collect snapshot' }));
+    await vi.waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Collect snapshot' })).toHaveProperty(
+        'disabled',
+        false,
+      ),
+    );
+    const card = screen.getByRole('heading', { name: connection.name }).closest('.card')!;
+    expect(within(card as HTMLElement).getAllByText(detail)).toHaveLength(1);
+    expect(within(card as HTMLElement).queryByRole('alert')).toBeNull();
+  });
+
   /** The confirmation must not read as a complete collection when the source held more than was read. */
   it('says so right after collecting when only the most recent blocked lookups were read', async () => {
     const { interaction } = await openIntegrations({ partial: true });

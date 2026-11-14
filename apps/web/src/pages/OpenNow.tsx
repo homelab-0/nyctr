@@ -1,8 +1,18 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { post, useApi } from '../api';
 import { Empty, ErrorState, InlineError, Loading, Panel, Score } from '../components/ui';
 import { ago, executionText, left, plural, useNow } from '../lib/format';
 import type { Lease, Suggestion } from '../types';
+
+/** An entry that was at the source before Nyctr's exception: Nyctr added nothing and removes nothing. */
+const UNOWNED = 'Already allowed there before this exception. Nyctr left the entry as it was.';
+/** How a closed exception ended, as the server recorded it. */
+const ENDED: Record<string, string> = {
+  expired: 'Ran out',
+  revoked: 'Ended early',
+  removed_by_hand: 'Marked as removed by hand',
+  source_removed: 'Closed when its source was removed',
+};
 
 /**
  * Every exception Nyctr is responsible for: what is open, who decided, what happened at the
@@ -51,7 +61,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
         {active.length === 0 ? (
           <p className="pad muted">No exceptions are open.</p>
         ) : (
-          <div className="tblwrap">
+          <div className="tblwrap refusable">
             <table className="tbl">
               <thead>
                 <tr>
@@ -75,56 +85,70 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   // The server ends by hand only an entry Nyctr itself added at a source since removed.
                   const byHand =
                     Boolean(lease.source_removed) && lease.execution === 'applied' && lease.owned;
+                  const refusal = error?.key === lease.id ? error.message : null;
                   return (
-                    <tr key={lease.id}>
-                      <th className="dom">{lease.domain}</th>
-                      <td>
-                        <Score value={lease.risk_score} />
-                      </td>
-                      <td>
-                        {lease.requester_name || 'Everyone'}
-                        <div className="muted tiny">{lease.scope}</div>
-                      </td>
-                      <td>{lease.decided_by_name || 'An administrator'}</td>
-                      <td style={{ minWidth: 130 }}>
-                        {lease.kind === 'permanent' ? (
-                          'Never'
-                        ) : (
-                          <>
-                            {left(lease.expires_at, now) || 'Closing'}
-                            <div className="timebar" style={{ marginTop: 6 }}>
-                              <i style={{ width: `${total ? (remaining / total) * 100 : 0}%` }} />
-                            </div>
-                          </>
-                        )}
-                      </td>
-                      <td>
-                        {lease.last_error ? (
-                          <>
-                            <span className="tag red">Could not close</span>
-                            {lease.source_removed && (
-                              <div className="muted tiny">{lease.last_error}</div>
-                            )}
-                          </>
-                        ) : (
-                          <span className="muted tiny">{executionText(lease.execution)}</span>
-                        )}
-                      </td>
-                      <td style={error?.key === lease.id ? { minWidth: 240 } : undefined}>
-                        <button
-                          className="button secondary small"
-                          disabled={busy === lease.id}
-                          onClick={() =>
-                            void run(lease.id, () =>
-                              post(`/leases/${lease.id}/end`, byHand ? { by_hand: true } : {}),
-                            )
-                          }
-                        >
-                          {byHand ? 'I removed it by hand' : 'End now'}
-                        </button>
-                        <InlineError message={error?.key === lease.id ? error.message : null} />
-                      </td>
-                    </tr>
+                    <Fragment key={lease.id}>
+                      <tr className={refusal ? 'refused' : undefined}>
+                        <th className="dom">{lease.domain}</th>
+                        <td>
+                          <Score value={lease.risk_score} />
+                        </td>
+                        <td>
+                          {lease.requester_name || 'Everyone'}
+                          <div className="muted tiny">{lease.scope}</div>
+                        </td>
+                        <td>{lease.decided_by_name || 'An administrator'}</td>
+                        <td style={{ minWidth: 130 }}>
+                          {lease.kind === 'permanent' ? (
+                            'Never'
+                          ) : (
+                            <>
+                              {left(lease.expires_at, now) || 'Closing'}
+                              <div className="timebar" style={{ marginTop: 6 }}>
+                                <i style={{ width: `${total ? (remaining / total) * 100 : 0}%` }} />
+                              </div>
+                            </>
+                          )}
+                        </td>
+                        <td>
+                          {lease.last_error ? (
+                            <>
+                              <span className="tag red">Could not close</span>
+                              {lease.source_removed && (
+                                <div className="muted tiny">{lease.last_error}</div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="muted tiny">
+                              {lease.execution === 'applied' && !lease.owned
+                                ? UNOWNED
+                                : executionText(lease.execution)}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <button
+                            className="button secondary small"
+                            disabled={busy === lease.id}
+                            onClick={() =>
+                              void run(lease.id, () =>
+                                post(`/leases/${lease.id}/end`, byHand ? { by_hand: true } : {}),
+                              )
+                            }
+                          >
+                            {byHand ? 'I removed it by hand' : 'End now'}
+                          </button>
+                        </td>
+                      </tr>
+                      {/* Its own row under the exception, kept in view while the table scrolls sideways. */}
+                      {refusal && (
+                        <tr className="refusal">
+                          <td colSpan={7}>
+                            <InlineError message={refusal} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -150,7 +174,6 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                     Opened {plural(item.times, 'time')} for {item.people.join(', ') || 'someone'},
                     last {ago(item.last_at, now)}. {item.scope}.
                   </span>
-                  <InlineError message={error?.key === item.domain ? error.message : null} />
                 </span>
                 <span className="button-row">
                   <button
@@ -176,6 +199,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                     Dismiss
                   </button>
                 </span>
+                <InlineError message={error?.key === item.domain ? error.message : null} />
               </div>
             ))}
           </div>
@@ -190,8 +214,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                 <span>
                   <span className="t dom">{lease.domain}</span>
                   <span className="d">
-                    {lease.ended_reason === 'revoked' ? 'Ended early' : 'Ran out'}{' '}
-                    {ago(lease.ended_at, now)}
+                    {ENDED[lease.ended_reason || ''] || 'Closed'} {ago(lease.ended_at, now)}
                     {lease.requester_name ? ` · ${lease.requester_name}` : ''}
                   </span>
                 </span>
