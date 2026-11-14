@@ -42,7 +42,9 @@ Not done, and needed before larger deployments:
 
 - Organisations and sites above a single workspace, and roles beyond
   administrator and member.
-- Pagination and server-side filtering for inventory, blocks and activity.
+- Pagination and server-side filtering for inventory and activity.
+  **(done for blocks: one page of 200 at a time, filtered and searched on the
+  server)**
 - Collection workers outside the web process.
 - Integrations loaded from outside the repository.
 - Opening addresses in Pi-hole; DNS and firewall integrations beyond the four
@@ -84,6 +86,8 @@ UniFi console, NextDNS profile and Proxmox node, with differences fixed.
   locked-out devices. Guests keep signing in on UniFi's portal
   ([design](guest-wifi.md)); Nyctr does not become an external portal.
 - Historical drift, exposure findings and explicit evidence gaps.
+  **(first version of gaps: what a collection could not read is recorded at
+  every collection and shown on the source)**
 
 Exit gate: real test environments validate each claimed capability; failures and
 partial coverage cannot be mistaken for clean posture.
