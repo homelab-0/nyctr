@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { setCsrfToken } from './api';
@@ -43,6 +43,8 @@ afterEach(() => {
   cleanup();
   setCsrfToken('');
   window.location.hash = '';
+  // A title left by the last case must not satisfy the next one.
+  document.title = '';
   // Put element scrolling back exactly as jsdom had it, so the stand-in stays in these tests.
   if (scrollTo) Object.defineProperty(Element.prototype, 'scrollTo', scrollTo);
   else delete (Element.prototype as Partial<Element>).scrollTo;
@@ -59,7 +61,7 @@ describe('console landing', () => {
     openConsole(hash);
     expect(await screen.findByText('Nothing needs you right now.')).toBeTruthy();
     expect(screen.queryByText('This screen could not be found')).toBeNull();
-    expect(document.title).toBe('Briefing · Nyctr');
+    await waitFor(() => expect(document.title).toBe('Briefing · Nyctr'));
   });
 
   // "overview" is where single sign-on used to send administrators. The console has never had
@@ -70,6 +72,7 @@ describe('console landing', () => {
   ])('says the screen could not be found for %s', async (_name, hash) => {
     openConsole(hash);
     expect(await screen.findByText('This screen could not be found')).toBeTruthy();
-    expect(document.title).toBe('Not found · Nyctr');
+    // The title is set after the screen is drawn, so reading it at once reads the one before.
+    await waitFor(() => expect(document.title).toBe('Not found · Nyctr'));
   });
 });

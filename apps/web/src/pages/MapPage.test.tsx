@@ -2,9 +2,16 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import { bigSite, link, thing } from '../test/map-site';
+import * as ui from '../components/ui';
 import { kindText } from './Inventory';
 import MapPage, { kindBasis } from './MapPage';
 import type { Graph, Resource } from '../types';
+
+// Every card asks for its icon once each time it is drawn, so these calls count the cards drawn.
+vi.mock('../components/ui', async (original) => {
+  const real = await original<typeof import('../components/ui')>();
+  return { ...real, kindIcon: vi.fn(real.kindIcon) };
+});
 
 const gear = (attributes: Record<string, unknown>): Resource => ({
   id: 'g',
@@ -153,9 +160,7 @@ describe('what a full square on the Map could not draw', () => {
 
   it('reaches every one of 280 items on a site of real size, and opens them', async () => {
     const site = bigSite();
-    const started = performance.now();
     await show(site);
-    const drew = performance.now() - started;
     const all = (query: string) => [...document.querySelectorAll<HTMLElement>(query)];
     const pick = (control: HTMLElement, name: string) => {
       fireEvent.click(control);
@@ -166,24 +171,42 @@ describe('what a full square on the Map could not draw', () => {
     pick(cards[0], reached[0]);
     pick(cards.at(-1)!, reached.at(-1)!);
     const boxes = all('.map [role=button][aria-expanded]');
-    let slowest = 0;
+    // Work is counted, not timed: a clock measures how busy the machine is. Opening a list
+    // draws no card again, and picking an item draws each card once at most (those that dim).
+    const drawn = vi.mocked(ui.kindIcon);
+    const draws = (act: () => void) => {
+      drawn.mockClear();
+      act();
+      return drawn.mock.calls.length;
+    };
     for (const box of boxes) {
-      const opening = performance.now();
-      fireEvent.click(box);
-      slowest = Math.max(slowest, performance.now() - opening);
+      expect(draws(() => fireEvent.click(box))).toBe(0);
       const rows = all('.map-list button.row');
       expect(rows).toHaveLength(parseInt(box.getAttribute('aria-label')!, 10));
       const names = rows.map((row) => row.querySelector('.t')!.textContent!);
       reached.push(...names);
       // Every row is the same control; the first and last of each list are opened.
-      pick(rows[0], names[0]);
-      pick(rows.at(-1)!, names.at(-1)!);
+      expect(draws(() => pick(rows[0], names[0]))).toBeLessThanOrEqual(cards.length);
+      expect(draws(() => pick(rows.at(-1)!, names.at(-1)!))).toBeLessThanOrEqual(cards.length);
+      // Closing the list clears the pick, so the next box opens with nothing selected.
+      fireEvent.click(box);
     }
     // Each item is on the Map once: as a card or in one list, never both and never neither.
     expect(reached.sort()).toEqual(site.nodes.map((item) => item.name).sort());
     expect(cards.length + boxes.length).toBeLessThan(110);
-    // Measured under the test's simulated browser, which is slower than a real one.
-    expect(drew).toBeLessThan(2000);
-    expect(slowest).toBeLessThan(1000);
+    expect(boxes.length).toBeGreaterThan(2);
+  });
+
+  it('draws a card again when its source is named after the Map was drawn', async () => {
+    const site: Graph = { nodes: [thing('late', 'client', 'Late', 'arrives_later')], edges: [] };
+    mockApi({ 'GET /graph': site, 'GET /findings': [] });
+    const page = <MapPage params={new URLSearchParams()} />;
+    const { rerender } = render(page);
+    const card = await screen.findByRole('button', { name: 'Late, Device, from Arrives Later' });
+    expect(card.getAttribute('class')).toContain('t-grey');
+    ui.registerSources([{ id: 'arrives_later', name: 'Later source', letter: 'L', tone: 'teal' }]);
+    rerender(<MapPage params={new URLSearchParams()} />);
+    const named = screen.getByRole('button', { name: 'Late, Device, from Later source' });
+    expect(named.getAttribute('class')).toContain('t-teal');
   });
 });

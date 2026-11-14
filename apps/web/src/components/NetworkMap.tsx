@@ -1,8 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import { BANDS, UNDRAWN, layoutMap, type MapView } from '../lib/map-layout';
+import {
+  BANDS,
+  UNDRAWN,
+  layoutMap,
+  type MapEdge,
+  type MapLayout,
+  type MapNode,
+  type MapView,
+} from '../lib/map-layout';
 import type { Graph, Resource } from '../types';
-import { SourceTag, kindIcon, sourceOf } from './ui';
+import { SourceTag, kindIcon, sourceOf, sourcesLearned } from './ui';
 
 const short = (text: string, max = 20) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 const KIND: Record<string, string> = {
@@ -20,6 +28,171 @@ const KIND: Record<string, string> = {
 /** A device a guest sign-in was taken away from: shown as cut off wherever it appears. */
 const cutOff = (resource?: Resource) =>
   (resource?.attributes.guest as { authorized?: boolean } | undefined)?.authorized === false;
+
+/** Makes an SVG group act as a button for the mouse and the keyboard. */
+const act = (run: () => void) => ({
+  role: 'button',
+  tabIndex: 0,
+  onClick: (event: React.MouseEvent) => {
+    event.stopPropagation();
+    run();
+  },
+  onKeyDown: (event: React.KeyboardEvent) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      run();
+    }
+  },
+});
+
+// The parts below are drawn again only when what they show changes. Picking one item or
+// opening one list used to draw every card, line and row again, twice for an item in a list.
+
+/** The columns and rows behind the cards: they change only with the layout. */
+const Ground = memo(function Ground({ layout }: { layout: MapLayout }) {
+  return (
+    <>
+      {layout.lanes.map((lane, index) => (
+        <g key={lane.id}>
+          <rect
+            className={`lane ${index % 2 ? 'alt' : ''}`}
+            x={lane.x}
+            y={0}
+            width={lane.w}
+            height={layout.height}
+          />
+          <text className="lane-name" x={lane.x + 14} y={24}>
+            {short(lane.name, 22)}
+          </text>
+          <text className="lane-sub" x={lane.x + 14} y={41}>
+            {lane.sub}
+          </text>
+        </g>
+      ))}
+      {layout.bands.map((band) => (
+        <g key={band.id}>
+          <line className="band-line" x1={0} x2={layout.width} y1={band.y} y2={band.y} />
+          <text className="band-name" x={14} y={band.y + 26}>
+            {BANDS.find((item) => item.id === band.id)?.name}
+          </text>
+        </g>
+      ))}
+    </>
+  );
+});
+
+/** One line between two cards. `state` is "on", "dim" or nothing. */
+const Line = memo(function Line({ edge, state }: { edge: MapEdge; state: string }) {
+  return (
+    <path className={`edge ${edge.evidence} ${state}`} d={edge.path}>
+      <title>{`${edge.kind.replace(/_/g, ' ')} (${edge.evidence})${edge.basis ? `: ${edge.basis}` : ''}`}</title>
+    </path>
+  );
+});
+
+/** One card on the Map. */
+const Card = memo(function Card({
+  node,
+  on,
+  dim,
+  pin,
+  onSelect,
+}: {
+  /** How much was known about sources when this was drawn; see `sourcesLearned`. */
+  known: number;
+  node: MapNode;
+  on: boolean;
+  dim: boolean;
+  pin: boolean;
+  onSelect: (id: string | null) => void;
+}) {
+  const Icon = kindIcon(node.kind);
+  const source = sourceOf(node.provider);
+  const off = cutOff(node.resource);
+  return (
+    <g
+      className={`node ${source.tone} ${on ? 'sel' : ''} ${dim ? 'dim' : ''} ${off ? 'off' : ''} ${node.evidence}`}
+      transform={`translate(${node.x},${node.y})`}
+      aria-pressed={on}
+      aria-label={`${node.name}, ${KIND[node.kind] || node.kind}, from ${source.name}${pin ? ', has a finding' : ''}`}
+      {...act(() => onSelect(node.id))}
+    >
+      <rect className="box" width={node.w} height={node.h} rx={9} />
+      <rect className="stripe" x={0} y={8} width={3} height={node.h - 16} rx={1.5} />
+      <Icon x={13} y={14} size={16} strokeWidth={1.8} />
+      <text className="name" x={37} y={19}>
+        {short(node.name)}
+      </text>
+      <text className="sub" x={37} y={34}>
+        {off ? 'Cut off' : KIND[node.kind] || node.kind}
+      </text>
+      {(pin || off) && <circle className="pin" cx={node.w - 12} cy={12} r={4.5} />}
+    </g>
+  );
+});
+
+/** The box that stands for the cards a square had no room for. */
+const Box = memo(function Box({
+  node,
+  sel,
+  dim,
+  opened,
+  onToggle,
+}: {
+  node: MapNode;
+  sel: boolean;
+  dim: boolean;
+  opened: boolean;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <g
+      className={`node more ${sel ? 'sel' : ''} ${dim ? 'dim' : ''}`}
+      transform={`translate(${node.x},${node.y})`}
+      aria-expanded={opened}
+      aria-controls={opened ? 'map-list' : undefined}
+      aria-label={node.name}
+      {...act(() => onToggle(node.id))}
+    >
+      <rect className="box" width={node.w} height={node.h} rx={9} />
+      <text className="name" x={node.w / 2} y={19} textAnchor="middle">
+        {node.held!.length} more
+      </text>
+      <text className="sub" x={node.w / 2} y={34} textAnchor="middle">
+        {opened ? 'Hide the list' : 'Show them all'}
+      </text>
+    </g>
+  );
+});
+
+/** One item in an opened list: picked exactly like a card. */
+const Row = memo(function Row({
+  item,
+  on,
+  pin,
+  onSelect,
+}: {
+  /** How much was known about sources when this was drawn; see `sourcesLearned`. */
+  known: number;
+  item: Resource;
+  on: boolean;
+  pin: boolean;
+  onSelect: (id: string | null) => void;
+}) {
+  return (
+    <button className={`row ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => onSelect(item.id)}>
+      <SourceTag provider={item.provider} />
+      <span>
+        <span className="t">{item.name}</span>
+        <span className="d">
+          {cutOff(item) ? 'Cut off' : KIND[item.kind] || item.kind}
+          {pin ? ', has a finding' : ''}
+        </span>
+      </span>
+      {(pin || cutOff(item)) && <i className="dot red" />}
+    </button>
+  );
+});
 
 /**
  * Draws the network as a grid: a column per network, a row per layer. Colour names the
@@ -46,6 +219,7 @@ export default function NetworkMap({
   pinned: Set<string>;
 }) {
   const layout = useMemo(() => layoutMap(graph, view), [graph, view]);
+  const known = sourcesLearned();
   const scroller = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLElement>(null);
   const [opened, setOpened] = useState<string | null>(null);
@@ -83,17 +257,21 @@ export default function NetworkMap({
   useEffect(() => {
     list.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView?.({ block: 'nearest' });
   }, [open?.id, selected]);
-  const show = (box: string) => {
-    // A selection held in another box would be left with its list shut, so it is cleared.
-    if (holder && holder !== box) onSelect(null);
-    setOpened(box);
-  };
-  const close = () => {
+  const close = useCallback(() => {
     scroller.current?.querySelector<SVGGElement>('[aria-expanded="true"]')?.focus();
     // Closing the list that shows the selection clears it: nothing stays selected unseen.
     if (holder === opened) onSelect(null);
     setOpened(null);
-  };
+  }, [holder, opened, onSelect]);
+  const toggle = useCallback(
+    (box: string) => {
+      if (opened === box) return close();
+      // A selection held in another box would be left with its list shut, so it is cleared.
+      if (holder && holder !== box) onSelect(null);
+      setOpened(box);
+    },
+    [holder, opened, onSelect, close],
+  );
   useEffect(() => {
     const node = layout.nodes.find((item) => item.id === (holder ?? selected));
     const box = scroller.current;
@@ -104,20 +282,6 @@ export default function NetworkMap({
       behavior: 'smooth',
     });
   }, [selected, holder, layout, zoom]);
-  const act = (run: () => void) => ({
-    role: 'button',
-    tabIndex: 0,
-    onClick: (event: React.MouseEvent) => {
-      event.stopPropagation();
-      run();
-    },
-    onKeyDown: (event: React.KeyboardEvent) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        run();
-      }
-    },
-  });
   const map = (
     <div className="map-scroll" ref={scroller}>
       <svg
@@ -129,90 +293,32 @@ export default function NetworkMap({
         aria-label="Network map"
         onClick={() => onSelect(null)}
       >
-        {layout.lanes.map((lane, index) => (
-          <g key={lane.id}>
-            <rect
-              className={`lane ${index % 2 ? 'alt' : ''}`}
-              x={lane.x}
-              y={0}
-              width={lane.w}
-              height={layout.height}
-            />
-            <text className="lane-name" x={lane.x + 14} y={24}>
-              {short(lane.name, 22)}
-            </text>
-            <text className="lane-sub" x={lane.x + 14} y={41}>
-              {lane.sub}
-            </text>
-          </g>
-        ))}
-        {layout.bands.map((band) => (
-          <g key={band.id}>
-            <line className="band-line" x1={0} x2={layout.width} y1={band.y} y2={band.y} />
-            <text className="band-name" x={14} y={band.y + 26}>
-              {BANDS.find((item) => item.id === band.id)?.name}
-            </text>
-          </g>
-        ))}
+        <Ground layout={layout} />
         {layout.edges.map((edge) => {
           const on = selected !== null && (edge.source === selected || edge.target === selected);
-          return (
-            <path
-              key={edge.id}
-              className={`edge ${edge.evidence} ${on ? 'on' : near ? 'dim' : ''}`}
-              d={edge.path}
-            >
-              <title>{`${edge.kind.replace(/_/g, ' ')} (${edge.evidence})${edge.basis ? `: ${edge.basis}` : ''}`}</title>
-            </path>
-          );
+          return <Line key={edge.id} edge={edge} state={on ? 'on' : near ? 'dim' : ''} />;
         })}
         {layout.nodes.map((node) => {
-          const Icon = kindIcon(node.kind);
-          const source = sourceOf(node.provider);
-          const off = cutOff(node.resource);
           const dim = near !== null && !near.has(node.id);
-          if (node.held)
-            return (
-              <g
-                key={node.id}
-                className={`node more ${holder === node.id ? 'sel' : ''} ${dim ? 'dim' : ''}`}
-                transform={`translate(${node.x},${node.y})`}
-                aria-expanded={opened === node.id}
-                aria-controls={opened === node.id ? 'map-list' : undefined}
-                aria-label={node.name}
-                {...act(() => (opened === node.id ? close() : show(node.id)))}
-              >
-                <rect className="box" width={node.w} height={node.h} rx={9} />
-                <text className="name" x={node.w / 2} y={19} textAnchor="middle">
-                  {node.held.length} more
-                </text>
-                <text className="sub" x={node.w / 2} y={34} textAnchor="middle">
-                  {opened === node.id ? 'Hide the list' : 'Show them all'}
-                </text>
-              </g>
-            );
-          return (
-            <g
+          return node.held ? (
+            <Box
               key={node.id}
-              className={`node ${source.tone} ${selected === node.id ? 'sel' : ''} ${dim ? 'dim' : ''} ${off ? 'off' : ''} ${node.evidence}`}
-              transform={`translate(${node.x},${node.y})`}
-              aria-pressed={selected === node.id}
-              aria-label={`${node.name}, ${KIND[node.kind] || node.kind}, from ${source.name}${pinned.has(node.id) ? ', has a finding' : ''}`}
-              {...act(() => onSelect(node.id))}
-            >
-              <rect className="box" width={node.w} height={node.h} rx={9} />
-              <rect className="stripe" x={0} y={8} width={3} height={node.h - 16} rx={1.5} />
-              <Icon x={13} y={14} size={16} strokeWidth={1.8} />
-              <text className="name" x={37} y={19}>
-                {short(node.name)}
-              </text>
-              <text className="sub" x={37} y={34}>
-                {off ? 'Cut off' : KIND[node.kind] || node.kind}
-              </text>
-              {(pinned.has(node.id) || off) && (
-                <circle className="pin" cx={node.w - 12} cy={12} r={4.5} />
-              )}
-            </g>
+              node={node}
+              sel={holder === node.id}
+              dim={dim}
+              opened={opened === node.id}
+              onToggle={toggle}
+            />
+          ) : (
+            <Card
+              key={node.id}
+              node={node}
+              on={selected === node.id}
+              dim={dim}
+              pin={pinned.has(node.id)}
+              known={known}
+              onSelect={onSelect}
+            />
           );
         })}
       </svg>
@@ -244,22 +350,14 @@ export default function NetworkMap({
           </header>
           <div className="rows boxed">
             {open.held!.map((item) => (
-              <button
-                className={`row ${selected === item.id ? 'on' : ''}`}
+              <Row
                 key={item.id}
-                aria-pressed={selected === item.id}
-                onClick={() => onSelect(item.id)}
-              >
-                <SourceTag provider={item.provider} />
-                <span>
-                  <span className="t">{item.name}</span>
-                  <span className="d">
-                    {cutOff(item) ? 'Cut off' : KIND[item.kind] || item.kind}
-                    {pinned.has(item.id) ? ', has a finding' : ''}
-                  </span>
-                </span>
-                {(pinned.has(item.id) || cutOff(item)) && <i className="dot red" />}
-              </button>
+                item={item}
+                on={selected === item.id}
+                pin={pinned.has(item.id)}
+                known={known}
+                onSelect={onSelect}
+              />
             ))}
           </div>
         </aside>
