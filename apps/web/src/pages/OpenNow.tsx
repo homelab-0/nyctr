@@ -1,7 +1,7 @@
 import { Fragment, useState } from 'react';
 import { post, useApi } from '../api';
 import { Empty, ErrorState, InlineError, Loading, Panel, Score } from '../components/ui';
-import { REMOVAL, ago, executionText, left, plural, useNow } from '../lib/format';
+import { REMOVAL, ago, clock, executionText, left, plural, useNow } from '../lib/format';
 import type { Lease, Suggestion } from '../types';
 
 /** An entry that was at the source before Nyctr's exception: Nyctr added nothing and removes nothing. */
@@ -133,6 +133,12 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                               </span>
                               {(lease.source_removed || lease.status === 'unconfirmed') && (
                                 <div className="muted tiny">{lease.last_error}</div>
+                              )}
+                              {lease.checking_until && (
+                                <div className="muted tiny">
+                                  Nyctr is still checking the source, until{' '}
+                                  {clock(lease.checking_until)}.
+                                </div>
                               )}
                             </>
                           ) : (

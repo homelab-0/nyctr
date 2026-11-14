@@ -173,6 +173,11 @@ function summary(event: AuditEvent) {
   if (happened) parts.push(happened);
   if (d.by_rule === true || d.decided_by === 'rule') parts.push('by a written rule');
   if (typeof d.minutes === 'number') parts.push(`${d.minutes} min`);
+  // How long Nyctr went on reading the source for an add it had sent and could not confirm.
+  if (typeof d.looked === 'number')
+    parts.push(
+      `Nyctr looked for ${d.looked < 90 ? counted(d.looked, 'second') : counted(Math.round(d.looked / 60), 'minute')}`,
+    );
   if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
   if (typeof d.observations === 'number') parts.push(counted(d.observations, 'blocked lookup'));
   if (d.partial === true) parts.push('most recent only');
