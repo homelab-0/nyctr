@@ -366,3 +366,19 @@ describe('Wi-Fi names a collection could not read', () => {
     expect(text).not.toContain('could not read the Wi-Fi names');
   });
 });
+
+describe('Wi-Fi names unread at one source while another has a sign-in page', () => {
+  it('still says which names could not be read, with guests present, and gives no advice', async () => {
+    const base = overview('enabled');
+    open('enabled', {
+      'GET /guests': { ...base, portal: { ...base.portal, unread: ['Other network'] } },
+    });
+    await screen.findByText('Wi-Fi names reported');
+    const text = document.body.textContent!;
+    expect(text).toContain(
+      'Nyctr could not read the Wi-Fi names from Other network at its last collection, so it cannot tell whether one there sits behind a sign-in page.',
+    );
+    // One name it did read has a sign-in page, so it does not say none does, and advises nothing.
+    expect(text).not.toMatch(/None of the names it did read does|Turn on the guest sign-in page/);
+  });
+});

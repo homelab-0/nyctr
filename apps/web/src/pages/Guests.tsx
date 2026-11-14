@@ -134,11 +134,19 @@ function HowGuestsGetOn({
               ))}
             </ul>
           )}
-          {portal.wifi.length > 0 && gated.length === 0 && (
+          {/* Names that could not be read are said whatever else was read. Only the advice to turn the
+              sign-in page on waits for a complete read that found none. */}
+          {portal.wifi.length > 0 && unread && (
             <p className="aside">
-              {unread
-                ? `Nyctr could not read the Wi-Fi names from ${unread} at its last collection, so it cannot tell whether one there sits behind a sign-in page. None of the names it did read does.`
-                : 'No Wi-Fi name sits behind a sign-in page, so passes and the cut-off have nothing to act on. Turn on the guest sign-in page with passes for your guest Wi-Fi at the source.'}
+              Nyctr could not read the Wi-Fi names from {unread} at its last collection, so it
+              cannot tell whether one there sits behind a sign-in page.
+              {gated.length === 0 && ' None of the names it did read does.'}
+            </p>
+          )}
+          {portal.wifi.length > 0 && gated.length === 0 && !unread && (
+            <p className="aside">
+              No Wi-Fi name sits behind a sign-in page, so passes and the cut-off have nothing to
+              act on. Turn on the guest sign-in page with passes for your guest Wi-Fi at the source.
             </p>
           )}
         </div>

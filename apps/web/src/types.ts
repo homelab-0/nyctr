@@ -270,6 +270,8 @@ export interface Lease {
   source_removed?: boolean;
   /** What ending it did at the source, as a code in `REMOVAL`. Administrators only. */
   removal?: string | null;
+  /** For an ended exception: true when its ending left the address closed at the source. Members only. */
+  closed?: boolean;
   /** Until when Nyctr reads the source again for an opening it could not confirm. Administrators only. */
   checking_until?: string | null;
 }

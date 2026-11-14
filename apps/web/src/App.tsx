@@ -97,9 +97,17 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const sidebar = useRef<HTMLElement>(null);
   // A list that could not be read is not an empty one: nothing is shown from it and each count says so.
-  const items = attention.error ? [] : attention.data || [];
+  // After a failed read the list stays not known until a read succeeds: while a retry is on its way the
+  // answer from before the failure is still held, and it is not shown as the answer.
+  const unread = useRef<{ held: AttentionItem[] | null } | null>(null);
+  if (attention.error) unread.current = { held: attention.data };
+  else if (unread.current && unread.current.held !== attention.data) unread.current = null;
+  const retrying = !attention.error && unread.current !== null;
+  const items = attention.error || retrying ? [] : attention.data || [];
   const count = (kind: string) =>
-    attention.error ? '?' : items.filter((item) => item.kind === kind).length || undefined;
+    attention.error || retrying
+      ? '?'
+      : items.filter((item) => item.kind === kind).length || undefined;
   const navigation: NavGroup[] = [
     {
       title: 'Network',
@@ -147,7 +155,8 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
      */
     const onAsk = () => setAssistant(true);
     const onKey = (event: KeyboardEvent) => {
-      if (isAssistantKey(event, shortcut)) setAssistant((value) => !value);
+      // Where the key is not offered there is no control to turn it off, so it does nothing there.
+      if (isAssistantKey(event, shortcut && keys)) setAssistant((value) => !value);
       if (event.key === 'Escape') setNavOpen(false);
     };
     window.addEventListener('nyctr:ask', onAsk);
@@ -156,7 +165,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
       window.removeEventListener('nyctr:ask', onAsk);
       document.removeEventListener('keydown', onKey);
     };
-  }, [shortcut]);
+  }, [shortcut, keys]);
 
   /** Displays genuine revocation failures while AuthProvider handles success or session expiry. */
   const signOut = async () => {
@@ -280,7 +289,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             page={page}
             params={params}
             attention={items}
-            loading={attention.loading}
+            loading={attention.loading || retrying}
             error={attention.error}
             refresh={refresh}
             sources={rules.data?.sources}

@@ -155,3 +155,52 @@ describe('the A key hint', () => {
     expect(document.querySelector('.ask kbd')).toBeNull();
   });
 });
+
+describe('a retry after a failed re-read of a list that was empty', () => {
+  it('does not say nothing needs you until the retry has an answer', async () => {
+    let answer: () => unknown = () => [];
+    let release: (value: unknown) => void = () => {};
+    openConsole('#/access', {
+      'GET /attention': () => answer(),
+      'GET /suggestions': [
+        { domain: 'docs.example', times: 2, people: [], last_at: null, scope: 'Everyone' },
+      ],
+      'POST /suggestions': {},
+    });
+    // The list answers empty once; then a change on another screen re-reads it, and that read fails.
+    answer = () => ({ __status: 500, detail: 'Internal Server Error' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss' }));
+    await screen.findAllByTitle('Could not be counted');
+    window.location.hash = '#/briefing';
+    expect(await screen.findByText('Nyctr could not find out what needs you.')).toBeTruthy();
+    // Try again, with the answer held back: the empty list from before the failure is not shown as the answer.
+    answer = () => new Promise((resolve) => (release = resolve));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Checking what needs you.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Nothing needs you right now.');
+    expect(screen.getAllByTitle('Could not be counted')).toHaveLength(4);
+    release([]);
+    expect(await screen.findByText('Nothing needs you right now.')).toBeTruthy();
+    expect(screen.queryByTitle('Could not be counted')).toBeNull();
+  });
+});
+
+describe('the A key where it is not offered', () => {
+  const pressA = async () => {
+    openConsole('#/briefing');
+    await screen.findByText('Nothing needs you right now.');
+    fireEvent.keyDown(document.body, { key: 'a' });
+    return screen.queryByRole('complementary', { name: 'Ask Nyctr' });
+  };
+
+  it('opens the assistant where there is a keyboard', async () => {
+    expect(await pressA()).toBeTruthy();
+  });
+
+  it('does nothing on a screen worked by touch alone, where it cannot be turned off', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('pointer: coarse'),
+    }));
+    expect(await pressA()).toBeNull();
+  });
+});

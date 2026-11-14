@@ -68,6 +68,8 @@ def test_a_simulated_lock_out_and_letting_on_say_simulated(client, admin_headers
     guest, rows, findings, _card = told(client, "guest-pixel")
     assert (guest["state"], guest["simulated"]) == ("locked", True)
     assert [x["title"] for x in rows] == ["Simulated: Pixel 8 locked out of the guest Wi-Fi"]
+    # Nothing changed at the source, so nothing is said to keep the device off.
+    assert rows[0]["detail"] == "Demo mode never contacts a source, so nothing changed there."
     assert findings[0]["title"] == "Simulated: Pixel 8 locked out of the guest Wi-Fi"
     client.post("/api/guests/actions", headers=admin_headers, json={"device_id": "guest-pixel", "action": "restore"})
     guest, rows, _findings, _card = told(client, "guest-pixel")
@@ -205,3 +207,25 @@ def test_the_assistant_never_says_nothing_is_open_over_an_opening_that_was_not_c
         assert pack["opening_not_confirmed_may_be_open"] == [] and pack["access_open_now"] == []
         assert not any(x["domain"] == "slow.example" for x in pack["decided_not_changed_at_source"])
         assert answer.startswith("Nothing is open at a source right now.")
+
+
+def test_a_member_is_told_only_whether_an_ending_left_the_address_closed(app, client, admin_headers):
+    """An exception can end with the address still allowed; a member reads `closed` and nothing of why or whose."""
+    with app.state.session_factory() as db:
+        for id_, removal in [("gone", "removed"), ("was-gone", "already_gone"), ("theirs", "not_owned"),
+                             ("shared", "kept_for_another"), ("old", None)]:
+            db.add(exception(id_, requester_id="user-jamie", execution="applied", status="ended",
+                             ended_reason="expired", ended_at=utcnow()))
+            db.add(Audit(action="access.closed", target_id=id_, details={"removal": removal} if removal else {}))
+        # An opening that could not be confirmed is on record for nobody: it is never sent to a member.
+        db.add(Lease(id="slow", integration_id="demo-nextdns", domain="slow.example", status="unconfirmed",
+                     owned=True, scope="Everyone", decided_by="", last_error="It may be open there."))
+        db.commit()
+    assert "slow" in {x["id"] for x in client.get("/api/leases").json()}  # the administrator's list has it
+    client.post("/api/auth/logout", headers=admin_headers)
+    client.post("/api/auth/login", json={"email": "jamie@nyctr.demo", "password": "nyctr-demo"})
+    mine = {x["id"]: x for x in client.get("/api/leases").json()}
+    assert {id_: mine[id_]["closed"] for id_ in ("gone", "was-gone", "theirs", "shared", "old")} == {
+        "gone": True, "was-gone": True, "theirs": False, "shared": False, "old": False}
+    assert "slow" not in mine and not any(x["status"] == "unconfirmed" for x in mine.values())
+    assert not any("removal" in x or "checking_until" in x or x["last_error"] for x in mine.values())

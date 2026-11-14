@@ -102,13 +102,15 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
         if guest["state"] in {"cut", "locked"}:
             # A lock-out is a decision already made, so it is listed without counting as urgent.
             locked, simulated = guest["state"] == "locked", guest["simulated"]
+            # Only a lock-out applied at the source keeps a device off; a simulated one says just that it was not.
+            detail = ["Demo mode never contacts a source, so nothing changed there."] if simulated else []
+            if not locked:
+                detail.append("Decide whether to let it back on or lock it out.")
+            elif not simulated:
+                detail.append("It stays locked out until someone lets it back on.")
             items.append({"kind": "guest", "id": device.id, "severity": "low" if locked else "high",
                           "at": guest["timeline"][0]["at"] if guest["timeline"] else None,
-                          "title": cut_title(device.name, locked, simulated),
-                          "detail": ("Demo mode never contacts a source, so nothing changed there. " if simulated
-                                     else "")
-                          + ("It stays locked out until someone lets it back on." if locked
-                             else "Decide whether to let it back on or lock it out.")})
+                          "title": cut_title(device.name, locked, simulated), "detail": " ".join(detail)})
     for lease in db.scalars(select(Lease).where(Lease.status == "active", Lease.last_error.is_not(None))):
         items.append({"kind": "lease", "id": lease.id, "severity": "high", "at": utc(lease.created_at).isoformat(),
                       "title": f"{lease.domain} could not be closed", "detail": lease.last_error})

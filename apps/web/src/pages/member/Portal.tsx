@@ -171,12 +171,16 @@ function Outcome({ row, lease, now }: { row: AccessRequest; lease?: Lease; now: 
   const [text, tone] = !lease
     ? [row.status === 'auto_approved' ? 'Approved' : decided?.text, decided?.tone]
     : lease.status === 'ended'
-      ? [lease.execution === 'applied' ? 'Closed again' : 'Ended', '']
-      : lease.execution === 'simulated'
-        ? ['Demonstration, nothing opened', '']
-        : isOpen(lease)
-          ? [left(lease.expires_at, now) || decided?.text, 'green']
-          : ['Approved, not on yet', 'yellow'];
+      ? // "Closed" only when its ending left the address closed; an exception can end and the address stay open.
+        [lease.closed ? 'Closed again' : 'Ended', '']
+      : lease.status === 'unconfirmed'
+        ? // Not known either way, whatever its result says: never "not on".
+          ['Not confirmed yet', 'yellow']
+        : lease.execution === 'simulated'
+          ? ['Demonstration, nothing opened', '']
+          : isOpen(lease)
+            ? [left(lease.expires_at, now) || decided?.text, 'green']
+            : ['Approved, not on yet', 'yellow'];
   return <span className={`tag ${tone || ''}`}>{text}</span>;
 }
 
@@ -674,6 +678,17 @@ function Result({ data, id }: { data: Data; id: string }) {
               : `With a real one, ${row.domain} would have opened for a while and closed again.`}
           </p>
         </header>
+      ) : lease?.status === 'unconfirmed' ? (
+        <header className="m-result wait">
+          <span className="m-badge">
+            <Hourglass size={24} />
+          </span>
+          <h1 className="display d1">Not confirmed yet.</h1>
+          <p className="lede">
+            Nyctr could not confirm whether {row.domain} was opened, so it may or may not work.
+            Check back in a little while.
+          </p>
+        </header>
       ) : row.status === 'pending' ? (
         <header className="m-result wait">
           <span className="m-badge">
@@ -701,10 +716,15 @@ function Result({ data, id }: { data: Data; id: string }) {
             <Clock size={24} />
           </span>
           <h1 className="display d1">
-            {lease.ended_reason === 'revoked' ? 'An administrator closed it.' : 'The time ran out.'}
+            {lease.ended_reason !== 'revoked'
+              ? 'The time ran out.'
+              : lease.closed
+                ? 'An administrator closed it.'
+                : 'An administrator ended it.'}
           </h1>
           <p className="lede">
-            {lease.execution === 'applied'
+            {/* Closed is said only when the ending left the address closed. */}
+            {lease.closed
               ? `Access to ${row.domain} has closed again.`
               : `The approval for ${row.domain} has ended.`}{' '}
             If you still need it, open the page and ask once more.

@@ -848,13 +848,16 @@ async def leases(request: Request, auth=Depends(identity), db: Session = Depends
     query = select(Lease).order_by(Lease.created_at.desc()).limit(300)
     if auth[0].role != "admin":
         query = query.where(Lease.requester_id == auth[0].id)
-        # What went wrong at a source is written for an administrator: a member is given none of it.
-        return [{**lease_json(row), "last_error": None} for row in db.scalars(query)]
-    names, known = _names(db), set(db.scalars(select(Integration.id)))
     rows = list(db.scalars(query))
     # What each ending did at the source is kept in its audit record, not on the exception.
     removal = {event.target_id: event.details.get("removal") for event in db.scalars(select(Audit).where(
         Audit.action == "access.closed", Audit.target_id.in_([row.id for row in rows if row.status == "ended"])))}
+    if auth[0].role != "admin":
+        # What went wrong at a source is written for an administrator: a member is given none of it. Of an
+        # ending a member is told only whether it left the address closed, never why not or whose entry it was.
+        return [{**lease_json(row), "last_error": None,
+                 "closed": removal.get(row.id) in ("removed", "already_gone")} for row in rows]
+    names, known = _names(db), set(db.scalars(select(Integration.id)))
     return [{**lease_json(row, names), "source_removed": bool(row.integration_id) and row.integration_id not in known,
              "removal": removal.get(row.id), "checking_until": checking_until(row)} for row in rows]
 

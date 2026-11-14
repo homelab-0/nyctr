@@ -655,7 +655,10 @@ describe('what the member portal says happened', () => {
     ['expired', 'The time ran out.'],
   ])('says how an opening that ended as %s ended', async (ended_reason, heading) => {
     open(
-      { 'GET /requests': [request({})], 'GET /leases': [lease({ status: 'ended', ended_reason })] },
+      {
+        'GET /requests': [request({})],
+        'GET /leases': [lease({ status: 'ended', ended_reason, closed: true })],
+      },
       '/portal?request=r1',
     );
     expect(await screen.findByRole('heading', { name: heading })).toBeDefined();
@@ -711,5 +714,58 @@ describe('the list of blocked sites when the requests could not be read', () => 
     await user.click(within(note).getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/min left/)).toBeDefined();
     expect(screen.queryByText(/could not read your requests/)).toBeNull();
+  });
+});
+
+describe('an exception that ended with the address still allowed', () => {
+  it.each([
+    ['revoked', 'An administrator ended it.'],
+    ['expired', 'The time ran out.'],
+  ])('says it ended (%s) and never that access closed', async (ended_reason, heading) => {
+    const { user } = open(
+      {
+        'GET /requests': [request({})],
+        // Applied, and its ending left the address as it was: the server says `closed: false`.
+        'GET /leases': [lease({ status: 'ended', ended_reason, owned: false, closed: false })],
+      },
+      '/portal?request=r1',
+    );
+    expect(await screen.findByRole('heading', { name: heading })).toBeDefined();
+    expect(screen.getByText(/^The approval for photos.example has ended\./)).toBeDefined();
+    expect(document.body.textContent).not.toMatch(/closed again|closed it/i);
+    await user.click(screen.getByRole('link', { name: /My requests/ }));
+    const row = within((await screen.findByText('photos.example')).closest('a') as HTMLElement);
+    expect(row.getByText('Ended')).toBeDefined();
+    expect(row.queryByText('Closed again')).toBeNull();
+  });
+
+  it('says closed again when the ending did close it', async () => {
+    const { user } = open({
+      'GET /requests': [request({})],
+      'GET /leases': [lease({ status: 'ended', ended_reason: 'expired', closed: true })],
+    });
+    await user.click(await screen.findByRole('link', { name: /My requests/ }));
+    expect(await screen.findByText('Closed again')).toBeDefined();
+  });
+});
+
+describe('an opening that was not confirmed, if a member were ever sent one', () => {
+  it('is never told as not on: the status is read before the result', async () => {
+    const { user } = open(
+      {
+        'GET /requests': [request({ status: 'approved', decided_by: 'admin' })],
+        'GET /leases': [lease({ status: 'unconfirmed', execution: 'not_applied', owned: true })],
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+      },
+      '/portal?request=r1',
+    );
+    expect(await screen.findByRole('heading', { name: 'Not confirmed yet.' })).toBeDefined();
+    expect(screen.getByText(/so it may or may not work/)).toBeDefined();
+    for (const link of [/My requests/, /Blocked sites/]) {
+      await user.click(screen.getAllByRole('link', { name: link })[0]);
+      const row = within((await screen.findByText('photos.example')).closest('a') as HTMLElement);
+      expect(row.getByText('Not confirmed yet')).toBeDefined();
+    }
+    expect(document.body.textContent).not.toMatch(/not on yet|not switched on|It's open/);
   });
 });
