@@ -55,7 +55,9 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
           <p className="lede">
             {open.length
               ? `${plural(open.length, 'exception')} open. Temporary ones close themselves when their time is up.`
-              : 'Nothing is open. Temporary access appears here while it lasts.'}
+              : active.length
+                ? 'No exception is open. What is listed below was not confirmed and is not access.'
+                : 'Nothing is open. Temporary access appears here while it lasts.'}
           </p>
         </div>
       </header>

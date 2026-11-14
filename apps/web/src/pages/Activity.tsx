@@ -74,6 +74,11 @@ const ATTEMPT: Record<string, string> = {
  */
 function what(event: AuditEvent, sources: Map<string, string> | null) {
   const about = ABOUT_A_SOURCE[event.action];
+  // The record of an opening that was never confirmed is not access: settling it closed nothing.
+  if (event.action === 'access.closed' && event.details?.reason === 'not_confirmed')
+    return 'Settled an opening that was never confirmed';
+  if (event.action === 'access.close_failed' && event.details?.record === true)
+    return 'Could not settle an opening that was never confirmed';
   const tried = ATTEMPT[event.action];
   const did = event.details?.execution;
   if (tried && did !== 'applied')
@@ -178,7 +183,9 @@ function summary(event: AuditEvent) {
         ? `now every ${counted(Math.round(next.interval_seconds / 60), 'minute')}`
         : 'now turned off',
     );
-  if (typeof d.reason === 'string' && d.reason) parts.push(REASONS[d.reason] || d.reason);
+  // That reason is already the row's own words (see `what`).
+  if (typeof d.reason === 'string' && d.reason && d.reason !== 'not_confirmed')
+    parts.push(REASONS[d.reason] || d.reason);
   // Why a collection failed, in the words the source's card uses, or why an approval opened nothing,
   // in the sentence the administrator was answered with; and when the next try is due.
   if (typeof d.why === 'string' && d.why) parts.push(d.why);

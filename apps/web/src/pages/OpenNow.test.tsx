@@ -174,4 +174,18 @@ describe('ending an exception', () => {
     expect(text).not.toMatch(/left|Closing|An administrator/);
     expect(row('settled.example').getByText(/^Not opened/)).toBeTruthy();
   });
+
+  it('does not say nothing is open above an opening that may be open at the source', async () => {
+    mockApi({
+      'GET /leases': [
+        lease('slow', { status: 'unconfirmed', execution: 'not_applied', last_error: 'x' }),
+      ],
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={() => {}} />);
+    expect(
+      await screen.findByText(/^No exception is open\. What is listed below was not confirmed/),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Nothing is open');
+  });
 });

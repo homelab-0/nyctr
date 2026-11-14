@@ -238,9 +238,9 @@ async def _not_confirmed(db: Session, settings: Settings, claim: Claim, error: B
     # after its own read found the address absent: the entry may then be there, and if it is, it is Nyctr's.
     sent_absent = added if added is not None else getattr(error, "add_sent", None)
     ours = sent_absent or (sent_absent is None and claim.said is False)
-    if not sent or added is False or isinstance(error, SourceGone) or (claim.said is not None and not ours) \
+    if not sent or sent_absent is False or isinstance(error, SourceGone) or (claim.said is not None and not ours) \
             or (record is None and not ours):
-        return release_entry(db, claim)
+        return release_entry(db, claim)  # Also when the add itself says it was never sent: nothing of Nyctr's is there.
     if not _mine(db, claim):
         # Whatever way the opening came out (returned, failed, cut off, stopped): its claim is no longer its
         # own, so it stood still past the hold and others changed the address meanwhile. Its entry may have been
@@ -405,7 +405,8 @@ OPEN = ("active", "unconfirmed")
 # What an administrator reads beside such a record: where Nyctr knows the entry would be its own, and
 # where the source could not say whether the address was there before.
 NOT_CONFIRMED = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. "
-                 "Unless the opening completes, Nyctr removes it.")
+                 "Unless the opening completes, Nyctr removes it. Until then Nyctr takes an entry for {domain} "
+                 "there to be its own: do not add it there by hand while it is listed here.")
 NOT_KNOWN = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. Nyctr cannot "
              "tell whether it put it there, so it removes nothing. Check at {name}, then end this here.")
 THERE = ("Nyctr tried to open {domain} at {name} and has not confirmed it. The address was already allowed there "
@@ -584,15 +585,27 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         using = (Lease.status == "active", Lease.id != lease.id, Lease.domain == lease.domain,
                  Lease.integration_id == lease.integration_id, Lease.execution == "applied")
         # Nyctr added this entry: whoever still uses it carries the duty to remove it from here on. Only an
-        # exception that is still open has a duty to pass on. The update is also the count, so an exception
-        # another copy is ending at this moment is either marked first or not counted.
-        others = lease.status in OPEN and db.execute(
-            update(Lease).where(*using).values(owned=True).execution_options(synchronize_session=False)).rowcount
-        if lease.status in OPEN and not others:
+        # exception that is still open has a duty to pass on, and only once the source's own read says the
+        # entry is there: otherwise an exception backed by a person's entry would be marked Nyctr's on a guess.
+        # If the read fails, nothing is ended and it is tried again. The update is also the count, so an
+        # exception another copy is ending at this moment is either marked first or not counted.
+        others = lease.status in OPEN and db.scalar(select(func.count()).select_from(Lease).where(*using))
+        integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
+        key = _secret(integration) if integration else None
+        opener = _opener(integration)
+        if others and key and getattr(opener, "domain_listed", None):
+            try:
+                there = await opener.domain_listed(integration.config, key, lease.domain)
+            except IntegrationError as error:
+                there, failure = False, str(error)
+            except BaseException:  # Stopped mid-call: give the claim back so the next start can end it.
+                release_entry(db, claim)
+                raise
+            if there:
+                others = db.execute(update(Lease).where(*using).values(owned=True)
+                                    .execution_options(synchronize_session=False)).rowcount
+        if lease.status in OPEN and not others and not failure:
             db.commit()  # Nothing was marked: end the transaction, so no write lock is held during the call.
-            integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
-            key = _secret(integration) if integration else None
-            opener = _opener(integration)
             try:
                 if not integration or not key or not opener:
                     raise IntegrationError("The source's secret is not configured on the server.")
@@ -611,7 +624,7 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         raise BeingEnded
     if failure:
         lease.last_error = lease.last_error if unconfirmed else failure
-        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain)
+        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain, **({"record": True} if unconfirmed else {}))
         return False
     if not still_open(db, lease.id):
         db.refresh(lease)
@@ -622,6 +635,7 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             return await end_lease(db, settings, lease, reason, actor)
     reason, outcome = ("not_confirmed", "applied" if removed else "not_applied") if unconfirmed else \
         (reason, lease.execution)
+    lease.execution = outcome  # For a record: what settling it did at the source, in its row as in the audit.
     lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", reason, utcnow(), None
     audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=outcome,
           **({"removal": removal} if removal else {}))
@@ -836,7 +850,9 @@ async def end(lease_id: str, request: Request, body: EndInput | None = None, use
         raise HTTPException(409, "Nyctr is already ending this exception. Look again in a moment.") from None
     db.commit()
     if not done:
-        raise HTTPException(502, "Nyctr could not remove the entry at the source. It is still open and will be retried.")
+        raise HTTPException(502, "Nyctr could not reach the source to check for the entry. It stays listed as not "
+                                 "confirmed and Nyctr tries again." if lease.status == "unconfirmed" else
+                            "Nyctr could not remove the entry at the source. It is still open and will be retried.")
     return lease_json(lease, _names(db))
 
 

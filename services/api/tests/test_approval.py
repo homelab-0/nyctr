@@ -451,8 +451,9 @@ def test_one_pass_that_ends_both_exceptions_of_an_entry_removes_it_whichever_com
                 assert await access.reconcile(db, app.state.settings) == 2
 
         asyncio.run(scenario())
-        assert source.calls == ["GET", "DELETE", "GET"] and source.listed == [] and claims(app) == []
-        assert [row[0] for row in rows(app)] == ["ended", "ended"]
+        # Ending Nyctr's own first, the source is asked whether the entry is there before the duty is passed on.
+        assert source.calls == ["GET"] * (first == "own") + ["GET", "DELETE", "GET"]
+        assert source.listed == [] and claims(app) == [] and [row[0] for row in rows(app)] == ["ended", "ended"]
 
 
 @pytest.mark.parametrize("moment", ["passed on while ending", "ended while claiming"])
@@ -594,9 +595,10 @@ def test_a_turn_that_does_not_come_is_said_as_that_and_not_as_a_failure_of_the_s
 
 @pytest.mark.parametrize("failure, sent", [("no connection", False), ("refused before sending", False),
                                            ("the source answers 500", True), ("the read-back fails", True),
-                                           ("its own read fails", None)])
+                                           ("its own read fails", False)])
 def test_the_add_marks_its_error_only_when_its_add_was_sent(monkeypatch, failure, sent):
-    """Sent after its own read found the address absent: marked. Never left, or failed before that: not."""
+    """Sent after its own read found the address absent: marked as sent. Never left, or failed before that:
+    marked as not sent, so that core keeps no record of an entry of its own."""
     source = Source(monkeypatch)
     real = source.answer
 

@@ -125,20 +125,23 @@ async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, al
     name, profile = _domain(domain), _path_id(config["profile_id"])
     async with core.make_http_client(api_key) as client:
         reader = ReadClient(client, NEXTDNS_BASE)
-        before = await _allowlist(reader, profile)
-        if before.get(name) is True:
-            return {"owned": False, "verified": True}
-        if name in before:
-            raise IntegrationError("That domain is on the allowlist but switched off. Nyctr will not change it.")
-        sent = False
+        stage = "read"
         try:
+            before = await _allowlist(reader, profile)
+            if before.get(name) is True:
+                return {"owned": False, "verified": True}
+            if name in before:
+                raise IntegrationError("That domain is on the allowlist but switched off. Nyctr will not change it.")
+            stage = "add"
             await exchange(reader, "POST", f"/profiles/{profile}/allowlist", body={"id": name, "active": True})
-            sent = True
+            stage = "sent"
             after = await _allowlist(reader, profile)
             if after.get(name) is not True:
                 raise IntegrationError("NextDNS accepted the request but the domain is not on the allowlist.")
-        except BaseException as error:  # Its own read found the address absent: say whether its add was sent.
-            error.add_sent = sent or not _never_left(error)
+        except BaseException as error:
+            # Say whether its add was sent: never before its own read found the address absent, and not when
+            # the add never left. Core keeps no record of an entry of its own when nothing was sent.
+            error.add_sent = stage == "sent" or (stage == "add" and not _never_left(error))
             raise
         return {"owned": True, "verified": True}
 
