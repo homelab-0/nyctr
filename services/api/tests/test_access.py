@@ -274,7 +274,7 @@ def test_enabled_writes_add_verify_and_remove_only_what_nyctr_created(tmp_path, 
         assert row["status"] == "auto_approved" and allowlist == ["click.proofing-studio.example"]
         lease = client.get("/api/leases").json()[0]
         assert lease["execution"] == "applied" and lease["owned"] is True
-        assert [c[0] for c in calls] == ["GET", "POST", "GET"]
+        assert [c[0] for c in calls] == ["GET", "GET", "POST", "GET"]  # Asked first whether it is there.
         with app.state.session_factory() as db:
             db.get(Lease, lease["id"]).expires_at = utcnow() - timedelta(seconds=1)
             db.commit()

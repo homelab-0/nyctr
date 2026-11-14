@@ -126,6 +126,9 @@ class Provider:
     allow_domain: Callable[..., Awaitable[dict[str, Any]]] | None = None
     # disallow_domain(config, key, domain, *, allowed) -> {"removed": bool, "verified": bool}
     disallow_domain: Callable[..., Awaitable[dict[str, Any]]] | None = None
+    # Optional read: domain_listed(config, key, domain) -> bool, whether the address is already allowed
+    # there. With it, Nyctr removes by itself what an opening that failed or was interrupted left behind.
+    domain_listed: Callable[..., Awaitable[bool]] | None = None
     # issue_pass(config, key, scope, *, name, minutes, guest_limit, data_limit_mb, allowed) -> {"id", "code"}
     issue_pass: Callable[..., Awaitable[dict[str, Any]]] | None = None
     # end_pass(config, key, scope, pass_id, *, allowed) -> None

@@ -732,7 +732,8 @@ def create_app(settings: Settings | None = None):
             try:
                 claim = await access.hold_entry(db, settings, integration, row.domain)
             except IntegrationError as error:
-                raise HTTPException(409, str(error)) from None
+                refused = isinstance(error, (access.NotCollected, access.EntryBusy))
+                raise HTTPException(409 if refused else 502, str(error)) from None
         # Compare and swap prevents simultaneous administrators overwriting each other.
         result = db.execute(update(AccessRequest).where(AccessRequest.id == request_id,
                                                        AccessRequest.status == "pending").values(

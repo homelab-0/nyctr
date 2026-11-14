@@ -266,4 +266,5 @@ PROVIDER = Provider(
     },
     validate=validate, collect=collect_nextdns, classify=classify,
     allow_domain=actions.nextdns_allow, disallow_domain=actions.nextdns_disallow,
+    domain_listed=actions.nextdns_listed,
 )

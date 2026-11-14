@@ -158,6 +158,18 @@ describe('Activity rows about a change at a source', () => {
           retry_at: '2026-11-13T10:42:00Z',
         }),
         event('s', 'integration.collection_failed', { name: 'Gateway', why: 'Could not connect.' }),
+        // An opening the source did not confirm, and how its record ended: here the record does say.
+        event('u', 'access.open_unconfirmed', { domain: 'unsure.example', execution: 'failed' }),
+        event('v', 'access.closed', {
+          domain: 'undone.example',
+          reason: 'not_confirmed',
+          execution: 'applied',
+        }),
+        event('w', 'access.closed', {
+          domain: 'never.example',
+          reason: 'not_confirmed',
+          execution: 'not_applied',
+        }),
         ...['secret', 'secret_ref', 'missing'].map((reason) =>
           event(reason, 'integration.retries_stopped', { name: `Source ${reason}`, reason }),
         ),
@@ -188,6 +200,15 @@ describe('Activity rows about a change at a source', () => {
     );
     expect(about('left.example')).toBe(
       'left.example · already allowed at the source, left as it was',
+    );
+    expect(about('unsure.example')).toBe(
+      'unsure.example · the source did not confirm it, so it may be open there',
+    );
+    expect(about('undone.example')).toBe(
+      'undone.example · taken back out at the source · the opening was never confirmed',
+    );
+    expect(about('never.example')).toBe(
+      'never.example · nothing was removed at the source · the opening was never confirmed',
     );
     expect(detail('Cut a guest off')).toBe('without access at the source · Asked to leave');
     // A headline reads as done only when the record says applied.

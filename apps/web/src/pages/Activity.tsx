@@ -14,6 +14,7 @@ const WORDS: Record<string, string> = {
   'access.requested': 'Asked for access',
   'access.opened': 'Access opened',
   'access.open_undone': 'Access opened while its source was being removed or changed',
+  'access.open_unconfirmed': 'Access could not be confirmed open',
   'access.closed': 'Access closed',
   'access.close_failed': 'Access could not be closed',
   'access.approved': 'Approved a request',
@@ -97,6 +98,7 @@ const REASONS: Record<string, string> = {
   expired: 'its time ran out',
   revoked: 'ended early by a person',
   removed_by_hand: 'removed at the source by hand, so nothing was sent',
+  not_confirmed: 'the opening was never confirmed',
   schedule_off: 'scheduled collection was turned off',
   secret: 'its secret is no longer set on the server',
   secret_ref: 'the name of its secret on the server is not a valid one',
@@ -125,6 +127,7 @@ const APPLIED: Record<string, string> = {
 const LEFT_ALONE = 'already allowed at the source, left as it was';
 /** A failure is any error: the source may have refused, not answered, or never been asked. */
 const FAILED: Record<string, string> = {
+  'access.open_unconfirmed': 'the source did not confirm it, so it may be open there',
   'access.open_undone': 'could not be taken back out, so remove it at the source by hand',
   'guest.pass_undone': 'could not be ended, so end it at the source by hand',
 };
@@ -136,6 +139,11 @@ function outcome(event: AuditEvent) {
     return 'could not be removed at the source, so it is still open';
   if (d.execution === 'simulated') return 'simulated, nothing was sent to the source';
   if (d.execution === 'failed') return FAILED[event.action] || 'did not go through';
+  // For an opening that was never confirmed, the record does say what closing it did at the source.
+  if (event.action === 'access.closed' && d.reason === 'not_confirmed' && d.execution !== 'failed')
+    return d.execution === 'applied'
+      ? APPLIED['access.open_undone']
+      : 'nothing was removed at the source';
   if (d.execution === 'not_applied')
     return event.action === 'access.open_undone' ? LEFT_ALONE : 'nothing changed at the source';
   if (d.execution !== 'applied') return undefined;

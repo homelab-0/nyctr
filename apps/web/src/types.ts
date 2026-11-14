@@ -244,7 +244,8 @@ export interface Lease {
   requester_name?: string;
   decided_by_name?: string;
   kind: 'temporary' | 'permanent';
-  status: 'active' | 'ended';
+  /** `unconfirmed`: an opening Nyctr could not confirm. Never access; `last_error` says where it stands. */
+  status: 'active' | 'unconfirmed' | 'ended';
   ended_reason: string | null;
   execution: Execution;
   owned: boolean;
