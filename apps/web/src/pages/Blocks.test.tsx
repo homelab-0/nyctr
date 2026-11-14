@@ -55,9 +55,38 @@ describe('Blocks', () => {
       ],
     });
     render(<Blocks />);
-    expect(await screen.findByText('Not collected yet')).toBeDefined();
+    expect(await screen.findByText('Could not be collected')).toBeDefined();
     expect(document.body.textContent).toContain('Home DNS could not be collected: Key refused');
     expect(document.body.textContent).not.toContain('No blocked lookups are stored');
+  });
+
+  it('does not call the last collection empty when the source collected once and is failing now', async () => {
+    const dns = { ...source('Home DNS', 'connected'), provides: ['dns.blocks'] };
+    mockApi({
+      'GET /blocks': [],
+      'GET /integrations': [{ ...dns, last_sync: 'x', last_error: 'Key refused' }],
+    });
+    render(<Blocks />);
+    expect(await screen.findByText('Could not be collected')).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page).toContain('Blocked lookups could not be collected.');
+    expect(page).toContain('since its last collection that worked is missing here');
+    expect(page).not.toContain('No blocked lookups are stored');
+    expect(page).not.toContain('The last collection brought none back');
+    cleanup();
+    mockApi({ 'GET /blocks': [], 'GET /integrations': [{ ...dns, last_sync: 'x' }] });
+    render(<Blocks />);
+    expect(await screen.findByText('No blocked lookups are stored')).toBeDefined();
+  });
+
+  it('does not say a source names no device when one of its lookups names one', async () => {
+    const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
+    const named = { ...block('two', 9), device_id: 'd1', attribution: 'assigned' } as Block;
+    mockApi({ 'GET /blocks': [block('one', 5), named], 'GET /integrations': [dns] });
+    render(<Blocks />);
+    expect(await screen.findByText('one.example')).toBeDefined();
+    expect(screen.queryByText(/does not say which device/)).toBeNull();
+    expect(screen.queryByText('The source does not say')).toBeNull();
   });
 
   it('says the span the stored lookups cover and which source was only partly read', async () => {

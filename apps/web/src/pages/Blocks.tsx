@@ -12,7 +12,7 @@ import {
   SourceTag,
 } from '../components/ui';
 import { lookupSpan } from '../lib/counts';
-import { uncollected, whyEmpty } from '../lib/coverage';
+import { failing, uncollected, whyEmpty } from '../lib/coverage';
 import { ago, useNow } from '../lib/format';
 import type { Block, Catalog, Integration, RiskBand } from '../types';
 
@@ -63,8 +63,12 @@ export default function Blocks() {
           <h1 className="display d2">Blocks</h1>
           <p className="lede">
             Lookups your DNS sources refused.{' '}
-            {!stored && waiting.length ? 'Blocked lookups have not been collected yet.' : span} The
-            score is rule-based from the block reason; no score means unknown, not safe.
+            {!stored && waiting.length
+              ? waiting.some(failing)
+                ? 'Blocked lookups could not be collected.'
+                : 'Blocked lookups have not been collected yet.'
+              : span}{' '}
+            The score is rule-based from the block reason; no score means unknown, not safe.
           </p>
           {sources.error && (
             <div className="note yellow" role="alert">
@@ -99,7 +103,12 @@ export default function Blocks() {
           })}
           {waiting.map((source) => (
             <div className="note yellow" key={source.id}>
-              <span>{whyEmpty(source)}, so none of its blocked lookups are listed here.</span>
+              <span>
+                {whyEmpty(source)},{' '}
+                {source.last_sync
+                  ? 'so anything it has blocked since its last collection that worked is missing here.'
+                  : 'so none of its blocked lookups are listed here.'}
+              </span>
             </div>
           ))}
           {partial.map((source) => (
@@ -141,7 +150,7 @@ export default function Blocks() {
           />
         ) : waiting.length ? (
           <Empty
-            title="Not collected yet"
+            title={waiting.some(failing) ? 'Could not be collected' : 'Not collected yet'}
             text="Nothing is known about blocked lookups until a collection succeeds."
           />
         ) : (

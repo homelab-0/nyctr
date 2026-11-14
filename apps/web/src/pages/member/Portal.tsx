@@ -102,6 +102,12 @@ function notKnown(data: Data): { title: string; text: string } | null {
       title: 'No devices are assigned to you yet',
       text: `Nyctr shows blocked sites only for devices that are yours, and it does not know of any. ${ASK} to add your devices.`,
     };
+  // Without the answer an empty list cannot be called clean, so the failure is said instead.
+  if (data.coverage.error)
+    return {
+      title: 'Nyctr cannot tell right now whether anything was blocked',
+      text: `It could not check whether blocked sites are being collected. Open this page again in a moment. ${ASK} if it keeps happening.`,
+    };
   const cover = data.coverage.data;
   if (cover?.collected === 'failed')
     return {
@@ -111,12 +117,7 @@ function notKnown(data: Data): { title: string; text: string } | null {
   if (cover && cover.collected !== 'yes')
     return {
       title: 'Blocked sites have not been collected yet',
-      text: `Nyctr has not read what was blocked on this network so far, so it does not know whether a site was blocked for you. ${ASK} when it will.`,
-    };
-  if (cover?.devices_named === 'none')
-    return {
-      title: 'Blocked sites cannot be shown per device here',
-      text: `Sites are being blocked on this network, but Nyctr cannot tell which device each one was on, so it cannot show you yours. ${ASK} about a page that will not load.`,
+      text: `Nyctr has not finished reading what was blocked on this network, so it does not know whether a site was blocked for you. ${ASK} when it will.`,
     };
   return null;
 }
@@ -178,11 +179,11 @@ function Home({ data }: { data: Data }) {
   const here = data.device.data;
   const gap = notKnown(data);
   const noDevices = data.devices.data?.length === 0;
-  // Some lookups name no device, so a block of theirs may be among those and missing here.
-  const partly =
-    data.coverage.data?.devices_named === 'some'
-      ? ` Some blocked sites here cannot be tied to a device, so one of yours may be missing. ${ASK} if a page will not load.`
-      : '';
+  // Some stored lookups are tied to nobody's device, so a block of theirs may be among those and
+  // missing here. That is said whether or not this person's list is empty.
+  const partly = data.coverage.data?.unassigned
+    ? `Some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
+    : '';
   const requestFor = useMemo(
     () => new Map((data.requests.data || []).map((row) => [row.block_id, row])),
     [data.requests.data],
@@ -268,7 +269,7 @@ function Home({ data }: { data: Data }) {
             title={gap?.title || 'Nyctr has not seen that blocked on your devices'}
             text={
               gap?.text ||
-              `Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here.${partly}`
+              `Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here. ${partly}`.trim()
             }
           />
         ))}
@@ -288,10 +289,18 @@ function Home({ data }: { data: Data }) {
           ))}
         </section>
       )}
+      {blocks.length > 0 && partly && !gap && <p className="aside">{partly}</p>}
       {blocks.length === 0 && found === null && !noDevices && (
         <Empty
-          title={gap?.title || 'Nothing has been blocked on your devices in the last day'}
-          text={gap?.text || `If a page will not load, open it again, then ${comeBack}${partly}`}
+          title={
+            gap?.title ||
+            (partly
+              ? 'Nyctr has not seen anything blocked on your devices in the last day'
+              : 'Nothing has been blocked on your devices in the last day')
+          }
+          text={
+            gap?.text || `If a page will not load, open it again, then ${comeBack} ${partly}`.trim()
+          }
         />
       )}
     </div>
