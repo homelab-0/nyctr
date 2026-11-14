@@ -126,14 +126,57 @@ def test_a_gap_text_never_states_a_cause_the_sentence_beside_it_may_contradict()
                 assert describe_gaps(provider.gap_notes, {code: [cause]})[0][2] == f"{text} {sentence}"
 
 
+def _texts(node):
+    """The fixed words of an expression: a string, each side of a join or a choice, an f-string without its values."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.JoinedStr):
+        return ["{}".join(part.value for part in node.values if isinstance(part, ast.Constant))]
+    if isinstance(node, ast.BinOp):
+        return _texts(node.left) + _texts(node.right)
+    if isinstance(node, ast.IfExp):
+        return _texts(node.body) + _texts(node.orelse)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [text for item in node.elts for text in _texts(item)]
+    return []
+
+
+def _answers():
+    """Every sentence a refusal or failure is raised with, and every line a connection test can show.
+
+    Read from the parsed server, so a sentence's second line, one raised through a subclass of the
+    integration error and a summary first held in a variable are all found.
+    """
+    trees = {path: ast.parse(path.read_text()) for path in sorted(API.rglob("*.py"))}
+    classes = [node for tree in trees.values() for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    raised = {"IntegrationError", "HTTPException"}
+    while True:  # Subclasses, and theirs.
+        more = {node.name for node in classes if {getattr(base, "id", "") for base in node.bases} & raised}
+        if more <= raised:
+            break
+        raised |= more
+    said = []
+    for path, tree in trees.items():
+        checks = path.name == "diagnostics.py"  # Summaries and what to do, however they reach the answer.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                # A subclass that words its own sentence hands it to `super().__init__`.
+                name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+                if checks or name in raised or name == "__init__":
+                    said += [text for part in (*node.args, *(key.value for key in node.keywords))
+                             for text in _texts(part)]
+            elif checks and isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                said += _texts(node.value)
+    return said
+
+
 def test_no_sentence_the_server_answers_with_says_provider_or_sync():
     """Refusals, failures and connection-test lines say source and collect. Sign-in keeps "identity provider"."""
-    source = "\n".join(path.read_text() for path in sorted(API.rglob("*.py")))
-    said = re.findall(r'(?:IntegrationError|HTTPException)\(\s*(?:\d+,\s*)?f?"([^"]+)"', source)
+    said = [text for text in _answers() if " " in text]
     said += [text for pair in diagnostics._FAILURES.values() for text in pair] + list(diagnostics._CHECK_LABELS.values())
-    assert len(said) > 150
-    assert [text for text in said if re.search(r"\bprovider|\bsync", re.sub(r"identity.provider", "", text, flags=re.I),
-                                               re.I)] == []
+    assert len(set(said)) > 190
+    assert sorted({text for text in said if re.search(
+        r"\bprovider|\bsync", re.sub(r"identity.provider", "", text, flags=re.I), re.I)}) == []
 
 
 def test_a_request_limit_is_told_in_the_pages_own_words():
