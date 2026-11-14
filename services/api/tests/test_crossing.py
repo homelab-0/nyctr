@@ -290,3 +290,21 @@ def test_a_removal_that_returns_after_its_claim_was_taken_over_leaves_the_newer_
 
     with started(tmp_path) as (app, *_):
         asyncio.run(scenario(app))
+
+
+def test_the_approval_route_refuses_whom_it_refused_before_and_they_take_no_claim(tmp_path, monkeypatch):
+    """A member, someone signed out, and a missing or wrong token are turned away before any claim or call."""
+    with started(tmp_path) as (app, client, member, admin):
+        source, wrong = Source(monkeypatch), {"X-CSRF-Token": "fabricated-wrong-token"}
+        client.cookies.clear()
+        client.cookies.update(member["cookies"])
+        made = client.post("/api/requests", headers=member["headers"], json=ask("one")).json()
+        for cookies, headers, refused in ((member["cookies"], member["headers"], 403), ({}, admin["headers"], 401),
+                                          (admin["cookies"], {}, 403), (admin["cookies"], wrong, 403)):
+            client.cookies.clear()
+            client.cookies.update(cookies)
+            answer = client.post(f"/api/requests/{made['id']}/review", headers=headers,
+                                 json={"decision": "approved", "note": "Looked at it"})
+            assert answer.status_code == refused and source.calls == [] and claims(app) == []
+        with app.state.session_factory() as db:
+            assert db.get(AccessRequest, made["id"]).status == "pending" and db.scalars(select(Lease)).all() == []
