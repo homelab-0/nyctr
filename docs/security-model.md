@@ -124,7 +124,10 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   Lease reconciliation, scheduled collection and the assistant's rate limit run
   inside the API process. A scheduled run, and each retry of a source that
   failed it, is claimed in the database so two copies do not both perform it;
-  a restart may drop a claimed retry, and the next run covers the source. The nudge and the assistant's limit are still
+  a restart may drop a claimed retry, and the next run covers the source. Expired
+  exceptions are ended on every tick, separately from collection, and an entry
+  is claimed in the database before it is removed, so two copies, or the tick
+  and a person, remove and record it once. The nudge and the assistant's limit are still
   per process.
 - Scheduled collection is on by default and only an administrator can change it
   (`PUT /api/collection`); every change is audited with the old and new
