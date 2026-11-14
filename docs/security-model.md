@@ -132,19 +132,26 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   removal of one address cannot cross. Each change at a source ends within 60
   seconds, as failed if it has not finished. An opening that fails after its add
   may have been sent leaves a record, and Nyctr removes the entry itself. Known
-  limits: if a person adds the same address at the source in the second between
-  Nyctr asking whether it is there and Nyctr's own add, and that opening then
-  fails or is killed, Nyctr removes the entry as its own. If the address was
-  there when Nyctr asked, a person removes it in that second, Nyctr's add is
-  sent and that copy is killed before it records the add's answer, the entry
-  stays with nothing on record (a failure short of a kill is recorded and the
-  entry removed). An opening that stands still for more than five minutes
-  after its add cannot know what became of its entry: Nyctr removes nothing on
-  its word and asks an administrator to check at the source, so an entry of
-  Nyctr's can stay there until a person ends it. After a copy is killed during
-  an approval, that request can be decided again only once its claim is five
-  minutes old. The nudge and the
-  assistant's limit are still per process.
+  limits. From the moment a record is listed as not confirmed until it is
+  settled, Nyctr takes an entry for that address at that source to be its own
+  and removes it: an administrator must not add the address there by hand while
+  Open now lists it as not confirmed, and the row says so. Nyctr keeps no such
+  record when the add itself reports that nothing was sent. It does keep one
+  when it cannot know: after a copy is killed between storing the record and
+  the add's answer, the record lives five minutes, and an entry a person adds
+  in those five minutes is removed; and for as long as a source keeps failing
+  after an add that may have been sent. If the address was there when Nyctr
+  asked, a person removes it in that second, Nyctr's add is sent and that copy
+  is killed before it records the add's answer, the entry stays with nothing on
+  record (a failure short of a kill is recorded and the entry removed). An
+  entry is passed on to another exception only after the source says it is
+  there; a source that offers no such read is never passed an entry. An
+  opening that stands still for more than five minutes after its add cannot
+  know what became of its entry: Nyctr removes nothing on its word and asks an
+  administrator to check at the source, so an entry of Nyctr's can stay there
+  until a person ends it. After a copy is killed during an approval, that
+  request can be decided again only once its claim is five minutes old. The
+  nudge and the assistant's limit are still per process.
 - Scheduled collection is on by default and only an administrator can change it
   (`PUT /api/collection`); every change is audited with the old and new
   value. Collection only reads, but the guest cut-off rule and lock-out act at
