@@ -223,7 +223,7 @@ describe('Activity rows about a change at a source', () => {
     // A record kept before the ending recorded its word says it from the outcome; later ones from the word.
     expect(about('undone.example')).toBe('undone.example · removed at the source');
     expect(about('never.example')).toBe(
-      'never.example · nothing was removed at the source · Nyctr looked for 5 minutes',
+      'never.example · nothing was removed at the source · settled 5 minutes after the attempt',
     );
     expect(about('handed.example')).toBe(
       'handed.example · left at the source, another open exception still needs it',

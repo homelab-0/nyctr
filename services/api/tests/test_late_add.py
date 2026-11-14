@@ -182,3 +182,32 @@ def test_when_the_time_is_up_the_record_is_settled_and_says_how_long_nyctr_looke
         source.land()
         asyncio.run(ticked(app))
         assert source.listed == [DOMAIN]  # The known limit: applied more than five minutes late.
+
+
+def test_an_openings_own_record_never_makes_a_persons_entry_nyctrs_own(tmp_path, monkeypatch):
+    """No earlier attempt. A person adds the address by hand between Nyctr's first read and its add's own read, so
+    the add finds it there and sends nothing. The opening's own record is on record for the address at that
+    moment; it must not count as an earlier attempt of Nyctr's. The exception is stored as not Nyctr's, and when it
+    ends nothing is sent and the person's entry is still there."""
+    with started(tmp_path) as (app, _client, member, admin):
+        source = Source(monkeypatch)
+        real = source.answer
+
+        async def answer(request):
+            if len(source.calls) == 1:
+                source.listed.append(DOMAIN)  # By hand, between the two reads.
+            return await real(request)
+        source.answer = answer
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                assert (await review(owner, made)).status_code == 200 and source.calls == ["GET", "GET"]
+                with app.state.session_factory() as db:  # As stored, before any later look.
+                    stored = db.scalars(select(Lease)).one()
+                    assert (stored.status, stored.execution, stored.owned) == ("active", "applied", False)
+                assert (await owner.post(f"/api/leases/{stored.id}/end")).status_code == 200
+
+        asyncio.run(scenario())
+        assert source.calls == ["GET", "GET"] and source.listed == [DOMAIN] and words(app) == ["not_owned"]
+        assert claims(app) == []
