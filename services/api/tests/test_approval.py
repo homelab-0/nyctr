@@ -799,3 +799,27 @@ def test_an_entry_is_passed_on_only_when_the_source_says_it_is_there(tmp_path, m
         assert ("DELETE" in source.calls) == (source_says == "there")
         assert source.listed == ([DOMAIN] if source_says == "not there" else [])
         assert [row[0] for row in rows(app)].count("unconfirmed") == (source_says == "the read fails")
+
+
+@pytest.mark.parametrize("says", [False, None])
+def test_a_source_without_the_first_read_leaves_no_record_when_its_add_says_nothing_was_sent(tmp_path, monkeypatch,
+                                                                                            says):
+    """Nothing was asked first, so only the add's own word can tell. Not sent: no record. No word: a record a
+    person checks, as before."""
+    class NoRead:
+        async def allow_domain(self, config, key, domain, *, allowed):
+            error = IntegrationError("The source did not answer.")
+            if says is not None:
+                error.add_sent = says
+            raise error
+
+    with started(tmp_path, rule=True) as (app, _client, member, _admin):
+        Source(monkeypatch)
+        monkeypatch.setattr(access, "_opener", lambda integration: NoRead())
+
+        async def scenario():
+            async with console(app, member) as sam:
+                return (await sam.post("/api/requests", json=ask("one"))).json()["status"]
+
+        assert asyncio.run(scenario()) == "pending" and claims(app) == []
+        assert rows(app) == ([] if says is False else [("unconfirmed", None, False)])
