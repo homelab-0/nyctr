@@ -265,8 +265,8 @@ def test_guests_sign_in_through_unifi_and_nyctr_only_describes_it(client, admin_
     """The overview states that UniFi serves the portal and lists which Wi-Fi names are behind it."""
     portal = client.get("/api/guests").json()["portal"]
     assert portal["served_by"] == ["UniFi Network"] and portal["nyctr_in_guest_path"] is False
-    assert {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network": "Guest network"} in portal["wifi"]
-    assert [w["captive_portal"] for w in portal["wifi"] if w["name"] == "Milkyway"] == [False]
+    assert {"name": "Northgate Guest", "enabled": True, "captive_portal": True, "network": "Guest network"} in portal["wifi"]
+    assert [w["captive_portal"] for w in portal["wifi"] if w["name"] == "Northgate"] == [False]
     assert "monitored for security" in portal["notice"] and portal["nudge"] is False
 
 

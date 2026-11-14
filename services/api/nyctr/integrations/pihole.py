@@ -72,13 +72,13 @@ def classify(text: str) -> tuple[str, int | None, str] | None:
 def validate(config: dict[str, Any]) -> dict[str, Any]:
     """Require an allowed HTTPS host, normalise to the `/api` root and bound the lookback."""
     if set(config) - {"base_url", "lookback_hours"}:
-        raise IntegrationError("Pi-hole supports base_url and optional lookback_hours configuration only.")
-    parsed, _host = core.validated_host(config.get("base_url"), "Pi-hole")
+        raise IntegrationError("This source takes a Pi-hole address and, if you wish, Hours of blocked lookups to read. Nothing else can be set.")
+    parsed, _host = core.validated_host(config.get("base_url"), "Pi-hole address")
     if parsed.path.rstrip("/") not in ("", "/api"):
-        raise IntegrationError("Use the Pi-hole address, optionally ending in /api.")
+        raise IntegrationError("Pi-hole address must be the address of the Pi-hole itself, optionally ending in /api.")
     hours = config.get("lookback_hours", 24)
     if type(hours) is not int or not 1 <= hours <= 72:
-        raise IntegrationError("Pi-hole lookback_hours must be an integer between 1 and 72.")
+        raise IntegrationError("Hours of blocked lookups to read must be a whole number between 1 and 72.")
     return {"base_url": f"https://{parsed.netloc}/api", "lookback_hours": hours}
 
 

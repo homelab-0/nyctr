@@ -112,7 +112,7 @@ def busy_source(monkeypatch, fault_page=None):
         """Answer the profile read, then full newest-first log pages that always offer another."""
         assert request.method == "GET"
         if request.url.path == "/profiles/abc123":
-            return httpx.Response(200, json={"data": {"name": "Home DNS", "settings": {"logs": {"enabled": True}}}})
+            return httpx.Response(200, json={"data": {"name": "Office DNS", "settings": {"logs": {"enabled": True}}}})
         page = int(request.url.params.get("cursor", "1"))
         if page == fault_page:
             return httpx.Response(401, json={"errors": [{"detail": "test-api-key"}]})

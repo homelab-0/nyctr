@@ -70,7 +70,7 @@ def seed_live_member(app, *, reason="HaGeZi Multi PRO++", codes=("blocklist:hage
     now = utcnow()
     with app.state.session_factory() as db:
         # Both have collected once: Nyctr changes nothing at a source it has never collected from.
-        db.add(Integration(id="dns", provider="nextdns", name="Home DNS", config={"profile_id": "abc123"},
+        db.add(Integration(id="dns", provider="nextdns", name="Office DNS", config={"profile_id": "abc123"},
                            secret_ref="NYCTR_CONNECTOR_SECRET_DNS", status="connected", last_sync=now))
         db.add(Integration(id="unifi", provider="unifi_network", name="UniFi", status="connected", last_sync=now,
                            config={"base_url": "https://unifi.example/proxy/network/integration"},

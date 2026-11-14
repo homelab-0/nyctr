@@ -75,10 +75,10 @@ def seed_demo(db):
         db.add(User(id=id_, name=name, email=email, role=role, password_hash=password))
     db.flush()
     for id_, name, provider, caps in [
-        ("demo-unifi", "Milkyway UniFi Network", "unifi_network",
+        ("demo-unifi", "Northgate UniFi Network", "unifi_network",
          ["sites:read", "devices:read", "clients:read", "networks:read", "firewall_policies:read",
           "guest_access:read", "hotspot_vouchers:read", "wifi_broadcasts:read"]),
-        ("demo-nextdns", "Home DNS on NextDNS", "nextdns", ["profile:read", "dns_policies:read", "blocked_dns_logs:read"]),
+        ("demo-nextdns", "Office DNS on NextDNS", "nextdns", ["profile:read", "dns_policies:read", "blocked_dns_logs:read"]),
         ("demo-compute", "Compute cluster on Proxmox", "proxmox",
          ["nodes:read", "bridges:read", "guests:read", "guest_network:read", "firewall_options:read"]),
         # A second DNS source of a different kind. Its integration reports blocks but cannot open
@@ -89,11 +89,11 @@ def seed_demo(db):
                            config={"demo": True}, capabilities=caps, secret_ref=""))
     db.flush()
     resources = [
-        ("site-home", "Milkyway", "site", "demo-unifi", "infrastructure", None, {"location": "Home lab", "wifi": [
-            {"name": "Milkyway", "enabled": True, "captive_portal": False, "network_id": "example-network-lan"},
-            {"name": "Milkyway IoT", "enabled": True, "captive_portal": False, "network_id": "example-network-iot"},
-            {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network_id": "example-network-guest"}]}),
-        ("gateway", "Milkyway gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "UDM SE", "ip": "10.20.65.1"}),
+        ("site-home", "Northgate", "site", "demo-unifi", "infrastructure", None, {"location": "Head office", "wifi": [
+            {"name": "Northgate", "enabled": True, "captive_portal": False, "network_id": "example-network-lan"},
+            {"name": "Northgate IoT", "enabled": True, "captive_portal": False, "network_id": "example-network-iot"},
+            {"name": "Northgate Guest", "enabled": True, "captive_portal": True, "network_id": "example-network-guest"}]}),
+        ("gateway", "Northgate gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "Cloud gateway", "ip": "10.20.65.1"}),
         ("switch-core", "Core aggregation", "switch", "demo-unifi", "infrastructure", None, {"model": "Aggregation switch", "ports": 8}),
         ("ap-basement", "Basement access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
         ("network-lan", "Trusted LAN", "network", "demo-unifi", "infrastructure", None, {"vlan": 65, "subnet": "10.20.65.0/24"}),
@@ -108,7 +108,7 @@ def seed_demo(db):
         ("workload-photos", "Photo service", "workload", "demo-compute", "infrastructure", None, {"vmid": "101", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:11", "vlan": 66, "firewall": True}], "port": 443}),
         ("workload-management", "Management console", "workload", "demo-compute", "infrastructure", None, {"vmid": "102", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:12", "vlan": 66, "firewall": True}], "port": 8006}),
         ("policy-guest", "Guest → services", "policy", "demo-unifi", "infrastructure", None, {"action": "allow", "port": 8006, "review": "source scope too broad"}),
-        ("dns-home", "Home DNS profile", "dns_profile", "demo-nextdns", "infrastructure", None, {"scope": "All devices using this profile", "logs_enabled": True}),
+        ("dns-home", "Office DNS profile", "dns_profile", "demo-nextdns", "infrastructure", None, {"scope": "All devices using this profile", "logs_enabled": True}),
         # Added with the console MVP: a servers VLAN, a second access point, guests and Proxmox networking.
         ("network-servers", "Servers", "network", "demo-unifi", "infrastructure", None, {"vlan": 66, "subnet": "10.20.66.0/24"}),
         ("ap-upstairs", "Upstairs access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
@@ -241,7 +241,7 @@ def _seed_access_and_guests(db, now):
         risk_category="policy", integration_id="demo-nextdns",
         risk_factors=[{"label": "A content rule set by an administrator blocks this kind of site", "points": 60}],
         decision_note="This was blocked for safety or by an administrator's rule, so a person decides."))
-    scope = "Everyone using Home DNS on NextDNS"
+    scope = "Everyone using Office DNS on NextDNS"
     for id_, domain, started, minutes, ended in [
         ("lease-news-1", "img.newsletter-cdn.example", 3 * 24 * 60, 60, True),
         ("lease-news-2", "img.newsletter-cdn.example", 26 * 60, 60, True),

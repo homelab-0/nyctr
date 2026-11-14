@@ -175,7 +175,7 @@ def test_address_off_the_allow_list_is_refused_without_echoing_server_configurat
     before = audit_trail(client)
     response = edit(client, headers, id_, config={"base_url": "https://elsewhere.example.org"})
     assert_refused_untouched(client, id_, response, 422, before)
-    assert response.json()["detail"].startswith("Not saved.") and "allowlist" in response.json()["detail"]
+    assert response.json()["detail"].startswith("Not saved.") and "whoever runs the Nyctr server" in response.json()["detail"]
     for value in ("resolver.example.net", "second.example.net", "elsewhere.example.org", SAVED["secret_ref"], KEY):
         assert value not in response.text
 

@@ -159,11 +159,11 @@ def test_the_attention_list_names_sources_that_stored_only_part_and_the_assistan
         assert set(about) == {("dns", "card"), ("unifi", "edit")}
         assert about["dns", "card"] == {
             "kind": "source", "id": "dns", "severity": "medium", "at": None, "action": "card",
-            "title": "Home DNS could not read everything", "detail": f"{NOTES[GAP][0]}. {NOTES[OTHER][0]}."}
+            "title": "Office DNS could not read everything", "detail": f"{NOTES[GAP][0]}. {NOTES[OTHER][0]}."}
         assert "shorter time window" in about["unifi", "edit"]["detail"]
         with app.state.session_factory() as db:
             pack, _refs = evidence_pack(db, app.state.settings)
-            dns = next(item for item in pack["sources"] if item["name"] == "Home DNS")
+            dns = next(item for item in pack["sources"] if item["name"] == "Office DNS")
             assert set(dns) == {"ref", "kind", "name", "provider", "status", "last_collected"}
             sent = json.dumps(pack)
             assert all(text not in sent for text in (GAP, OTHER, NOTES[GAP][0], NOTES[GAP][1], "could not read"))
@@ -171,7 +171,7 @@ def test_the_attention_list_names_sources_that_stored_only_part_and_the_assistan
             db.get(Integration, "dns").status = "error"
             db.commit()
         assert [item["title"] for item in client.get("/api/attention").json() if item["id"] == "dns"] == [
-            "Home DNS is not collecting"]
+            "Office DNS is not collecting"]
         client.post("/api/auth/logout", headers=live_signin(client))
         live_signin(client, LIVE_MEMBER)
         assert client.get("/api/attention").status_code == 403

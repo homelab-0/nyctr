@@ -11,7 +11,8 @@ import type { Lease, Suggestion } from '../types';
 export default function OpenNow({ onChange }: { onChange: () => void }) {
   const leases = useApi<Lease[]>('/leases');
   const suggestions = useApi<Suggestion[]>('/suggestions');
-  const [error, setError] = useState<string | null>(null);
+  // What was refused, kept with the row whose button was pressed so it is said there.
+  const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const now = useNow(5000);
   /** Runs one change, then reloads both lists so the screen reflects the server. */
@@ -21,7 +22,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
     try {
       await action();
     } catch (e) {
-      setError((e as Error).message);
+      setError({ key, message: (e as Error).message });
     } finally {
       setBusy(null);
       leases.reload();
@@ -46,7 +47,6 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
           </p>
         </div>
       </header>
-      <InlineError message={error} />
       <Panel title="Open" flush>
         {active.length === 0 ? (
           <p className="pad muted">No exceptions are open.</p>
@@ -72,6 +72,9 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   const remaining = lease.expires_at
                     ? Math.max(0, Date.parse(lease.expires_at) - now)
                     : 0;
+                  // The server ends by hand only an entry Nyctr itself added at a source since removed.
+                  const byHand =
+                    Boolean(lease.source_removed) && lease.execution === 'applied' && lease.owned;
                   return (
                     <tr key={lease.id}>
                       <th className="dom">{lease.domain}</th>
@@ -107,21 +110,19 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                           <span className="muted tiny">{executionText(lease.execution)}</span>
                         )}
                       </td>
-                      <td>
+                      <td style={error?.key === lease.id ? { minWidth: 240 } : undefined}>
                         <button
                           className="button secondary small"
                           disabled={busy === lease.id}
                           onClick={() =>
                             void run(lease.id, () =>
-                              post(
-                                `/leases/${lease.id}/end`,
-                                lease.source_removed ? { by_hand: true } : {},
-                              ),
+                              post(`/leases/${lease.id}/end`, byHand ? { by_hand: true } : {}),
                             )
                           }
                         >
-                          {lease.source_removed ? 'I removed it by hand' : 'End now'}
+                          {byHand ? 'I removed it by hand' : 'End now'}
                         </button>
+                        <InlineError message={error?.key === lease.id ? error.message : null} />
                       </td>
                     </tr>
                   );
@@ -149,6 +150,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                     Opened {plural(item.times, 'time')} for {item.people.join(', ') || 'someone'},
                     last {ago(item.last_at, now)}. {item.scope}.
                   </span>
+                  <InlineError message={error?.key === item.domain ? error.message : null} />
                 </span>
                 <span className="button-row">
                   <button

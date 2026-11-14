@@ -788,6 +788,18 @@ input:not([type]) {
   color: var(--fg);
   min-height: 38px;
 }
+/* A field that can no longer change: flat on the panel, quieter text, no focus ring to invite typing. */
+.field input[readonly],
+.field select:disabled {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--fg3);
+  cursor: default;
+}
+.field input[readonly]:focus {
+  outline-color: var(--line2);
+  border-color: var(--line2);
+}
 textarea {
   resize: vertical;
 }

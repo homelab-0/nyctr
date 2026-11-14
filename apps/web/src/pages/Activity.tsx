@@ -4,12 +4,15 @@ import { Empty, ErrorState, Loading, Panel, SearchInput } from '../components/ui
 import { counted } from '../lib/counts';
 import type { AuditEvent, Integration, Person } from '../types';
 
+/** Every action the server writes has a sentence here or in ABOUT_A_SOURCE; a server test checks it. */
 const WORDS: Record<string, string> = {
   'auth.login': 'Signed in',
   'auth.logout': 'Signed out',
   'auth.login_failed': 'Failed sign-in',
+  'auth.sent_to_portal': 'Was sent to the member portal to sign in',
   'access.requested': 'Asked for access',
   'access.opened': 'Access opened',
+  'access.open_undone': 'Took back access opened while its source was being removed or changed',
   'access.closed': 'Access closed',
   'access.close_failed': 'Access could not be closed',
   'access.approved': 'Approved a request',
@@ -19,6 +22,9 @@ const WORDS: Record<string, string> = {
   'rule.guest_changed': 'Changed the guest cut-off rule',
   'guest.pass_issued': 'Issued a guest pass',
   'guest.pass_ended': 'Ended a guest pass',
+  'guest.pass_undone':
+    'Took back a guest pass issued while its source was being removed or changed',
+  'guest.admit': 'Let a waiting guest on',
   'guest.cut': 'Cut a guest off',
   'guest.restore': 'Let a guest back on',
   'guest.lock': 'Locked a guest out',
@@ -30,6 +36,7 @@ const WORDS: Record<string, string> = {
   'assistant.asked': 'Asked the assistant',
   'assistant.insight': 'Asked for a finding insight',
   'demo.guest_activity': 'Simulated guest activity',
+  'integration.nudged': 'Started a collection when the server was asked to',
 };
 
 /** Rows about one source, worded around its name. */
@@ -39,6 +46,8 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
   'integration.collection_failed': (name) => `Could not collect from ${name}`,
   'integration.diagnosed': (name) => `Tested ${name}`,
   'integration.removed': (name) => `Removed the source ${name}`,
+  'integration.updated': (name) => `Edited the source ${name}`,
+  'integration.retries_stopped': (name) => `Stopped retrying ${name} and showed it as failed`,
 };
 
 /**
@@ -48,7 +57,7 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
  */
 function what(event: AuditEvent, sources: Map<string, string> | null) {
   const about = ABOUT_A_SOURCE[event.action];
-  if (!about) return WORDS[event.action] || event.action;
+  if (!about) return WORDS[event.action] || 'Something this version of the page cannot describe';
   const kept = event.details?.name;
   return about(
     typeof kept === 'string' && kept
@@ -59,12 +68,28 @@ function what(event: AuditEvent, sources: Map<string, string> | null) {
   );
 }
 
+/** Reasons the server records as a code; any other reason is already a sentence. */
+const REASONS: Record<string, string> = {
+  expired: 'its time ran out',
+  revoked: 'ended early by a person',
+  removed_by_hand: 'removed at the source by hand, so nothing was sent',
+  schedule_off: 'scheduled collection was turned off',
+};
+const EXECUTIONS: Record<string, string> = {
+  simulated: 'simulated',
+  applied: 'changed at the source',
+  not_applied: 'nothing changed at the source',
+  failed: 'the source refused',
+};
+
 /** Renders the few audit details worth reading, never raw provider text. */
 function summary(event: AuditEvent) {
   const d = event.details || {};
   const parts: string[] = [];
   if (typeof d.domain === 'string') parts.push(d.domain);
-  if (typeof d.execution === 'string') parts.push(String(d.execution).replace('_', ' '));
+  // An entry ended by hand was changed by a person at the source, not by Nyctr: the reason says so.
+  if (typeof d.execution === 'string' && EXECUTIONS[d.execution] && d.reason !== 'removed_by_hand')
+    parts.push(EXECUTIONS[d.execution]);
   if (d.by_rule === true || d.decided_by === 'rule') parts.push('by a written rule');
   if (typeof d.minutes === 'number') parts.push(`${d.minutes} min`);
   if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
@@ -73,7 +98,16 @@ function summary(event: AuditEvent) {
   // Only the count: the codes are for the record, and the source's card says what each means.
   if (Array.isArray(d.gaps) && d.gaps.length)
     parts.push(`${counted(d.gaps.length, 'thing')} it could not read`);
-  if (typeof d.reason === 'string' && d.reason) parts.push(d.reason);
+  // Which settings changed stays in the record: their names there are not the form's labels.
+  if (Array.isArray(d.fields)) parts.push(`${counted(d.fields.length, 'field')} changed`);
+  const next = d.new as { enabled?: unknown; interval_seconds?: unknown } | undefined;
+  if (next && typeof next.enabled === 'boolean')
+    parts.push(
+      next.enabled && typeof next.interval_seconds === 'number'
+        ? `now every ${counted(Math.round(next.interval_seconds / 60), 'minute')}`
+        : 'now turned off',
+    );
+  if (typeof d.reason === 'string' && d.reason) parts.push(REASONS[d.reason] || d.reason);
   return parts.join(' · ');
 }
 

@@ -263,13 +263,13 @@ def _validated_host(value: Any, label: str):
     API key can be sent to the destination. Returns the parsed URL and host.
     """
     if not isinstance(value, str) or len(value) > 2048:
-        raise IntegrationError(f"{label} requires an HTTPS integration base URL.")
+        raise IntegrationError(f"{label} must be an address that starts with https://.")
     try:
         parsed = urlsplit(value)
         host = (parsed.hostname or "").lower()
         port = parsed.port
     except ValueError:
-        raise IntegrationError(f"Invalid {label} integration base URL.") from None
+        raise IntegrationError(f"{label} is not an address Nyctr can read. Check it for a typing mistake.") from None
     if (
         parsed.scheme != "https"
         or not host
@@ -283,9 +283,9 @@ def _validated_host(value: Any, label: str):
         or any(char.isspace() for char in value)
         or (port is not None and not 1 <= port <= 65535)
     ):
-        raise IntegrationError(f"{label} requires HTTPS without URL credentials, query, or fragment.")
+        raise IntegrationError(f"{label} must start with https:// and hold no sign-in name, password, question mark, # or space.")
     if host in {"localhost", "metadata.google.internal", "metadata.azure.internal"} or host.endswith(".localhost"):
-        raise IntegrationError("Loopback and metadata endpoints cannot be connector destinations.")
+        raise IntegrationError(f"{label} cannot be the Nyctr server itself or a cloud metadata address.")
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
@@ -295,14 +295,15 @@ def _validated_host(value: Any, label: str):
         or address.is_unspecified or address.is_reserved
         or (getattr(address, "ipv4_mapped", None) is not None)
     ):
-        raise IntegrationError("Loopback, link-local, metadata, and reserved endpoints are not allowed.")
+        raise IntegrationError(f"{label} cannot be a loopback, link-local, multicast or reserved address.")
     allowed = {
         entry.strip().lower()
         for entry in os.getenv("NYCTR_CONNECTOR_HOSTS", "").split(",")
         if entry.strip()
     }
     if host not in allowed:
-        raise IntegrationError(f"{label} hostname is not in the server's NYCTR_CONNECTOR_HOSTS allowlist.")
+        raise IntegrationError(f"{label} names a server Nyctr is not yet allowed to connect to. Only whoever runs the Nyctr server "
+                               "can change that: ask them to add this server's name to the sources Nyctr may reach.")
     return parsed, host
 
 

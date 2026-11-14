@@ -151,8 +151,8 @@ def test_removal_takes_only_this_sources_data_and_keeps_history(world):
     assert [r["id"] for r in member.get("/api/requests").json()] == ["request"]
     assert [i["id"] for i in client.get("/api/integrations").json()] == ["dns"]
     # Removing the DNS source too keeps the request, still naming the source as it was.
-    assert remove(client, headers, "dns", "Home DNS").status_code == 200
-    assert [(r["id"], r["source_name"]) for r in client.get("/api/requests").json()] == [("request", "Home DNS")]
+    assert remove(client, headers, "dns", "Office DNS").status_code == 200
+    assert [(r["id"], r["source_name"]) for r in client.get("/api/requests").json()] == [("request", "Office DNS")]
     assert {e["target_id"] for e in client.get("/api/audit").json() if e["action"] == "integration.removed"} == {
         "unifi", "dns"}
 
