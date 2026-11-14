@@ -456,7 +456,9 @@ def request_exception(client: Client) -> None:
     a source until the request is approved in the console.
     """
     asked = {"reason": "Acceptance check: open this for the tester", "duration_minutes": 15}
-    block = next((row for row in client.json("/api/blocks") if row["domain"] == "lookup-00.example.test"), None)
+    # Blocks answers one page of the latest lookups, so the one to ask about is asked for by name.
+    found = client.json("/api/blocks?q=lookup-00.example.test")["rows"]
+    block = next((row for row in found if row["domain"] == "lookup-00.example.test"), None)
     require(block is not None, "The blocked lookup to ask about is not in Blocks; use a fresh project.")
     made = client.json("/api/requests", method="POST", body={"block_id": block["id"], **asked}, expected=201)
     print("PASS request: lookup-00.example.test " + ("is waiting under Requests" if made["status"] == "pending" else
