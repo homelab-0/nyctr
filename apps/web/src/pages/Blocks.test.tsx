@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { blockList, mockApi } from '../test/mock-api';
 import type { Block, Integration } from '../types';
@@ -38,69 +38,111 @@ describe('Blocks', () => {
       ...block(`host-${String(index).padStart(4, '0')}`, index + 1),
       risk_band: (index % 3 ? 'unknown' : 'high') as Block['risk_band'],
     }));
-    /** What the server would answer: the filter and the counts over everything, then one page. */
+    /**
+     * What the server would answer: the filter and the counts over everything, then one page.
+     * The page here is 50 rows: its size is the server's choice and the screen draws what it is sent.
+     */
+    const everything = blockList(stored);
     const serve = (band?: string, text?: string, before?: string) => {
       const matching = stored.filter(
         (row) => (!band || row.risk_band === band) && (!text || row.domain.includes(text)),
       );
       const from = before ? matching.findIndex((row) => row.id === before) + 1 : 0;
-      const rows = matching.slice(from, from + 200);
-      const next = from + 200 < matching.length ? rows.at(-1)!.id : null;
-      return { ...blockList(stored), rows, next, matching: matching.length };
+      const rows = matching.slice(from, from + 50);
+      const next = from + 50 < matching.length ? rows.at(-1)!.id : null;
+      return { ...everything, rows, next, page_size: 50, matching: matching.length };
     };
     const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
     const calls = mockApi({
       'GET /blocks': serve(),
-      'GET /blocks?before=host-0199': serve(undefined, undefined, 'host-0199'),
+      'GET /blocks?before=host-0049': serve(undefined, undefined, 'host-0049'),
       'GET /blocks?band=high': serve('high'),
       'GET /blocks?band=high&q=host-29': serve('high', 'host-29'),
       'GET /integrations': [dns],
       'GET /integrations/catalog': { providers: [] },
     });
     render(<Blocks />);
-    expect(await screen.findByText('host-0000.example')).toBeDefined();
+    // Looking an element up by its role or its text walks every element on the page, and this page
+    // holds several thousand. The table is read by selector and the controls within their own bar.
     const drawn = () => document.querySelectorAll('tbody tr').length;
-    expect(drawn()).toBe(200);
-    expect(screen.getByRole('status').textContent).toBe(
-      'Showing the latest 200 of 3,000 stored lookups.',
-    );
-    // The counts and the note are about all 3,000, though only 200 rows are on the page.
-    expect(screen.getByRole('button', { name: /^All/ }).textContent).toBe('All3,000');
-    expect(screen.getByRole('button', { name: /^High/ }).textContent).toBe('High1,000');
-    expect(document.body.textContent).toContain('None of its 3,000 stored lookups');
-    expect(document.body.textContent).toContain('3,000 blocked lookups stored');
-    fireEvent.click(screen.getByRole('button', { name: 'Show older' }));
-    expect(await screen.findByText('host-0399.example')).toBeDefined();
-    expect(drawn()).toBe(400);
-    expect(screen.getByRole('status').textContent).toContain('Showing the latest 400 of 3,000');
-    fireEvent.click(screen.getByRole('button', { name: /^High/ }));
+    const address = (row: number) => document.querySelectorAll('tbody th')[row]?.textContent;
+    const line = () => document.querySelector('[role=status]')?.textContent;
+    const filters = () => within(document.querySelector<HTMLElement>('.seg')!);
+    const older = () =>
+      within(document.querySelector<HTMLElement>('[role=status]')!.parentElement!).queryByRole(
+        'button',
+        { name: 'Show older' },
+      );
+    await waitFor(() => expect(drawn()).toBe(50));
+    expect(address(0)).toBe('host-0000.example');
+    expect(line()).toBe('Showing the latest 50 of 3,000 stored lookups.');
+    // The counts and the note are about all 3,000, though only 50 rows are on the page.
+    expect(filters().getByRole('button', { name: /^All/ }).textContent).toBe('All3,000');
+    expect(filters().getByRole('button', { name: /^High/ }).textContent).toBe('High1,000');
+    const head = document.querySelector('.page-head')!.textContent;
+    expect(head).toContain('None of its 3,000 stored lookups');
+    expect(head).toContain('3,000 blocked lookups stored');
+    fireEvent.click(older()!);
+    await waitFor(() => expect(drawn()).toBe(100));
+    expect(address(99)).toBe('host-0099.example');
+    expect(line()).toContain('Showing the latest 100 of 3,000');
+    fireEvent.click(filters().getByRole('button', { name: /^High/ }));
     // Until the server answers, the line still describes the rows on screen, not the new filter.
-    expect(screen.getByRole('status').textContent).toBe(
-      'Showing the latest 400 of 3,000 stored lookups. Reading…',
-    );
-    expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull();
+    expect(line()).toBe('Showing the latest 100 of 3,000 stored lookups. Reading…');
+    expect(older()).toBeNull();
     await waitFor(() =>
-      expect(screen.getByRole('status').textContent).toBe(
-        'Showing the latest 200 of 1,000 that match, out of 3,000 stored lookups.',
+      expect(line()).toBe(
+        'Showing the latest 50 of 1,000 that match, out of 3,000 stored lookups.',
       ),
     );
-    expect(drawn()).toBe(200);
-    expect(screen.queryByText('host-0001.example')).toBeNull();
-    fireEvent.change(screen.getByRole('searchbox'), { target: { value: ' host-29 ' } });
+    expect(drawn()).toBe(50);
+    expect(address(1)).toBe('host-0003.example');
+    fireEvent.change(document.querySelector('input[type=search]')!, {
+      target: { value: ' host-29 ' },
+    });
     await waitFor(() =>
-      expect(screen.getByRole('status').textContent).toBe(
-        'Showing all 33 that match, out of 3,000 stored lookups.',
-      ),
+      expect(line()).toBe('Showing all 33 that match, out of 3,000 stored lookups.'),
     );
-    expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull();
+    expect(older()).toBeNull();
     expect(
       calls.filter((call) => call.path.startsWith('/blocks')).map((call) => call.path),
     ).toEqual([
       '/blocks',
-      '/blocks?before=host-0199',
+      '/blocks?before=host-0049',
       '/blocks?band=high',
       '/blocks?band=high&q=host-29',
     ]);
+  });
+
+  it('offers no older rows and keeps a true line when another filter could not be read', async () => {
+    const stored = Array.from({ length: 6 }, (_, index) => block(`host-${index}`, index + 1));
+    const first = { ...blockList(stored), rows: stored.slice(0, 3), next: 'host-2' };
+    const calls = mockApi({
+      'GET /blocks': first,
+      'GET /blocks?band=high': { __status: 500, detail: 'Unavailable' },
+      'GET /blocks?before=host-2': { ...blockList(stored), rows: stored.slice(3) },
+      'GET /integrations': [],
+      'GET /integrations/catalog': { providers: [] },
+    });
+    render(<Blocks />);
+    expect(await screen.findByRole('button', { name: 'Show older' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: /^High/ }));
+    expect(await screen.findByText('The list could not be read again.')).toBeDefined();
+    // The rows on screen are still the unfiltered ones, and the line says so. Older rows are not
+    // offered: they would be asked for with High and put under rows that are not High.
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the latest 3 of 6 stored lookups.',
+    );
+    expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull();
+    expect(calls.some((call) => call.path.includes('before='))).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: /^All/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show older' }));
+    expect(await screen.findByText('host-5.example')).toBeDefined();
+    expect(screen.getByRole('status').textContent).toBe('Showing all 6 stored lookups.');
+    expect(calls.map((call) => call.path).filter((path) => path.includes('before='))).toEqual([
+      '/blocks?before=host-2',
+    ]);
+    expect((screen.getByRole('searchbox') as HTMLInputElement).maxLength).toBe(120);
   });
 
   it('says once that a source names no device, and tells not collected from nothing blocked', async () => {

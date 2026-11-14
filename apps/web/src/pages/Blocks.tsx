@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { api, useApi } from '../api';
 import {
   Empty,
@@ -14,7 +14,46 @@ import {
 import { counted, lookupSpan, number } from '../lib/counts';
 import { failing, uncollected, whyEmpty } from '../lib/coverage';
 import { ago, useNow } from '../lib/format';
-import type { BlockList, Catalog, Integration, RiskBand } from '../types';
+import type { Block, BlockList, Catalog, Integration, RiskBand } from '../types';
+
+/**
+ * One row of the table, remembered: adding older rows, typing in the search box or a button
+ * changing its label draws only the rows that are new, not the several hundred already there.
+ */
+const Row = memo(function Row({
+  row,
+  unnamed,
+  now,
+}: {
+  row: Block;
+  /** Its kind of source says of no stored lookup which device made it. */
+  unnamed: boolean;
+  now: number;
+}) {
+  return (
+    <tr>
+      <td className="nowrap muted">{ago(row.observed_at, now)}</td>
+      <th className="dom">{row.domain}</th>
+      <td>
+        <Score value={row.risk_score} />
+      </td>
+      <td>{row.device_name}</td>
+      <td>
+        <span className="srcn">
+          <SourceTag provider={row.source} />
+          {row.reason}
+        </span>
+      </td>
+      <td>
+        {unnamed ? (
+          <span className="muted">The source does not say</span>
+        ) : (
+          <Evidence kind={row.attribution} />
+        )}
+      </td>
+    </tr>
+  );
+});
 
 /**
  * The latest blocked lookups from every source, one page at a time, with the rule-based score and
@@ -45,8 +84,8 @@ export default function Blocks() {
     if (needle) asked.set('q', needle);
     return asked.toString();
   }, [band, needle]);
-  const current = useRef(query);
-  current.current = query;
+  const shown = useRef(list);
+  shown.current = list;
   useEffect(() => {
     const controller = new AbortController();
     setOlder('idle');
@@ -65,16 +104,18 @@ export default function Blocks() {
   const showOlder = async () => {
     if (!list?.next) return;
     setOlder('loading');
-    const asked = new URLSearchParams(query);
+    // Older rows are asked for with the filter of the answer on screen, never the one chosen
+    // since: after a filter fails to load, the two differ and must not be mixed in one table.
+    const asked = new URLSearchParams(list.asked);
     asked.set('before', list.next);
     try {
       const answer = await api<BlockList>(`/blocks?${asked}`);
-      // A filter chosen while this was on its way has its own first page; drop this one.
-      if (current.current !== query) return;
-      setList({ ...answer, asked: query, rows: [...list.rows, ...answer.rows] });
+      // Another answer drawn while this was on its way has its own rows; drop this one.
+      if (shown.current !== list) return;
+      setList({ ...answer, asked: list.asked, rows: [...list.rows, ...answer.rows] });
       setOlder('idle');
     } catch {
-      if (current.current === query) setOlder('failed');
+      if (shown.current === list) setOlder('failed');
     }
   };
   // The span comes from the lookups actually stored, oldest and newest, never a fixed window.
@@ -97,6 +138,9 @@ export default function Blocks() {
   // What the line under the table says is about the rows drawn, so it follows the answer.
   const filtered = !!list?.asked;
   const reading = !!list && list.asked !== query && !error;
+  // "Show older" continues the answer on screen, so it is offered only while that answer is the
+  // one asked for: not while another filter is loading, and not after it failed to load.
+  const canShowOlder = !!list?.next && list.asked === query;
   if (error && !list)
     return <ErrorState message={error} retry={() => setAttempt((value) => value + 1)} />;
   if (!list) return <Loading text="Loading blocked lookups…" />;
@@ -183,6 +227,7 @@ export default function Blocks() {
           value={text}
           onChange={setText}
           placeholder="Find an address, device or reason"
+          maxLength={120}
         />
       </div>
       {error && (
@@ -230,27 +275,7 @@ export default function Blocks() {
               </thead>
               <tbody>
                 {rows.map((row) => (
-                  <tr key={row.id}>
-                    <td className="nowrap muted">{ago(row.observed_at, now)}</td>
-                    <th className="dom">{row.domain}</th>
-                    <td>
-                      <Score value={row.risk_score} />
-                    </td>
-                    <td>{row.device_name}</td>
-                    <td>
-                      <span className="srcn">
-                        <SourceTag provider={row.source} />
-                        {row.reason}
-                      </span>
-                    </td>
-                    <td>
-                      {unnamed.has(row.source) ? (
-                        <span className="muted">The source does not say</span>
-                      ) : (
-                        <Evidence kind={row.attribution} />
-                      )}
-                    </td>
-                  </tr>
+                  <Row key={row.id} row={row} unnamed={unnamed.has(row.source)} now={now} />
                 ))}
               </tbody>
             </table>
@@ -269,7 +294,7 @@ export default function Blocks() {
             {older === 'failed' && ' Older lookups could not be read.'}
             {reading && ' Reading…'}
           </p>
-          {list.next && !reading && (
+          {canShowOlder && (
             <button
               className="button secondary small"
               onClick={showOlder}

@@ -268,10 +268,13 @@ export function SearchInput({
   value,
   onChange,
   placeholder = 'Search…',
+  maxLength,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  /** The longest text the server reading this search accepts, when it has a limit. */
+  maxLength?: number;
 }) {
   return (
     <label className="search-field">
@@ -282,6 +285,7 @@ export function SearchInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        maxLength={maxLength}
       />
     </label>
   );
