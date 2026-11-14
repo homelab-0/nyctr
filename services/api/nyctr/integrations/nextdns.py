@@ -55,13 +55,13 @@ def classify(text: str) -> tuple[str, int, str] | None:
 def validate(config: dict[str, Any]) -> dict[str, Any]:
     """Accept one profile and a bounded log lookback. The destination is fixed."""
     if set(config) - {"profile_id", "lookback_hours"}:
-        raise IntegrationError("NextDNS supports profile_id and optional lookback_hours configuration only.")
+        raise IntegrationError("This source takes a Profile and, if you wish, Hours of blocked lookups to read. Nothing else can be set.")
     profile = config.get("profile_id")
     if not isinstance(profile, str) or not re.fullmatch(r"[a-fA-F0-9]{6}", profile):
-        raise IntegrationError("NextDNS profile_id must contain six hexadecimal characters.")
+        raise IntegrationError("Profile must be the six-character identifier of the profile: digits and the letters a to f.")
     hours = config.get("lookback_hours", 24)
     if type(hours) is not int or not 1 <= hours <= 72:
-        raise IntegrationError("NextDNS lookback_hours must be an integer between 1 and 72.")
+        raise IntegrationError("Hours of blocked lookups to read must be a whole number between 1 and 72.")
     return {"profile_id": profile.lower(), "lookback_hours": hours}
 
 
@@ -259,7 +259,7 @@ PROVIDER = Provider(
     gap_notes={
         "nextdns_policy_fields_missing": (
             "Some DNS policy sections were absent",
-            "The profile did not expose every policy section supported by this adapter. DNS policy coverage remains unverified."),
+            "The profile did not list every policy section this integration reads. DNS policy coverage remains unverified."),
         "nextdns_log_settings_unknown": (
             "The source logging setting is unknown",
             "The profile did not explicitly report whether logging is enabled. Any successful log read describes only the requested window."),

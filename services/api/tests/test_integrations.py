@@ -35,7 +35,7 @@ def mock_client(monkeypatch, handler):
 def profile():
     """Return a synthetic profile with enabled logs and representative policy evidence."""
     return {"data": {
-        "name": "Home DNS", "settings": {"logs": {"enabled": True}},
+        "name": "Office DNS", "settings": {"logs": {"enabled": True}},
         "privacy": {"blocklists": [{"id": "example-list"}]},
         "allowlist": [{"id": "allowed.example", "active": True}],
     }}

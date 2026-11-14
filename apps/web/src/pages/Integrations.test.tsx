@@ -278,6 +278,7 @@ async function openIntegrations({
   others = [],
   removal = async (method: string) => jsonResponse(method === 'GET' ? plan : {}),
   catalogue = async () => jsonResponse(catalog),
+  collect,
 }: {
   mode?: Mode;
   role?: Role;
@@ -289,6 +290,7 @@ async function openIntegrations({
   others?: Integration[];
   removal?: (method: string) => Promise<Response>;
   catalogue?: () => Promise<Response>;
+  collect?: () => Promise<Response>;
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -311,6 +313,7 @@ async function openIntegrations({
       return removal('DELETE');
     }
     if (path === `/api/integrations/${connection.id}/sync`) {
+      if (collect) return collect();
       return jsonResponse({ ok: true, resource_count: 1, observation_count: 0, partial });
     }
     throw new Error(`Unexpected synthetic request: ${options?.method || 'GET'} ${path}`);
@@ -607,6 +610,39 @@ describe('integration connection diagnostics', () => {
     expect(screen.queryByText(/Only the most recent blocked lookups/)).toBeNull();
   });
 
+  /** A refused collection is said on the card whose button was pressed, in the server's words. */
+  it.each([
+    'The source was changed while it was being read, so nothing was stored',
+    'The limit on requests to this source is in use. Try again shortly.',
+  ])('shows "%s" on the card when a collection is refused', async (detail) => {
+    const { interaction } = await openIntegrations({
+      collect: async () => jsonResponse({ detail }, 409),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Collect snapshot' }));
+    const card = screen.getByRole('heading', { name: connection.name }).closest('.card')!;
+    expect((await within(card as HTMLElement).findByRole('alert')).textContent).toBe(detail);
+    expect(document.body.textContent).not.toContain('Request failed');
+  });
+
+  /** A failed collection is stored on the source and answered in the same words: the card says them once. */
+  it('says a failed collection once, not again under the stored error', async () => {
+    const detail = 'The source returned an answer Nyctr could not read.';
+    const { interaction } = await openIntegrations({
+      source: { ...connection, status: 'error', last_error: detail },
+      collect: async () => jsonResponse({ detail }, 502),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Collect snapshot' }));
+    await vi.waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Collect snapshot' })).toHaveProperty(
+        'disabled',
+        false,
+      ),
+    );
+    const card = screen.getByRole('heading', { name: connection.name }).closest('.card')!;
+    expect(within(card as HTMLElement).getAllByText(detail)).toHaveLength(1);
+    expect(within(card as HTMLElement).queryByRole('alert')).toBeNull();
+  });
+
   /** The confirmation must not read as a complete collection when the source held more than was read. */
   it('says so right after collecting when only the most recent blocked lookups were read', async () => {
     const { interaction } = await openIntegrations({ partial: true });
@@ -859,6 +895,12 @@ describe('editing a saved source', () => {
       true,
     );
     expect(within(dialog).getByText(/already collected, so where it reads/)).toBeDefined();
+    // Fields that can no longer change say so in their label; the one that can does not.
+    expect(within(dialog).getByLabelText(/^Address \(cannot be changed\)/)).toBeDefined();
+    expect(
+      within(dialog).getByLabelText(/^Credential environment reference \(cannot be changed\)/),
+    ).toBeDefined();
+    expect(within(dialog).queryByLabelText(/^Hours to read.*cannot be changed/)).toBeNull();
     const hours = within(dialog).getByLabelText(/^Hours to read/);
     expect(hours).toHaveProperty('value', '24');
     expect(hours).toHaveProperty('readOnly', false);
@@ -891,6 +933,7 @@ describe('editing a saved source', () => {
     );
     expect(within(dialog).getByText(/has not collected yet, so every field/)).toBeDefined();
     expect(within(dialog).queryByText(/already collected/)).toBeNull();
+    expect(within(dialog).queryByLabelText(/\(cannot be changed\)/)).toBeNull();
   });
 
   it('keeps a source shut while its save is unfinished, and a late save closes no other form', async () => {
@@ -1016,6 +1059,19 @@ describe('removing a saved source', () => {
     );
     await interaction.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove' }));
+  });
+
+  it('says in the dialog why a removal confirmed a moment too late was refused', async () => {
+    const detail = 'Not removed. Nyctr still has 1 guest pass it issued (end under Guests).';
+    const { interaction } = await openIntegrations({
+      removal: async (method) =>
+        method === 'GET' ? jsonResponse(plan) : jsonResponse({ detail }, 409),
+    });
+    await interaction.click(screen.getByRole('button', { name: 'Remove' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove source' });
+    await interaction.type(await within(dialog).findByLabelText(/^Type/), connection.name);
+    await interaction.click(within(dialog).getByRole('button', { name: 'Remove source' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toBe(detail);
   });
 
   it('warns that guests Nyctr let on stay on, and still lets the source be removed', async () => {

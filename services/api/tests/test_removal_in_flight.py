@@ -71,7 +71,7 @@ def test_an_exception_added_while_its_source_is_removed_is_taken_back(tmp_path, 
                          execution="applied", owned=True, ended_at=utcnow()))
             db.commit()
         headers = live_signin(client)
-        during, removed = removal_during(app, client, headers, "dns", "Home DNS")
+        during, removed = removal_during(app, client, headers, "dns", "Office DNS")
         stand_in = StandIn(during, fail_undo)
         monkeypatch.setattr("nyctr.access._opener", lambda integration: stand_in)
         response = client.post("/api/suggestions", headers=headers,
@@ -143,10 +143,10 @@ def make_permanent(tmp_path, monkeypatch, during_edit=None, move_behind_the_api=
                 db.commit()
             return
         other = TestClient(app, cookies=dict(client.cookies))
-        body = {"name": "Home DNS", "secret_ref": "NYCTR_CONNECTOR_SECRET_DNS", "config": during_edit}
+        body = {"name": "Office DNS", "secret_ref": "NYCTR_CONNECTOR_SECRET_DNS", "config": during_edit}
         answer = other.put("/api/integrations/dns", headers=headers, json=body)
         assert answer.status_code == 200, answer.text
-    removal, removed = removal_during(app, client, headers, "dns", "Home DNS")
+    removal, removed = removal_during(app, client, headers, "dns", "Office DNS")
     found = StandIn(edit if during_edit else removal, False, **stand_in)
     monkeypatch.setattr("nyctr.access._opener", lambda integration: found)
     response = client.post("/api/suggestions", headers=headers,

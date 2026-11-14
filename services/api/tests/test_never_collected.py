@@ -114,7 +114,7 @@ def test_a_source_cannot_be_moved_under_a_change_so_an_undo_never_goes_to_the_wr
     the first place failing, cannot be set up: before its first collection nothing is changed there, and after
     it, where it reads cannot change, including during the call."""
     client, headers, app, stand_in = world(tmp_path, monkeypatch, "permanent", collected=False)
-    move = {"name": "Home DNS", "secret_ref": "NYCTR_CONNECTOR_SECRET_DNS", "config": {"profile_id": "fed789"}}
+    move = {"name": "Office DNS", "secret_ref": "NYCTR_CONNECTOR_SECRET_DNS", "config": {"profile_id": "fed789"}}
     assert change(client, headers, "permanent")[0] == 409 and stand_in.calls == []
     with app.state.session_factory() as db:
         db.get(Integration, "dns").last_sync = utcnow()

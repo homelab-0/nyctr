@@ -161,7 +161,13 @@ function AddIntegration({
         {chosen.fields.map((field) => (
           <Field
             key={`${chosen.id}.${field.key}`}
-            label={field.required ? field.label : `${field.label} (optional)`}
+            label={
+              fixed && field.kind !== 'number'
+                ? `${field.label} (cannot be changed)`
+                : field.required
+                  ? field.label
+                  : `${field.label} (optional)`
+            }
             hint={
               field.kind === 'url'
                 ? `${field.hint} The server administrator must include this hostname in NYCTR_CONNECTOR_HOSTS.`
@@ -181,7 +187,7 @@ function AddIntegration({
           </Field>
         ))}
         <Field
-          label="Credential environment reference"
+          label={`Credential environment reference${fixed ? ' (cannot be changed)' : ''}`}
           hint={`${chosen.secret_hint} It stays on the server: enter the name of its environment variable, not the secret itself.`}
         >
           <input
@@ -454,7 +460,8 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
     if (editing && mayEdit && known && !settling) setEdit(target);
   }, [result.data, catalog, mayEdit, saving]);
   const [pending, setPending] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // A refused collection is said on the card whose button was pressed, not at the top of the page.
+  const [refused, setRefused] = useState<{ id: string; message: string } | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const admin = user?.role === 'admin';
   const demo = user?.mode === 'demo';
@@ -465,7 +472,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
    */
   const sync = async (integration: Integration) => {
     setPending(integration.id);
-    setError(null);
+    setRefused(null);
     setSuccess(null);
     try {
       const response = await post<{
@@ -484,7 +491,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
       );
       result.reload();
     } catch (e) {
-      setError((e as Error).message);
+      setRefused({ id: integration.id, message: (e as Error).message });
       result.reload();
     } finally {
       setPending(null);
@@ -530,7 +537,6 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           {providers.length} {providers.length === 1 ? 'integration' : 'integrations'}
         </Badge>
       </div>
-      <InlineError message={error} />
       {success && <Success>{success}</Success>}
       {demo && (
         <Notice>
@@ -614,6 +620,14 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>
                 )}
+                {/* A collection that failed is stored and answered in the same words: say them once. */}
+                <InlineError
+                  message={
+                    refused?.id === integration.id && refused.message !== integration.last_error
+                      ? refused.message
+                      : null
+                  }
+                />
                 <div className="integration-footer">
                   <span>
                     <LockKeyhole size={12} />
@@ -800,7 +814,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           onSaved={() => {
             setSaving((all) => ({ ...all, [edit.id]: listed.current }));
             result.reload();
-            setError(null);
+            setRefused(null);
             setSuccess('Changes saved.');
           }}
         />
@@ -813,7 +827,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
             removeButton.current = addButton.current;
             setRemoving(null);
             result.reload();
-            setError(null);
+            setRefused(null);
             setSuccess(`${removing.name} was removed.`);
           }}
         />

@@ -92,10 +92,10 @@ async def _optional(reader: ReadClient, path: str, gap: str) -> dict[str, Any] |
 def validate(config: dict[str, Any]) -> dict[str, Any]:
     """Require an allowed Proxmox VE host and normalise the URL to its documented API root."""
     if set(config) - {"base_url"}:
-        raise IntegrationError("Proxmox supports base_url configuration only.")
-    parsed, _host = core.validated_host(config.get("base_url"), "Proxmox")
+        raise IntegrationError("This source takes a Host address. Nothing else can be set.")
+    parsed, _host = core.validated_host(config.get("base_url"), "Host address")
     if parsed.path.rstrip("/") not in ("", "/api2/json"):
-        raise IntegrationError("Use the Proxmox host address, optionally ending in /api2/json.")
+        raise IntegrationError("Host address must be the address of a node, optionally ending in /api2/json.")
     return {"base_url": f"https://{parsed.netloc}/api2/json"}
 
 
@@ -209,7 +209,7 @@ PROVIDER = Provider(
             "Only the first 48 virtual machines and containers were read. The rest are missing from the map."),
         "proxmox_firewall_options_unavailable": (
             "Some firewall switches could not be read",
-            "A firewall option read failed. Affected guests show their firewall state as unknown, not as off."),
+            "Affected guests show their firewall state as unknown, not as off."),
     },
     validate=validate, collect=collect_proxmox,
 )

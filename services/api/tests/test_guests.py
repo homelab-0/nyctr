@@ -40,10 +40,10 @@ def test_overview_separates_what_is_known_inferred_and_not_collected(client, adm
     assert by_name["Pixel 8"]["state"] == "cut" and by_name["Pixel 8"]["lookups"]["threat"] == 3
     assert by_name["Pixel 8"]["risk"]["band"] == "high"
     assert by_name["Priya's iPhone"]["state"] == "online"
-    assert by_name["Priya's iPhone"]["pass"] == {"id": "pass-priya", "name": "Priya (weekend)", "evidence": "inferred"}
-    assert by_name["Priya's iPhone"]["access_point"]["name"] == "Upstairs access point"
+    assert by_name["Priya's iPhone"]["pass"] == {"id": "pass-priya", "name": "Priya (visiting auditor)", "evidence": "inferred"}
+    assert by_name["Priya's iPhone"]["access_point"]["name"] == "First floor access point"
     assert [t["text"] for t in by_name["Priya's iPhone"]["timeline"] if t["kind"] == "moved"] == [
-        "Moved to Upstairs access point", "Seen on Basement access point"]
+        "Moved to First floor access point", "Seen on Ground floor access point"]
     assert by_name["HVAC-Laptop"]["risk"] == {"score": None, "band": "unknown", "factors": [
         {"label": "No blocked lookups are tied to this device. That does not prove it is safe.", "points": None}]}
     spare = next(x for x in data["passes"] if x["id"] == "pass-spare")
@@ -265,8 +265,8 @@ def test_guests_sign_in_through_unifi_and_nyctr_only_describes_it(client, admin_
     """The overview states that UniFi serves the portal and lists which Wi-Fi names are behind it."""
     portal = client.get("/api/guests").json()["portal"]
     assert portal["served_by"] == ["UniFi Network"] and portal["nyctr_in_guest_path"] is False
-    assert {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network": "Guest network"} in portal["wifi"]
-    assert [w["captive_portal"] for w in portal["wifi"] if w["name"] == "Milkyway"] == [False]
+    assert {"name": "Northgate Guest", "enabled": True, "captive_portal": True, "network": "Guest network"} in portal["wifi"]
+    assert [w["captive_portal"] for w in portal["wifi"] if w["name"] == "Northgate"] == [False]
     assert "monitored for security" in portal["notice"] and portal["nudge"] is False
 
 

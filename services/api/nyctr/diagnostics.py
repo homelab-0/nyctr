@@ -118,7 +118,7 @@ _FAILURES = {
     ),
     "rate_limit": (
         "The source's request limit was reached or is in use, so a requested read was not made.",
-        "Try again shortly. If it keeps happening, review the integration scope and request frequency.",
+        "Try again shortly. If it keeps happening, narrow what this source reads or collect from it less often.",
     ),
     "timeout": (
         "The bounded provider check reached its deadline before completion.",

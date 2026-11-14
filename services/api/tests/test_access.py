@@ -175,13 +175,13 @@ def test_suggestions_come_from_rule_openings_and_need_an_administrator(client, a
     """Repeated automatic openings are suggested; nothing becomes permanent until an administrator says so."""
     items = client.get("/api/suggestions").json()
     news = next(x for x in items if x["domain"] == "img.newsletter-cdn.example")
-    assert news["times"] == 2 and news["people"] == ["Jamie Morgan"]
+    assert news["times"] == 2 and news["people"] == ["Jamie Rivera"]
     made = client.post("/api/suggestions", headers=admin_headers,
                        json={"domain": news["domain"], "action": "make_permanent"}).json()
     assert made["kind"] == "permanent" and made["expires_at"] is None and made["decided_by"] == "user-admin"
     assert news["domain"] not in {x["domain"] for x in client.get("/api/suggestions").json()}
     assert client.post("/api/suggestions", headers=admin_headers,
-                       json={"domain": "assets.recipe-site.example", "action": "dismiss"}).json() == {"ok": True}
+                       json={"domain": "assets.supplier-catalogue.example", "action": "dismiss"}).json() == {"ok": True}
     assert client.get("/api/suggestions").json() == []
     assert client.post("/api/suggestions", headers=admin_headers,
                        json={"domain": "never-seen.example", "action": "dismiss"}).status_code == 404
@@ -221,7 +221,7 @@ def test_live_without_write_permission_never_claims_access(tmp_path):
         row = client.post("/api/requests", headers=member,
                           json={"block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
         assert row["status"] == "pending" and row["risk_score"] == 16
-        assert "not allowed to change Home DNS" in row["decision_note"]
+        assert "not allowed to change Office DNS" in row["decision_note"]
         admin_headers = live_signin(client)
         client.post(f"/api/requests/{row['id']}/review", headers=admin_headers,
                     json={"decision": "approved", "note": "Fine by me"})
@@ -320,7 +320,7 @@ def test_a_provider_failure_while_opening_leaves_the_request_pending(tmp_path, m
     with TestClient(app) as client:
         seed_live_member(app)
         row, _admin = open_live(client, app)
-        assert row["status"] == "pending" and "could not change Home DNS" in row["decision_note"]
+        assert row["status"] == "pending" and "could not change Office DNS" in row["decision_note"]
         assert client.get("/api/leases").json() == []
 
 

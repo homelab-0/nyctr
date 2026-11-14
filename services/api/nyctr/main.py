@@ -353,8 +353,11 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, "This release has no integration with that name")
         try:
             config = validate_config(body.provider, body.config)
-        except (IntegrationError, ValueError):
-            raise HTTPException(422, "Invalid integration configuration; check the server allowlist and provider settings") from None
+        except IntegrationError as error:
+            # The integration's own wording, as an edit answers: the rule that failed, never a value.
+            raise HTTPException(422, f"Not saved. {error}") from None
+        except ValueError:
+            raise HTTPException(422, "Not saved. Check the settings and try again.") from None
         row = Integration(provider=body.provider, name=body.name, config=config,
                           secret_ref=body.secret_ref, capabilities=capabilities_for(body.provider))
         db.add(row)

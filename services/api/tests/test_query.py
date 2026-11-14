@@ -24,7 +24,7 @@ def test_inventory_filters_and_nested_links(client, admin_headers):
       guests: devices(search: "pixel") { name evidence blocks(first: 10) { domain riskBand } }
       tagged: resources(kind: ["network"], where: [{key: "vlan", eq: "80"}]) { name neighbors(kind: "client") { name } }
     }""")["data"]
-    assert data["workloads"] == [{"name": "Media indexer", "attr": "204", "network": {"name": "Servers"}}]
+    assert data["workloads"] == [{"name": "Search indexer", "attr": "204", "network": {"name": "Servers"}}]
     assert {"name": "Guest network", "attr": "80"} in data["networks"]
     assert {b["riskBand"] for b in data["guests"][0]["blocks"]} == {"high", "low"}
     assert {n["name"] for n in data["tagged"][0]["neighbors"]} == {"Priya's iPhone", "HVAC-Laptop", "Pixel 8",
@@ -36,7 +36,7 @@ def test_inferred_links_are_labelled_and_secrets_are_not_in_the_schema(client, a
     links = run(client, admin_headers, '{ links(evidence: "inferred") { kind provider basis source { name } target { name } } }')
     pairs = {(x["source"]["name"], x["target"]["name"], x["kind"]) for x in links["data"]["links"]}
     assert ("Compute-01", "compute-01", "same_device") in pairs
-    assert ("Photo service", "Servers", "member_of") in pairs
+    assert ("Document service", "Servers", "member_of") in pairs
     assert all(x["provider"] == "nyctr" and x["basis"] for x in links["data"]["links"])
     bad = run(client, admin_headers, "{ sources { id secretRef config } }")
     assert bad["data"] is None and "secretRef" in bad["errors"][0]["message"]

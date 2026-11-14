@@ -190,17 +190,20 @@ def _renamed(row: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
 def validate(config: dict[str, Any]) -> dict[str, Any]:
     """Accept the documented base path on an allowed host and an optional site."""
     if set(config) - {"base_url", "site_id"}:
-        raise IntegrationError("UniFi supports base_url and optional site_id configuration only.")
-    parsed, host = core.validated_host(config.get("base_url"), "UniFi")
+        raise IntegrationError("This source takes a Console address and, if you wish, a Site. Nothing else can be set.")
+    parsed, host = core.validated_host(config.get("base_url"), "Console address")
     path = parsed.path.rstrip("/")
     local = path == "/proxy/network/integration"
+    if not local and host != CLOUD_HOST and _CLOUD_PATH.fullmatch(path):
+        raise IntegrationError("Console address uses the path of a console reached through the cloud, but names a "
+                               "console on your own network. There the address ends in /proxy/network/integration alone.")
     if not local and not (host == CLOUD_HOST and _CLOUD_PATH.fullmatch(path)):
-        raise IntegrationError("Use the documented UniFi Network integration base path.")
+        raise IntegrationError("Console address must be the integration path on your console: it ends in /proxy/network/integration.")
     clean = {"base_url": config["base_url"].rstrip("/")}
     if config.get("site_id"):
         site = config["site_id"]
         if not isinstance(site, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", site):
-            raise IntegrationError("Invalid UniFi site identifier.")
+            raise IntegrationError("Site must be the site's identifier: letters, digits, hyphens and underscores only.")
         clean["site_id"] = site
     return clean
 
@@ -465,7 +468,7 @@ PROVIDER = Provider(
     gap_notes={
         "unifi_vouchers_unavailable": (
             "Guest passes could not be read",
-            "The hotspot voucher list was not available to this key or site. Guest pass tracking is incomplete."),
+            "The hotspot voucher list was not read, so guest pass tracking is incomplete."),
         "unifi_wifi_unavailable": (
             "Wi-Fi names could not be read",
             "Nyctr cannot show which Wi-Fi names sit behind UniFi's captive portal."),
@@ -477,10 +480,10 @@ PROVIDER = Provider(
             "Only the first 40 guest devices carry authorisation details in each collection."),
         "unifi_networks_details_unavailable": (
             "Some network address ranges could not be read",
-            "A network's detail was refused or unusable. Devices cannot be placed on a network whose range is unknown."),
+            "The detail of at least one network was not read. Devices cannot be placed on a network whose range is unknown."),
         "unifi_devices_details_unavailable": (
             "Some equipment uplinks could not be read",
-            "A device's detail was refused or unusable. The Map cannot show what that equipment is attached to."),
+            "The detail of at least one device was not read. The Map cannot show what that equipment is attached to."),
         "unifi_detail_limit": (
             "More networks and equipment than one collection reads in detail",
             "Detail reads stop before the collection reaches the source's request limit, and the reads "

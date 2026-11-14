@@ -118,7 +118,7 @@ def test_the_cloud_path_is_accepted_on_the_cloud_host_only(clock, monkeypatch, u
         run(url)
     assert calls == []
     monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "unifi.example")
-    with pytest.raises(IntegrationError, match="allowlist"):
+    with pytest.raises(IntegrationError, match="not yet allowed to connect to"):
         run()
     assert calls == []
 

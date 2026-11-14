@@ -70,15 +70,15 @@ def seed_demo(db):
     password = hash_password("nyctr-demo")
     for id_, name, email, role in [
         ("user-admin", "Alex Morgan", "admin@nyctr.demo", "admin"),
-        ("user-jamie", "Jamie Morgan", "jamie@nyctr.demo", "member"),
+        ("user-jamie", "Jamie Rivera", "jamie@nyctr.demo", "member"),
     ]:
         db.add(User(id=id_, name=name, email=email, role=role, password_hash=password))
     db.flush()
     for id_, name, provider, caps in [
-        ("demo-unifi", "Milkyway UniFi Network", "unifi_network",
+        ("demo-unifi", "Northgate UniFi Network", "unifi_network",
          ["sites:read", "devices:read", "clients:read", "networks:read", "firewall_policies:read",
           "guest_access:read", "hotspot_vouchers:read", "wifi_broadcasts:read"]),
-        ("demo-nextdns", "Home DNS on NextDNS", "nextdns", ["profile:read", "dns_policies:read", "blocked_dns_logs:read"]),
+        ("demo-nextdns", "Office DNS on NextDNS", "nextdns", ["profile:read", "dns_policies:read", "blocked_dns_logs:read"]),
         ("demo-compute", "Compute cluster on Proxmox", "proxmox",
          ["nodes:read", "bridges:read", "guests:read", "guest_network:read", "firewall_options:read"]),
         # A second DNS source of a different kind. Its integration reports blocks but cannot open
@@ -89,29 +89,29 @@ def seed_demo(db):
                            config={"demo": True}, capabilities=caps, secret_ref=""))
     db.flush()
     resources = [
-        ("site-home", "Milkyway", "site", "demo-unifi", "infrastructure", None, {"location": "Home lab", "wifi": [
-            {"name": "Milkyway", "enabled": True, "captive_portal": False, "network_id": "example-network-lan"},
-            {"name": "Milkyway IoT", "enabled": True, "captive_portal": False, "network_id": "example-network-iot"},
-            {"name": "Milkyway Guest", "enabled": True, "captive_portal": True, "network_id": "example-network-guest"}]}),
-        ("gateway", "Milkyway gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "UDM SE", "ip": "10.20.65.1"}),
+        ("site-home", "Northgate", "site", "demo-unifi", "infrastructure", None, {"location": "Head office", "wifi": [
+            {"name": "Northgate", "enabled": True, "captive_portal": False, "network_id": "example-network-lan"},
+            {"name": "Northgate IoT", "enabled": True, "captive_portal": False, "network_id": "example-network-iot"},
+            {"name": "Northgate Guest", "enabled": True, "captive_portal": True, "network_id": "example-network-guest"}]}),
+        ("gateway", "Northgate gateway", "gateway", "demo-unifi", "infrastructure", None, {"model": "Cloud gateway", "ip": "10.20.65.1"}),
         ("switch-core", "Core aggregation", "switch", "demo-unifi", "infrastructure", None, {"model": "Aggregation switch", "ports": 8}),
-        ("ap-basement", "Basement access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
+        ("ap-basement", "Ground floor access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
         ("network-lan", "Trusted LAN", "network", "demo-unifi", "infrastructure", None, {"vlan": 65, "subnet": "10.20.65.0/24"}),
         ("network-guest", "Guest network", "network", "demo-unifi", "infrastructure", None, {"vlan": 80, "subnet": "10.20.80.0/24", "purpose": "guest"}),
         ("network-iot", "IoT network", "network", "demo-unifi", "infrastructure", None, {"vlan": 67, "subnet": "10.20.67.0/24"}),
         ("laptop-jamie", "Jamie's MacBook", "client", "demo-unifi", "personal", "user-jamie", {"ip": "10.20.65.42", "mac": "a4:83:e7:10:20:42", "platform": "macOS", "type": "WIRELESS"}),
-        ("tablet-family", "Family tablet", "client", "demo-unifi", "shared", None, {"ip": "10.20.65.51", "mac": "f0:18:98:10:20:51", "platform": "iPadOS", "type": "WIRELESS"}),
+        ("tablet-family", "Front desk tablet", "client", "demo-unifi", "shared", None, {"ip": "10.20.65.51", "mac": "f0:18:98:10:20:51", "platform": "iPadOS", "type": "WIRELESS"}),
         ("workstation", "Alex's workstation", "client", "demo-unifi", "personal", "user-admin", {"ip": "10.20.65.28", "mac": "3c:7c:3f:10:20:28", "platform": "Linux", "type": "WIRED"}),
-        ("washer", "Laundry appliance", "client", "demo-unifi", "infrastructure", None, {"ip": "10.20.67.80", "mac": "00:1d:c9:10:20:80", "category": "IoT", "type": "WIRELESS"}),
+        ("washer", "Lobby display", "client", "demo-unifi", "infrastructure", None, {"ip": "10.20.67.80", "mac": "00:1d:c9:10:20:80", "category": "IoT", "type": "WIRELESS"}),
         ("old-laptop", "Reassigned laptop", "client", "demo-unifi", "personal", "user-admin", {"ip": "10.20.65.62", "mac": "8c:85:90:10:20:62", "type": "WIRELESS"}),
         ("host-compute", "Compute-01", "host", "demo-compute", "infrastructure", None, {"status": "online", "addresses": ["10.20.66.3"], "cluster_firewall_enabled": True}),
-        ("workload-photos", "Photo service", "workload", "demo-compute", "infrastructure", None, {"vmid": "101", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:11", "vlan": 66, "firewall": True}], "port": 443}),
+        ("workload-photos", "Document service", "workload", "demo-compute", "infrastructure", None, {"vmid": "101", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:11", "vlan": 66, "firewall": True}], "port": 443}),
         ("workload-management", "Management console", "workload", "demo-compute", "infrastructure", None, {"vmid": "102", "type": "vm", "node": "compute-01", "status": "running", "firewall_enabled": True, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:12", "vlan": 66, "firewall": True}], "port": 8006}),
         ("policy-guest", "Guest → services", "policy", "demo-unifi", "infrastructure", None, {"action": "allow", "port": 8006, "review": "source scope too broad"}),
-        ("dns-home", "Home DNS profile", "dns_profile", "demo-nextdns", "infrastructure", None, {"scope": "All devices using this profile", "logs_enabled": True}),
+        ("dns-home", "Office DNS profile", "dns_profile", "demo-nextdns", "infrastructure", None, {"scope": "All devices using this profile", "logs_enabled": True}),
         # Added with the console MVP: a servers VLAN, a second access point, guests and Proxmox networking.
         ("network-servers", "Servers", "network", "demo-unifi", "infrastructure", None, {"vlan": 66, "subnet": "10.20.66.0/24"}),
-        ("ap-upstairs", "Upstairs access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
+        ("ap-upstairs", "First floor access point", "access_point", "demo-unifi", "infrastructure", None, {"model": "Wireless AP"}),
         ("client-compute", "compute-01", "client", "demo-unifi", "infrastructure", None, {"ip": "10.20.66.3", "mac": "58:47:ca:10:66:03", "type": "WIRED"}),
         ("guest-priya", "Priya's iPhone", "client", "demo-unifi", "unassigned", None, {
             "ip": "10.20.80.21", "mac": "de:ad:10:20:80:21", "type": "WIRELESS", "uplink": "example-ap-upstairs", "connected_at": _iso(now, 95),
@@ -129,7 +129,7 @@ def seed_demo(db):
             "ip": "10.20.80.52", "mac": "de:ad:10:20:80:52", "type": "WIRELESS", "uplink": "example-ap-upstairs", "connected_at": _iso(now, 3),
             "guest": {"authorized": False}}),
         ("bridge-vmbr0", "vmbr0 on compute-01", "bridge", "demo-compute", "infrastructure", None, {"iface": "vmbr0", "node": "compute-01", "active": True, "vlan_aware": True, "ports": "enp3s0", "cidr": "10.20.66.3/24"}),
-        ("workload-indexer", "Media indexer", "workload", "demo-compute", "infrastructure", None, {"vmid": "204", "type": "container", "node": "compute-01", "status": "running", "firewall_enabled": False, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:44", "vlan": 66, "firewall": False}]}),
+        ("workload-indexer", "Search indexer", "workload", "demo-compute", "infrastructure", None, {"vmid": "204", "type": "container", "node": "compute-01", "status": "running", "firewall_enabled": False, "nics": [{"bridge": "vmbr0", "mac": "bc:24:11:10:66:44", "vlan": 66, "firewall": False}]}),
         ("dns-label-jamie", "Jamies-MacBook-Pro", "client", "demo-nextdns", "unassigned", None, {"model": "MacBook Pro", "identity_verified": False}),
         ("dns-workshop", "Annex resolver", "dns_profile", "demo-pihole", "infrastructure", None, {"scope": "entire_resolver"}),
         ("dns-label-bench", "bench-pc", "client", "demo-pihole", "unassigned", None, {"ip": "10.20.67.90", "identity_verified": False}),
@@ -180,15 +180,15 @@ def seed_demo(db):
     privacy, threat = ["blocklist:hagezi-multi-pro-plusplus"], ["threat-intelligence-feeds"]
     events = [
         ("block-gallery", "laptop-jamie", "Jamie's MacBook", "click.shootproof.com", "HaGeZi Multi PRO++", privacy, 8),
-        ("block-tablet", "tablet-family", "Family tablet", "gallery.example.com", "Denylist", ["denylist"], 26),
+        ("block-tablet", "tablet-family", "Front desk tablet", "gallery.example.com", "Denylist", ["denylist"], 26),
         ("block-admin", "workstation", "Alex's workstation", "downloads.example.net", "Threat Intelligence Feeds", threat, 12),
-        ("block-washer", "washer", "Laundry appliance", "telemetry.appliance.example", "IoT outbound policy", [], 3),
+        ("block-washer", "washer", "Lobby display", "telemetry.display-vendor.example", "IoT outbound policy", [], 3),
         ("block-unattributed", None, "Unknown source device", "metrics.example.org", "Upstream DNS query lacks device identity", [], 5),
         ("block-old-owner", "old-laptop", "Reassigned laptop", "work.example.net", "Historical event before device reassignment", [], 120),
         ("block-expired", "laptop-jamie", "Jamie's MacBook", "old.example.com", "Expired inbox fixture", [], 3000),
         ("block-fonts", "laptop-jamie", "Jamie's MacBook", "fonts.partner-metrics.example", "HaGeZi Multi PRO++", privacy, 19),
         ("block-verify", "laptop-jamie", "Jamie's MacBook", "account-verify.secure-login.example", "Newly Registered Domains", ["nrd"], 34),
-        ("block-stream", "tablet-family", "Family tablet", "watch.streamhub.example", "Parental Control: streaming", ["parental-control:category"], 52),
+        ("block-stream", "tablet-family", "Front desk tablet", "watch.streamhub.example", "Parental Control: streaming", ["parental-control:category"], 52),
         ("block-pixel-1", "guest-pixel", "Pixel 8", "c2.update-check.example", "Threat Intelligence Feeds", threat, 8),
         ("block-pixel-2", "guest-pixel", "Pixel 8", "cdn.update-check.example", "Threat Intelligence Feeds", threat, 9),
         ("block-pixel-3", "guest-pixel", "Pixel 8", "beacon.update-check.example", "Threat Intelligence Feeds", threat, 10),
@@ -235,17 +235,17 @@ def _seed_access_and_guests(db, now):
     put_rule(db, "access_rule", AccessRule(enabled=True, max_score=25, max_minutes=60, per_day=4), "user-admin")
     put_rule(db, "guest_rule", GuestRule(enabled=True, hits=3, minutes=5), "user-admin")
     db.add(AccessRequest(
-        id="request-stream", block_id="block-stream", domain="watch.streamhub.example", device_name="Family tablet",
-        requester_id="user-jamie", reason="Movie night, the kids want to watch the new series.",
+        id="request-stream", block_id="block-stream", domain="watch.streamhub.example", device_name="Front desk tablet",
+        requester_id="user-jamie", reason="The safety training video for new starters is hosted here.",
         duration_minutes=120, status="pending", created_at=now - timedelta(minutes=47), risk_score=60,
         risk_category="policy", integration_id="demo-nextdns",
         risk_factors=[{"label": "A content rule set by an administrator blocks this kind of site", "points": 60}],
         decision_note="This was blocked for safety or by an administrator's rule, so a person decides."))
-    scope = "Everyone using Home DNS on NextDNS"
+    scope = "Everyone using Office DNS on NextDNS"
     for id_, domain, started, minutes, ended in [
         ("lease-news-1", "img.newsletter-cdn.example", 3 * 24 * 60, 60, True),
         ("lease-news-2", "img.newsletter-cdn.example", 26 * 60, 60, True),
-        ("lease-recipes", "assets.recipe-site.example", 22, 60, False),
+        ("lease-recipes", "assets.supplier-catalogue.example", 22, 60, False),
     ]:
         created = now - timedelta(minutes=started)
         db.add(Lease(id=id_, integration_id="demo-nextdns", domain=domain, device_name="Jamie's MacBook",
@@ -255,10 +255,10 @@ def _seed_access_and_guests(db, now):
                      status="ended" if ended else "active", ended_reason="expired" if ended else None,
                      ended_at=created + timedelta(minutes=minutes) if ended else None))
     for id_, name, code, minutes, activated, limit in [
-        ("pass-priya", "Priya (weekend)", "40218-77531", 480, 94, 2),
+        ("pass-priya", "Priya (visiting auditor)", "40218-77531", 480, 94, 2),
         ("pass-hvac", "HVAC contractor", "91034-22876", 240, 40, 1),
-        ("pass-pixel", "Party guests", "55620-18493", 120, 26, 4),
-        ("pass-spare", "Spare for the front door", "77102-33864", 240, None, 1),
+        ("pass-pixel", "Workshop attendees", "55620-18493", 120, 26, 4),
+        ("pass-spare", "Spare for the front desk", "77102-33864", 240, None, 1),
     ]:
         start = now - timedelta(minutes=activated) if activated is not None else None
         db.add(GuestPass(id=id_, integration_id="demo-unifi", code=code, name=name, minutes=minutes,

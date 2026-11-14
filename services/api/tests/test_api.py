@@ -236,7 +236,7 @@ def test_credentials_not_returned_and_unsafe_secret_reference_rejected(tmp_path,
         login = client.post("/api/auth/login", json={"email": settings.bootstrap_admin_email,
                                                      "password": settings.bootstrap_admin_password})
         headers = {"X-CSRF-Token": login.json()["csrf_token"]}
-        body = {"provider": "nextdns", "name": "Home DNS", "config": {"profile_id": "abc123"},
+        body = {"provider": "nextdns", "name": "Office DNS", "config": {"profile_id": "abc123"},
                 "secret_ref": "NYCTR_CONNECTOR_SECRET_HOME"}
         created = client.post("/api/integrations", headers=headers, json=body)
         assert created.status_code == 201, created.text

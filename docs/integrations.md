@@ -47,7 +47,12 @@ source can never move while Nyctr is changing something there.
 
 A change is checked as a new source is, by the integration's own validation and
 the `NYCTR_CONNECTOR_HOSTS` allow-list. A refused change leaves the source and
-the audit history as they were. An edit is refused while a collection or
+the audit history as they were. The refusal names the field by its label on the
+form and says what to change. It never names a setting key or a variable, and
+never repeats an address. Where only whoever runs the server can put it right,
+it says so: "names a server Nyctr is not yet allowed to connect to" means the
+address's host name is missing from `NYCTR_CONNECTOR_HOSTS`. Saving a new source
+is refused in the same words. An edit is refused while a collection or
 diagnostic of that source is running, and in demo mode. Overlapping edits are
 applied one after the other. The audit history records who changed which fields
 of which source, never the values.
