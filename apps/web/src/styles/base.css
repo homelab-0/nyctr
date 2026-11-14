@@ -949,6 +949,9 @@ input:focus {
 .row > .inline-error {
   grid-column: 1 / -1;
 }
+.inline-error > svg {
+  flex: none;
+}
 .tbl tr.click {
   cursor: pointer;
 }
