@@ -691,7 +691,11 @@ def create_app(settings: Settings | None = None):
                     risk_score=row.risk_score)
             except IntegrationError as error:
                 db.rollback()
-                raise HTTPException(502, str(error)) from None
+                if isinstance(error, access.SourceGone):
+                    error.record(db)  # the request stays waiting; what was done at the source is kept
+                    db.commit()
+                    raise HTTPException(409, str(error)) from None
+                raise HTTPException(409 if isinstance(error, access.NotCollected) else 502, str(error)) from None
             execution = lease.execution
         audit(db, user.id, "access." + body.decision, row.id, execution=execution)
         db.commit()

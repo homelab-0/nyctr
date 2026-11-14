@@ -97,7 +97,12 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                       </td>
                       <td>
                         {lease.last_error ? (
-                          <span className="tag red">Could not close</span>
+                          <>
+                            <span className="tag red">Could not close</span>
+                            {lease.source_removed && (
+                              <div className="muted tiny">{lease.last_error}</div>
+                            )}
+                          </>
                         ) : (
                           <span className="muted tiny">{executionText(lease.execution)}</span>
                         )}
@@ -106,9 +111,16 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                         <button
                           className="button secondary small"
                           disabled={busy === lease.id}
-                          onClick={() => void run(lease.id, () => post(`/leases/${lease.id}/end`))}
+                          onClick={() =>
+                            void run(lease.id, () =>
+                              post(
+                                `/leases/${lease.id}/end`,
+                                lease.source_removed ? { by_hand: true } : {},
+                              ),
+                            )
+                          }
                         >
-                          End now
+                          {lease.source_removed ? 'I removed it by hand' : 'End now'}
                         </button>
                       </td>
                     </tr>

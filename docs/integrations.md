@@ -39,6 +39,12 @@ needs a test again. After that the form shows these as read only and the server
 refuses with 409: to read from somewhere else, add a new source, which starts
 with nothing from the old one.
 
+The other side of that rule: Nyctr changes nothing at a source until it has
+collected from it once. Opening an exception (by approval, by the access rule or
+as a permanent one), issuing a guest pass, and letting a guest on, cutting one
+off or locking one out are refused in plain words before anything is sent. So a
+source can never move while Nyctr is changing something there.
+
 A change is checked as a new source is, by the integration's own validation and
 the `NYCTR_CONNECTOR_HOSTS` allow-list. A refused change leaves the source and
 the audit history as they were. An edit is refused while a collection or
@@ -71,6 +77,14 @@ until their time ends and that Nyctr can no longer cut them off. It is
 also refused while a collection or diagnostic of the source is running, and in
 demo mode. Adding a source again, for the same place or another, starts from
 nothing: no device, assignment, label link, guest state or finding comes back.
+
+If a source is removed while Nyctr is opening an exception or issuing a guest
+pass there, Nyctr takes back what it just added, at the place the call used, and
+says so. If that fails, the exception stays under Open now with what to remove
+by hand; Nyctr cannot reach it any more, so it is not retried, and **I removed
+it by hand** ends it once that is done. A guest let on, cut off or locked out
+during the removal is not undone: the activity history records what was done
+at which source.
 
 ## Connection diagnostics
 

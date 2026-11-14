@@ -141,11 +141,11 @@ def live_guest(app, *, lookups=3):
     """Insert a UniFi site, one authorised guest device and recent threat lookups into a live database."""
     now = utcnow()
     with app.state.session_factory() as db:
-        db.add(Integration(id="unifi", provider="unifi_network", name="UniFi", status="connected",
+        db.add(Integration(id="unifi", provider="unifi_network", name="UniFi", status="connected", last_sync=now,
                            config={"base_url": "https://unifi.example/proxy/network/integration"},
                            secret_ref="NYCTR_CONNECTOR_SECRET_UNIFI"))
         db.add(Integration(id="dns", provider="nextdns", name="DNS", config={"profile_id": "abc123"},
-                           secret_ref="NYCTR_CONNECTOR_SECRET_DNS", status="connected"))
+                           secret_ref="NYCTR_CONNECTOR_SECRET_DNS", status="connected", last_sync=now))
         db.flush()
         for id_, kind, source, attrs in [
             ("unifi:site:s1", "site", "s1", {}),
