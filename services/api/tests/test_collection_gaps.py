@@ -45,7 +45,7 @@ def by_person(app, client, headers):
 
 def by_schedule(app, client, headers):
     """Collect every source as the schedule does."""
-    assert asyncio.run(worker.tick(app.state.session_factory, app.state.settings, utcnow())) is True
+    assert asyncio.run(worker.collection_pass(app.state.session_factory, app.state.settings, utcnow())) is True
 
 
 def by_nudge(app, client, headers):
