@@ -82,6 +82,60 @@ async function openOnClock(schedule: () => CollectionSchedule) {
   return { count, pass, view };
 }
 
+const gaps = [
+  { id: 'example_passes', title: 'Guest passes could not be read', summary: 'Fabricated.' },
+  { id: 'example_ranges', title: 'Some address ranges could not be read', summary: 'Fabricated.' },
+];
+
+describe('briefing: sources that need a look', () => {
+  /** The row under "Needs you" whose title starts with the source's name. */
+  const need = (name: string) =>
+    screen.getByText((text) => text.startsWith(`${name} source `)).closest('a') as HTMLElement;
+
+  it('lists a partly collected source with a link to its Edit form, and one with gaps with a link to its card', async () => {
+    const rows = await open([
+      source('complete', 'connected'),
+      source('partial', 'partial'),
+      { ...source('gappy', 'connected'), gaps },
+    ]);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Two things need you.');
+    const partial = need('partial');
+    expect(partial.getAttribute('href')).toBe('#/sources?edit=partial');
+    expect(partial.textContent).toContain('was only partly collected');
+    expect(partial.textContent).toContain('Give it a shorter time window to read all of it.');
+    const gappy = need('gappy');
+    expect(gappy.getAttribute('href')).toBe('#/sources?source=gappy');
+    expect(gappy.textContent).toContain(
+      'Guest passes could not be read. Some address ranges could not be read.',
+    );
+    // The Sources panel does not show it as a clean collection either.
+    expect(rows.get('gappy')!.textContent).toContain(
+      'Collected 5 min ago. 2 things could not be read.',
+    );
+    expect(rows.get('gappy')!.querySelector('.dot')!.className).toBe('dot yellow');
+    expect(rows.get('complete')!.querySelector('.dot')!.className).toBe('dot green');
+  });
+
+  it('says nothing needs you only when every source read everything', async () => {
+    await open([source('complete', 'connected'), { ...source('whole', 'connected'), gaps: [] }]);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'Nothing needs you right now.',
+    );
+    expect(screen.getByText(/or sources that failed or could\s+not read everything/)).toBeDefined();
+    cleanup();
+    await open([{ ...source('gappy', 'connected'), gaps: gaps.slice(0, 1) }]);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('One thing needs you.');
+    expect(screen.queryByText(/No cut-off guests/)).toBeNull();
+  });
+
+  it('leaves a failed source to the row the server already ranks', async () => {
+    await open([{ ...source('failed', 'error', 'Provider denied access.'), gaps }]);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'Nothing needs you right now.',
+    );
+  });
+});
+
 describe('briefing sources', () => {
   it('does not show a partly read source as a clean one', async () => {
     const rows = await open([source('complete', 'connected'), source('partial', 'partial')]);

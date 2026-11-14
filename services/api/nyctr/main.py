@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, access, assistant, guests, query, removal, worker
-from .collection import after_collection, apply_snapshot, collect_integration, parsed_date  # noqa: F401
+from .collection import after_collection, apply_snapshot, collect_integration, last_gaps, parsed_date  # noqa: F401
 from .config import Settings
 from .database import make_engine, migrate, session_factory
 from .deps import (  # noqa: F401  (re-exported for callers that import them from here)
@@ -312,8 +312,13 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/integrations")
     def integrations(_user=Depends(admin), db: Session = Depends(get_db)):
-        """List administrator connector metadata while excluding resolved secrets."""
-        return [integration_json(i) for i in db.scalars(select(Integration).order_by(Integration.name))]
+        """List administrator connector metadata while excluding resolved secrets.
+
+        `gaps` is what each source's last stored collection could not read, as
+        (id, title, summary) in its integration's words; empty when it read everything.
+        """
+        return [{**integration_json(i), "gaps": last_gaps(db, i)}
+                for i in db.scalars(select(Integration).order_by(Integration.name))]
 
     @app.get("/api/integrations/catalog")
     def integration_catalog(_user=Depends(admin)):
@@ -547,7 +552,8 @@ def create_app(settings: Settings | None = None):
         db.commit()
         await guests.enforce(db, settings, due)
         return {"ok": True, "resource_count": len(snapshot.resources), "observation_count": len(snapshot.blocks),
-                "partial": snapshot.partial_rows is not None}
+                "partial": snapshot.partial_rows is not None,
+                "gaps": len(last_gaps(db, stored)) if (stored := db.get(Integration, integration_id)) else 0}
 
     @app.get("/api/devices")
     def devices(auth=Depends(identity), db: Session = Depends(get_db)):

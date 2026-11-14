@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from . import integrations
 from .integrations import registry
-from .integrations.core import IntegrationError, ProbeEvidence, capture_probe, utc_now
+from .integrations.core import IntegrationError, ProbeEvidence, capture_probe, describe_gaps, utc_now
 
 DIAGNOSTICS_TIMEOUT_SECONDS = 90
 
@@ -178,11 +178,8 @@ def _gaps(provider: str, evidence: ProbeEvidence, counts: SnapshotCounts | None)
         elif counts is not None and counts.observations == 0:
             entries.append(("no_recent_events", "No recent blocks were returned",
                             "The bounded log query returned no normalized block events. This does not prove that no connection was blocked."))
-    notes = definition.gap_notes if definition else {}
-    for gap in sorted(evidence.gaps):
-        if gap in notes:
-            title, summary = notes[gap]
-            entries.append((gap, title, summary))
+    entries.extend(describe_gaps(definition.gap_notes if definition else {},
+                                 {gap: evidence.gap_causes.get(gap) for gap in evidence.gaps}))
     return [EvidenceGap(id=id_, title=title, summary=summary) for id_, title, summary in entries]
 
 

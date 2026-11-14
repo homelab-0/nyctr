@@ -52,6 +52,27 @@ diagnostic of that source is running, and in demo mode. Overlapping edits are
 applied one after the other. The audit history records who changed which fields
 of which source, never the values.
 
+## What a collection could not read
+
+A gap is something a collection could not read or could not work out: a read the
+key may not make, detail reads stopped at a limit, a setting the source did not
+return. Every collection records the gaps it hit, whether the schedule, a person
+or a nudge started it, with the same codes and texts the connection test shows.
+The codes go into the collection's entry in Activity's record; nothing from the
+source's answer, no address and no secret name is kept with them.
+
+A source whose last stored collection had gaps is shown as "Connected, with
+gaps". Its card says what could not be read and what that means, and the
+Briefing lists it under "Needs you" until a later collection reads everything. A
+collection that fails stores nothing, so the gaps of the last stored collection
+stay on the card beside the error. A partly collected source is listed there
+too, with a link to its Edit form, where a shorter time window is the cure.
+
+Where the source's answer says why, the card says it: the source refused the
+read (this key may not read it), or the source had an error of its own (the next
+collection may read it). Neither fails the collection. A rate limit, a timeout
+or a broken connection still does.
+
 ## Removing a source
 
 **Remove** on a source's card shows, with counts, what goes and what stays, and

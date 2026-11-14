@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, or_, select, update
 
 from .models import (
+    Audit,
     DeviceLink,
     GuestPass,
     Integration,
@@ -195,6 +196,29 @@ def after_collection(db, settings):
     return evaluate_rule(db, settings)
 
 
+def last_gaps(db, integration) -> list[dict[str, str]]:
+    """Say what the last collection that stored data could not read, in the integration's own words.
+
+    Read from that collection's audit record: the next stored collection replaces
+    it and a failed one leaves it alone. Only fixed codes are kept there, so no
+    address, secret name or source answer can be repeated here.
+    """
+    from .integrations import registry
+    from .integrations.core import describe_gaps
+
+    last = db.scalar(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == integration.id)
+                     .order_by(Audit.created_at.desc()).limit(1))
+    codes = last.details.get("gaps") if last is not None else None
+    if not isinstance(codes, list):
+        return []
+    causes = last.details.get("gap_causes")
+    causes = causes if isinstance(causes, dict) else {}
+    definition = registry.find(integration.provider)
+    described = describe_gaps(definition.gap_notes if definition else {},
+                              {code: causes.get(code) for code in codes if isinstance(code, str)})
+    return [{"id": code, "title": title, "summary": text} for code, title, text in described]
+
+
 def _still_holds(db, integration_id: str, started) -> bool:
     """Lock the source row and say whether the lease taken at `started` is still this caller's."""
     return db.execute(update(Integration).where(
@@ -218,6 +242,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
     error is still recorded and the attempt audited.
     """
     from .integrations import IntegrationError, collect
+    from .integrations.core import capture_probe
 
     with factory() as db:
         integration = db.get(Integration, integration_id)
@@ -250,8 +275,10 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 db.commit()
                 return None, "secret"
         try:
-            snapshot = await asyncio.wait_for(
-                collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
+            # The same recorder the connection test opens, so a collection keeps the gaps it hit.
+            with capture_probe() as evidence:
+                snapshot = await asyncio.wait_for(
+                    collect(integration.provider, integration.id, integration.config, api_key), timeout=90)
             # Lock the source row before any other row, and store only while this lease is still ours.
             # A lease older than five minutes can be taken over, and an edit can then move the source;
             # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
@@ -263,6 +290,9 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             audit(db, actor, "integration.collected", integration.id, name=integration.name,
                   resources=len(snapshot.resources), observations=len(snapshot.blocks),
                   partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}),
+                  gaps=sorted(evidence.gaps),
+                  **({"gap_causes": {code: sorted(causes) for code, causes in sorted(evidence.gap_causes.items())}}
+                     if evidence.gap_causes else {}),
                   **({"attempt": attempt} if attempt is not None else {}))
             db.commit()
         except Exception as exc:

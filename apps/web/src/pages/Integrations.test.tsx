@@ -723,6 +723,58 @@ const resolver: Integration = {
   secret_ref: 'NYCTR_CONNECTOR_SECRET_RESOLVER',
 };
 
+/** Covers a source whose last collection could not read everything, and the links that lead to it. */
+describe('a source that could not read everything', () => {
+  const gappy: Integration = {
+    ...resolver,
+    gaps: [
+      {
+        id: 'acme_passes_unavailable',
+        title: 'Guest passes could not be read',
+        summary: 'Guest pass tracking is incomplete. This time the source had an error of its own.',
+      },
+    ],
+  };
+
+  it('is not shown as a clean connection and says what was missed and what it means', async () => {
+    await openIntegrations({
+      source: gappy,
+      others: [{ ...resolver, id: 'whole', name: 'Whole' }],
+    });
+    const card = screen.getByRole('heading', { name: gappy.name }).closest('section')!;
+    expect(within(card).getByText('Connected, with gaps')).toBeDefined();
+    expect(within(card).queryByText('Connected')).toBeNull();
+    expect(within(card).getByText('The last collection could not read everything')).toBeDefined();
+    expect(within(card).getByText('Guest passes could not be read.')).toBeDefined();
+    expect(within(card).getByText(/Guest pass tracking is incomplete\. This time/)).toBeDefined();
+    // A source with no gaps looks as it did.
+    const whole = screen.getByRole('heading', { name: 'Whole' }).closest('section')!;
+    expect(within(whole).getByText('Connected')).toBeDefined();
+    expect(within(whole).queryByText(/could not read everything/)).toBeNull();
+  });
+
+  it('opens the Edit form from a Briefing link once, and goes to the card from the other', async () => {
+    window.location.hash = `/sources?edit=${resolver.id}`;
+    const { interaction } = await openIntegrations({ source: resolver });
+    const dialog = await screen.findByRole('dialog', { name: 'Edit source' });
+    await interaction.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit source' })).toBeNull());
+    cleanup();
+    window.location.hash = `/sources?source=${gappy.id}`;
+    await openIntegrations({ source: gappy });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: gappy.name })),
+    );
+    expect(screen.queryByRole('dialog', { name: 'Edit source' })).toBeNull();
+  });
+
+  it('does not open the Edit form for a member', async () => {
+    window.location.hash = `/sources?edit=${resolver.id}`;
+    await openIntegrations({ source: resolver, role: 'member' });
+    expect(screen.queryByRole('dialog', { name: 'Edit source' })).toBeNull();
+  });
+});
+
 /** Covers the edit form: what it shows, what it sends, how a refusal reads, and where focus lands. */
 describe('editing a saved source', () => {
   it("opens the form filled in, keeps the kind and a collected source's address fixed, and saves a number", async () => {
