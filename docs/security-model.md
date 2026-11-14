@@ -86,6 +86,7 @@ session can do, as before.
 | --- | --- |
 | Member requests another person's event by ID | Server authorization, including event-time ownership and current access |
 | Shared upstream resolver is mistaken for a person | Unattributed events remain administrator-only |
+| A total, a filter count or where a page ends gives away another person's event | The list of blocked lookups applies member rights in the database query, before the page is cut and before anything is counted |
 | Stale block becomes an access grant | Reject stale requests. An approval is refused once the blocked lookup behind it has expired; refusing or noting a request needs no fresh evidence |
 | Provider redirects leak an API key | No redirected credential-bearing requests |
 | Configured endpoint targets internal metadata | Explicit console host allowlist, HTTPS validation, reserved-address restrictions |
