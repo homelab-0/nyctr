@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App';
 import { setCsrfToken } from '../../api';
 import { AuthProvider } from '../../auth';
-import { mockApi } from '../../test/mock-api';
+import { blockList, mockApi } from '../../test/mock-api';
 import { memberSchedule } from '../../test/schedule';
 import type { AccessRequest, Block, Lease, User } from '../../types';
 
@@ -81,15 +81,17 @@ const lease = (extra: Partial<Lease> = {}): Lease => ({
 
 function open(routes: Record<string, unknown>, hash = '/portal') {
   window.location.hash = hash;
+  const given = routes['GET /blocks'];
   const calls = mockApi({
     'GET /auth/me': member,
     'GET /me/device': { device_id: 'laptop', name: "Sam's laptop", simulated: false },
-    'GET /blocks': [],
     'GET /requests': [],
     'GET /leases': [],
     'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
     'GET /blocks/coverage': { collected: 'yes', unassigned: false },
     ...routes,
+    // Tests give the lookups; the route answers with them as its one page.
+    'GET /blocks': Array.isArray(given) ? blockList(given as Block[]) : (given ?? blockList([])),
   });
   render(
     <AuthProvider>

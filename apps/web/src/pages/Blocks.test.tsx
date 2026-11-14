@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mockApi } from '../test/mock-api';
+import { blockList, mockApi } from '../test/mock-api';
 import type { Block, Integration } from '../types';
 import Blocks from './Blocks';
 
@@ -33,11 +33,76 @@ afterEach(() => {
 });
 
 describe('Blocks', () => {
+  it('draws one page of thousands, counts from the server, and asks the server to filter', async () => {
+    const stored = Array.from({ length: 3000 }, (_, index) => ({
+      ...block(`host-${String(index).padStart(4, '0')}`, index + 1),
+      risk_band: (index % 3 ? 'unknown' : 'high') as Block['risk_band'],
+    }));
+    /** What the server would answer: the filter and the counts over everything, then one page. */
+    const serve = (band?: string, text?: string, before?: string) => {
+      const matching = stored.filter(
+        (row) => (!band || row.risk_band === band) && (!text || row.domain.includes(text)),
+      );
+      const from = before ? matching.findIndex((row) => row.id === before) + 1 : 0;
+      const rows = matching.slice(from, from + 200);
+      const next = from + 200 < matching.length ? rows.at(-1)!.id : null;
+      return { ...blockList(stored), rows, next, matching: matching.length };
+    };
+    const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
+    const calls = mockApi({
+      'GET /blocks': serve(),
+      'GET /blocks?before=host-0199': serve(undefined, undefined, 'host-0199'),
+      'GET /blocks?band=high': serve('high'),
+      'GET /blocks?band=high&q=host-29': serve('high', 'host-29'),
+      'GET /integrations': [dns],
+      'GET /integrations/catalog': { providers: [] },
+    });
+    render(<Blocks />);
+    expect(await screen.findByText('host-0000.example')).toBeDefined();
+    const drawn = () => document.querySelectorAll('tbody tr').length;
+    expect(drawn()).toBe(200);
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the latest 200 of 3,000 stored lookups.',
+    );
+    // The counts and the note are about all 3,000, though only 200 rows are on the page.
+    expect(screen.getByRole('button', { name: /^All/ }).textContent).toBe('All3000');
+    expect(screen.getByRole('button', { name: /^High/ }).textContent).toBe('High1000');
+    expect(document.body.textContent).toContain('None of its 3,000 stored lookups');
+    expect(document.body.textContent).toContain('3,000 blocked lookups stored');
+    fireEvent.click(screen.getByRole('button', { name: 'Show older' }));
+    expect(await screen.findByText('host-0399.example')).toBeDefined();
+    expect(drawn()).toBe(400);
+    expect(screen.getByRole('status').textContent).toContain('Showing the latest 400 of 3,000');
+    fireEvent.click(screen.getByRole('button', { name: /^High/ }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        'Showing the latest 200 of 1,000 that match, out of 3,000 stored lookups.',
+      ),
+    );
+    expect(drawn()).toBe(200);
+    expect(screen.queryByText('host-0001.example')).toBeNull();
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: ' host-29 ' } });
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        'Showing all 33 that match, out of 3,000 stored lookups.',
+      ),
+    );
+    expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull();
+    expect(
+      calls.filter((call) => call.path.startsWith('/blocks')).map((call) => call.path),
+    ).toEqual([
+      '/blocks',
+      '/blocks?before=host-0199',
+      '/blocks?band=high',
+      '/blocks?band=high&q=host-29',
+    ]);
+  });
+
   it('says once that a source names no device, and tells not collected from nothing blocked', async () => {
     const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
     const limits = [{ id: 'upstream_identity', title: 'T', summary: 'Declared by the source.' }];
     mockApi({
-      'GET /blocks': [block('one', 5), block('two', 9)],
+      'GET /blocks': blockList([block('one', 5), block('two', 9)]),
       'GET /integrations': [dns],
       'GET /integrations/catalog': { providers: [{ id: 'example_dns', limits }] },
     });
@@ -49,7 +114,7 @@ describe('Blocks', () => {
     expect(screen.queryByText('No device known')).toBeNull();
     cleanup();
     mockApi({
-      'GET /blocks': [],
+      'GET /blocks': blockList([]),
       'GET /integrations': [
         { ...dns, last_sync: null, status: 'error', last_error: 'Key refused' },
       ],
@@ -63,7 +128,7 @@ describe('Blocks', () => {
   it('does not call the last collection empty when the source collected once and is failing now', async () => {
     const dns = { ...source('Home DNS', 'connected'), provides: ['dns.blocks'] };
     mockApi({
-      'GET /blocks': [],
+      'GET /blocks': blockList([]),
       'GET /integrations': [{ ...dns, last_sync: 'x', last_error: 'Key refused' }],
     });
     render(<Blocks />);
@@ -74,7 +139,7 @@ describe('Blocks', () => {
     expect(page).not.toContain('No blocked lookups are stored');
     expect(page).not.toContain('The last collection brought none back');
     cleanup();
-    mockApi({ 'GET /blocks': [], 'GET /integrations': [{ ...dns, last_sync: 'x' }] });
+    mockApi({ 'GET /blocks': blockList([]), 'GET /integrations': [{ ...dns, last_sync: 'x' }] });
     render(<Blocks />);
     expect(await screen.findByText('No blocked lookups are stored')).toBeDefined();
   });
@@ -82,7 +147,7 @@ describe('Blocks', () => {
   it('does not say a source names no device when one of its lookups names one', async () => {
     const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
     const named = { ...block('two', 9), device_id: 'd1', attribution: 'assigned' } as Block;
-    mockApi({ 'GET /blocks': [block('one', 5), named], 'GET /integrations': [dns] });
+    mockApi({ 'GET /blocks': blockList([block('one', 5), named]), 'GET /integrations': [dns] });
     render(<Blocks />);
     expect(await screen.findByText('one.example')).toBeDefined();
     expect(screen.queryByText(/does not say which device/)).toBeNull();
@@ -91,7 +156,7 @@ describe('Blocks', () => {
 
   it('says the span the stored lookups cover and which source was only partly read', async () => {
     mockApi({
-      'GET /blocks': [block('new', 12), block('mid', 200), block('old', 565)],
+      'GET /blocks': blockList([block('new', 12), block('mid', 200), block('old', 565)]),
       'GET /integrations': [source('Busy DNS', 'partial'), source('Quiet DNS', 'connected')],
     });
     render(<Blocks />);
@@ -108,7 +173,7 @@ describe('Blocks', () => {
   it('keeps the lookups and says completeness could not be checked when sources fail to load', async () => {
     let fail = true;
     mockApi({
-      'GET /blocks': [block('new', 12)],
+      'GET /blocks': blockList([block('new', 12)]),
       'GET /integrations': () =>
         fail ? { __status: 500, detail: 'Unavailable' } : [source('Busy DNS', 'partial')],
     });

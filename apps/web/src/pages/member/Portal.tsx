@@ -24,8 +24,17 @@ import {
   Score,
   Seg,
 } from '../../components/ui';
+import { counted } from '../../lib/counts';
 import { ago, detectOs, left, span, useNow, type DeviceOs } from '../../lib/format';
-import type { AccessRequest, Block, BlockCoverage, Lease, Resource, ThisDevice } from '../../types';
+import type {
+  AccessRequest,
+  Block,
+  BlockCoverage,
+  BlockList,
+  Lease,
+  Resource,
+  ThisDevice,
+} from '../../types';
 
 /** Steps to make a device forget that an address was blocked. Wording is deliberately non-technical. */
 const RECONNECT: Record<DeviceOs, { name: string; steps: string[] }> = {
@@ -80,7 +89,13 @@ const STATUS: Record<string, { text: string; tone: string }> = {
 };
 
 function useMemberData() {
-  const blocks = useApi<Block[]>('/blocks');
+  // One page: the latest lookups this person may see. `beyond` is how many older ones are not on it.
+  const list = useApi<BlockList>('/blocks');
+  const blocks = {
+    ...list,
+    data: list.data ? list.data.rows : null,
+    beyond: list.data ? list.data.total - list.data.rows.length : 0,
+  };
   const requests = useApi<AccessRequest[]>('/requests');
   const leases = useApi<Lease[]>('/leases');
   const device = useApi<ThisDevice>('/me/device');
@@ -306,6 +321,13 @@ function Home({ data }: { data: Data }) {
         </section>
       )}
       {blocks.length > 0 && missing && <p className="aside">{missing}</p>}
+      {data.blocks.beyond > 0 && (
+        <p className="aside">
+          These are the latest blocks on your devices. {counted(data.blocks.beyond, 'older one')}{' '}
+          {data.blocks.beyond === 1 ? 'is' : 'are'} not listed here: to find one, type its address
+          above.
+        </p>
+      )}
       {blocks.length === 0 && found === null && !noDevices && (
         <Empty
           title={

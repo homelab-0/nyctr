@@ -54,8 +54,15 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 
 ## Member-safe inbox and requests
 
-- `GET /api/blocks` -> Block[]; members see only fresh events on devices assigned
-  to them at event time and currently authorized. Admins may see all recent events.
+- `GET /api/blocks` -> BlockList: one page of at most 200 events, newest first.
+  Members see only fresh events on devices assigned to them at event time and
+  currently authorized. Admins may see all recent events. That rule is applied in
+  the database query before the page is cut and before anything is counted, so
+  a member's totals, counts and page boundaries come only from events they may see.
+  Optional `band` (`high`, `medium`, `low`, `unknown`) and `q` (text found in the
+  address, device name or reason) narrow the rows; `before` takes the `next` value
+  of the page above and returns the rows strictly older than its last one, so
+  events stored between two requests are neither skipped nor repeated.
 - `GET /api/devices` -> Resource[] permitted to the caller.
 - `GET /api/requests` -> AccessRequest[] permitted to the caller.
 - `POST /api/requests` with `{block_id,reason,duration_minutes}` -> AccessRequest.
@@ -68,6 +75,13 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   temporary lease whose `execution` says whether the provider was changed.
 - `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
 - `GET /api/me/device` -> `{device_id,name,simulated}`; only among the caller's devices.
+
+BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
+is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as
+`{total,unnamed}` per kind of source, `named`, `unnamed`) describe every event
+the caller may see, whatever the filter or page; `matching` is how many pass the
+filter. Every stored event the caller may see is read once per request to be
+scored and counted, so the cost grows with what is stored, not with the page.
 
 Block: `{id,device_id,device_name,domain,source,reason,reason_codes,observed_at,
 expires_at,evidence_kind,attribution,risk_score,risk_band,risk_category,

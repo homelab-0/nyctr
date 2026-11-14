@@ -122,7 +122,7 @@ def test_an_administrator_has_member_rights_on_the_portal_address(two_addresses)
         assert console.get("/api/overview").status_code == 200
 
         # Lists are narrowed to what a member may see: the administrator's own devices only.
-        everything, own = console.get("/api/blocks").json(), portal.get("/api/blocks").json()
+        everything, own = console.get("/api/blocks").json()["rows"], portal.get("/api/blocks").json()["rows"]
         assert 0 < len(own) < len(everything)
         own_devices = {row["id"] for row in portal.get("/api/devices").json()}
         assert own_devices and all(row["device_id"] in own_devices for row in own)

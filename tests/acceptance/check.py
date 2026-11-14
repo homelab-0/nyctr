@@ -240,11 +240,14 @@ def source_path(connection: dict, action: str) -> str:
 def evidence_snapshot(client: Client) -> str:
     """Capture inventory, graph, and fresh block state for a strict no-import comparison."""
     graph = client.json("/api/graph")
+    stored = client.json("/api/blocks")
     state = {
         "resources": sorted(client.json("/api/resources"), key=lambda row: row["id"]),
         "nodes": sorted(graph["nodes"], key=lambda row: row["id"]),
         "edges": sorted(graph["edges"], key=lambda row: row["id"]),
-        "blocks": sorted(client.json("/api/blocks"), key=lambda row: row["id"]),
+        "blocks": sorted(stored["rows"], key=lambda row: row["id"]),
+        # The list is one page; the total covers lookups that are stored but not on it.
+        "block_total": stored["total"],
     }
     return json.dumps(state, sort_keys=True)
 
@@ -536,7 +539,8 @@ def verify_persisted_evidence(client: Client, connections: dict[str, dict]) -> N
     """Check the saved graph and unassigned block using read endpoints only, including after restart."""
     resources = client.json("/api/resources")
     graph = client.json("/api/graph")
-    blocks = client.json("/api/blocks")
+    stored = client.json("/api/blocks")
+    blocks = stored["rows"]
     require(
         len(resources) == 19 and len(graph["nodes"]) == 19 and len(graph["edges"]) == 28,
         "The synthetic graph was lost, duplicated, or mixed with other data; expected 19 resources and 28 relationships.",
@@ -548,7 +552,7 @@ def verify_persisted_evidence(client: Client, connections: dict[str, dict]) -> N
             sum(row["attributes"].get("integration_id") == source_id for row in resources) == expected,
             "Source resource namespaces did not survive collection or restart.",
         )
-    require(len(blocks) == 1, "Expected one fresh synthetic DNS block; stale blocks expire after 24 hours.")
+    require(len(blocks) == 1 and stored["total"] == 1, "Expected one fresh synthetic DNS block; stale blocks expire after 24 hours.")
     block = blocks[0]
     require(
         block["domain"] == "photos.example.test"

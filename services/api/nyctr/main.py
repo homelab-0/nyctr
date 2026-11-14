@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
 from . import __version__, access, assistant, guests, query, removal, worker
+from . import blocks as block_list
 from .collection import after_collection, apply_snapshot, collect_integration, last_gaps, parsed_date  # noqa: F401
 from .config import Settings
 from .database import make_engine, migrate, session_factory
@@ -605,17 +606,20 @@ def create_app(settings: Settings | None = None):
         return resource_json(row)
 
     @app.get("/api/blocks")
-    def blocks(auth=Depends(identity), db: Session = Depends(get_db)):
+    def blocks(band: Literal["high", "medium", "low", "unknown"] | None = None,
+               q: str = Query("", max_length=120), before: str | None = Query(None, max_length=320),
+               auth=Depends(identity), db: Session = Depends(get_db)):
         # Requests retain their own domain/device snapshot after inbox observations expire.
-        """Prune expired inbox observations and return only events the caller may currently inspect.
+        """Prune expired inbox observations and return one page of the events the caller may currently inspect.
 
         Expiry cleanup leaves stored request snapshots and audit history intact.
-        Members additionally require reliable event-time and current device access.
+        Members additionally require reliable event-time and current device access,
+        applied before the page is cut and before anything is counted. See
+        `blocks.page` for the paging and the counts.
         """
         db.execute(delete(Observation).where(Observation.expires_at <= utcnow()))
         db.commit()
-        rows = db.scalars(select(Observation).where(Observation.expires_at > utcnow()).order_by(Observation.observed_at.desc()))
-        return [observation_json(r) for r in rows if observation_permitted(db, r, auth[0])]
+        return block_list.page(db, auth[0], band, q, before)
 
     @app.get("/api/blocks/coverage")
     def block_coverage(_auth=Depends(identity), db: Session = Depends(get_db)):

@@ -28,7 +28,7 @@ def test_members_cannot_see_or_control_guests(client, member_headers):
                        ("guests/actions", {"device_id": "guest-priya", "action": "cut"}),
                        ("guests/passes/pass-spare/end", {}), ("demo/guest-activity", {"device_id": "guest-hvac"})]:
         assert client.post("/api/" + path, headers=member_headers, json=body).status_code == 403
-    assert not [x for x in client.get("/api/blocks").json() if x["device_id"].startswith("guest-")]
+    assert not [x for x in client.get("/api/blocks").json()["rows"] if x["device_id"].startswith("guest-")]
 
 
 def test_overview_separates_what_is_known_inferred_and_not_collected(client, admin_headers):

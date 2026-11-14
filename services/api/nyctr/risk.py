@@ -12,6 +12,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 LOW_MAX = 30
 MEDIUM_MAX = 60
@@ -92,6 +93,15 @@ def _name_factors(domain: str) -> list[dict]:
     return factors
 
 
+@lru_cache(maxsize=4096)
+def _explain(source: str | None, text: str) -> tuple[str, int | None, str] | None:
+    """Explain one reason from one kind of source. A source repeats a few reasons over thousands of lookups."""
+    from .integrations import registry
+
+    provider = registry.find(source)
+    return (provider.classify if provider and provider.classify else _generic)(text)
+
+
 def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
            source: str | None = None) -> Assessment:
     """Score a blocked domain from its block reason and name.
@@ -103,17 +113,13 @@ def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
     or a source that says it cannot tell, returns an unknown assessment. So
     does a privacy-list score beside a reason that could not be explained.
     """
-    from .integrations import registry
-
-    provider = registry.find(source)
-    explain = provider.classify if provider and provider.classify else _generic
     codes = [code for code in (reason_codes or []) if isinstance(code, str)]
     names = [part.strip() for part in reason.split(";") if part.strip()]
     best: tuple[int, str, str] | None = None
     cannot_tell: str | None = None
     scored: set[str] = set()
     for text in codes + names:
-        found = explain(text)
+        found = _explain(source, text)
         if found is None:
             continue
         category, score, label = found
