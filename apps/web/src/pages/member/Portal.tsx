@@ -343,9 +343,10 @@ function Home({ data }: { data: Data }) {
       )}
       {blocks.length === 0 && found === null && !noDevices && (
         <Empty
+          // The heading hedges whenever lookups tied to no device exist, wherever the caveat is said.
           title={
             gap?.title ||
-            (partly
+            (cover?.unassigned
               ? 'Nyctr has not seen anything blocked on your devices in the last day'
               : 'Nothing has been blocked on your devices in the last day')
           }

@@ -78,7 +78,10 @@ const Ground = memo(function Ground({
             {short(lane.name, 22)}
           </text>
           <text className="lane-sub" x={lane.x + 14} y={41}>
-            {short(from.has(lane.id) ? `${lane.sub} · ${from.get(lane.id)}` : lane.sub, 28)}
+            {/* The source's name is cut by itself: it is the part that differs between two columns. */}
+            {from.has(lane.id)
+              ? `${lane.sub} · ${short(from.get(lane.id)!, Math.max(8, 28 - lane.sub.length - 3))}`
+              : short(lane.sub, 28)}
           </text>
         </g>
       ))}

@@ -39,7 +39,7 @@ import Setup from './pages/Setup';
 import SignIn from './pages/SignIn';
 import Portal from './pages/member/Portal';
 import { isAssistantKey, rememberShortcut, shortcutEnabled } from './lib/shortcut';
-import { someNames } from './lib/format';
+import { mayChange } from './lib/format';
 
 interface NavItem {
   id: string;
@@ -71,13 +71,9 @@ export function useRoute() {
 export function writeLine(rules: Rules | null, demo: boolean) {
   if (demo) return 'Demo: every change is simulated';
   if (!rules) return 'Checking what Nyctr may change';
-  const allowed = rules.sources.filter((s) => s.write_mode === 'enabled');
-  // Only sources Nyctr has read are named: one never collected has nothing of Nyctr's to change.
-  const read = allowed.filter((s) => s.collected !== false).map((s) => s.name);
-  if (!allowed.length) return 'Read-only for every source';
-  return read.length
-    ? `May change ${someNames(read)}`
-    : 'May change sources once they are collected';
+  // The same words as the headline on Sources, so the two cannot disagree.
+  const allowed = mayChange(rules.sources);
+  return allowed ? `May change ${allowed}` : 'Read-only for every source';
 }
 
 /**

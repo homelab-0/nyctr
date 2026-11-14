@@ -156,6 +156,69 @@ describe('member portal', () => {
     expect(document.body.textContent!.match(/one of yours may be missing/g)).toHaveLength(1);
   });
 
+  it('never calls an empty list clean when the device is not recognised and some sites are tied to no device', async () => {
+    open({
+      'GET /me/device': { device_id: null, name: null, simulated: false },
+      'GET /blocks/coverage': { collected: 'yes', unassigned: true },
+    });
+    expect(
+      await screen.findByText(
+        'Nyctr has not seen anything blocked on your devices in the last day',
+      ),
+    ).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page).not.toContain('Nothing has been blocked');
+    // The sentence at the top carries the caveat, once.
+    expect(page).toContain('could not tell which of your devices this is');
+    expect(page.match(/cannot be tied to a device/g)).toHaveLength(1);
+    expect(page.match(/one of yours may be missing/g)).toHaveLength(1);
+  });
+
+  it('keeps one caveat when the device is not recognised and collection is failing or unfinished', async () => {
+    const cases = [
+      [
+        'failed',
+        'Blocked sites could not be collected',
+        'Nyctr could not read what was blocked just now',
+      ],
+      [
+        'no',
+        'Blocked sites have not been collected yet',
+        'Nyctr has not finished reading what was blocked',
+      ],
+    ] as const;
+    const unknown = { device_id: null, name: null, simulated: false };
+    for (const [collected, title, unread] of cases) {
+      // Nothing listed: the reason stands instead of a clean result.
+      open({ 'GET /me/device': unknown, 'GET /blocks/coverage': { collected, unassigned: true } });
+      expect(await screen.findByText(title)).toBeDefined();
+      expect(
+        screen.getByText(
+          'Nyctr could not tell which of your devices this is, so it is showing all of them.',
+        ),
+      ).toBeDefined();
+      expect(document.body.textContent).not.toMatch(
+        /Nothing has been blocked|has not seen anything/,
+      );
+      cleanup();
+      // Something listed: one note under the list says both.
+      open({
+        'GET /me/device': unknown,
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /blocks/coverage': { collected, unassigned: true },
+      });
+      expect(await screen.findByText('photos.example')).toBeDefined();
+      expect(
+        screen.getByText(
+          `${unread}, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. Ask whoever runs Nyctr if a page will not load.`,
+        ),
+      ).toBeDefined();
+      expect(document.body.textContent!.match(/cannot be tied to a device/g)).toHaveLength(1);
+      expect(document.body.textContent!.match(/may be missing here/g)).toHaveLength(1);
+      cleanup();
+    }
+  });
+
   it('claims only what is known when some blocked sites are tied to no device', async () => {
     open({ 'GET /blocks/coverage': { collected: 'yes', unassigned: true } });
     expect(

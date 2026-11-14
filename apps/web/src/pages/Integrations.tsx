@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { api, label, post, put, relativeTime, useApi } from '../api';
 import { useAuth } from '../auth';
-import { someNames, useNow } from '../lib/format';
+import { mayChange, useNow } from '../lib/format';
 import { nextCollection, useSchedule } from '../lib/schedule';
 import type { Catalog, CatalogProvider, Integration, Rules } from '../types';
 import {
@@ -411,7 +411,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const catalog = fetched.data;
   const providers = catalog?.providers || [];
   const kind = (id: string) => providers.find((item) => item.id === id);
-  const allowed = sources.filter((item) => item.write_mode === 'enabled').map((item) => item.name);
+  const allowed = mayChange(sources);
   const connected = new Set((result.data || []).map((item) => item.provider));
   const { user } = useAuth();
   const [add, setAdd] = useState<string | null>(null);
@@ -522,8 +522,8 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
           <strong>
             {demo
               ? 'Demo: every change is simulated'
-              : allowed.length
-                ? `Nyctr may change ${someNames(allowed)}`
+              : allowed
+                ? `Nyctr may change ${allowed}`
                 : 'Read-only for every source'}
           </strong>
           <p>
@@ -556,7 +556,8 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
         <div className="integration-grid">
           {result.data.map((integration) => {
             const item = kind(integration.provider);
-            const mode = sources.find((source) => source.id === integration.id)?.write_mode;
+            const rule = sources.find((source) => source.id === integration.id);
+            const mode = rule?.write_mode;
             return (
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">
@@ -644,7 +645,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                       : demo
                         ? 'Changes simulated'
                         : mode === 'enabled'
-                          ? 'Nyctr may change it'
+                          ? rule?.collected === false
+                            ? 'Nyctr may change it once it is collected'
+                            : 'Nyctr may change it'
                           : 'Read only'}
                   </span>
                 </div>

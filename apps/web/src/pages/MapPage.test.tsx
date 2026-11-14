@@ -240,6 +240,26 @@ describe('what a full square on the Map could not draw', () => {
     expect(text('.node .name')).toContain('Example ac…s point 1');
   });
 
+  it('keeps the part of a long source name that differs on a column with no VLAN number', async () => {
+    const site: Graph = {
+      nodes: ['south', 'north'].map((source) => ({
+        ...thing(`lan-${source}`, 'network', 'Office LAN'),
+        integration_id: source,
+      })),
+      edges: [],
+    };
+    mockApi({ 'GET /graph': site, 'GET /findings': [] });
+    const sources = [
+      { id: 'south', name: 'South office gateway' },
+      { id: 'north', name: 'North office gateway' },
+    ] as Rules['sources'];
+    render(<MapPage params={new URLSearchParams()} sources={sources} />);
+    await screen.findByRole('group', { name: 'Network map' });
+    const lines = [...document.querySelectorAll('.lane-sub')].map((item) => item.textContent);
+    expect(lines).toContain('No VLAN number · South…teway');
+    expect(lines).toContain('No VLAN number · North…teway');
+  });
+
   it('draws a card again when its source is named after the Map was drawn', async () => {
     const site: Graph = { nodes: [thing('late', 'client', 'Late', 'arrives_later')], edges: [] };
     mockApi({ 'GET /graph': site, 'GET /findings': [] });

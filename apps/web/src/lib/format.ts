@@ -87,6 +87,17 @@ export function someNames(names: string[], max = 3) {
   return shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}` : shown[0] || '';
 }
 
+/**
+ * What Nyctr may change, as the words after "may change": '' when it is read-only for every source.
+ * Only sources Nyctr has read are named: one never collected has nothing of Nyctr's to change.
+ */
+export function mayChange(sources: { name: string; write_mode: string; collected?: boolean }[]) {
+  const allowed = sources.filter((source) => source.write_mode === 'enabled');
+  const read = allowed.filter((source) => source.collected !== false).map((source) => source.name);
+  if (!allowed.length) return '';
+  return read.length ? someNames(read) : 'sources once they are collected';
+}
+
 /** Says how Nyctr may act on a source. */
 export function writeText(mode: WriteMode) {
   return {
