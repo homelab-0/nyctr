@@ -488,6 +488,11 @@ textarea.gql-editor:focus {
 .map .node.more.sel .box {
   fill: var(--accent-bg);
 }
+/* Having no outline must not cost the box its keyboard focus mark: same as a card's. */
+.map .node.more:focus-visible .box {
+  stroke: var(--focus);
+  stroke-width: 2;
+}
 /* What a full square could not draw, listed beside the map. Comes after the map in the
    page so it follows the box that opens it, and is shown on its left. */
 .map-list {
