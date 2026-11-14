@@ -28,6 +28,7 @@ import {
   X,
 } from 'lucide-react';
 import { label } from '../api';
+import { number } from '../lib/counts';
 
 export type IconComponent = ComponentType<
   SVGProps<SVGSVGElement> & { size?: number; strokeWidth?: number }
@@ -267,10 +268,13 @@ export function SearchInput({
   value,
   onChange,
   placeholder = 'Search…',
+  maxLength,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  /** The longest text the server reading this search accepts, when it has a limit. */
+  maxLength?: number;
 }) {
   return (
     <label className="search-field">
@@ -281,6 +285,7 @@ export function SearchInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        maxLength={maxLength}
       />
     </label>
   );
@@ -411,7 +416,7 @@ export function Seg<T extends string>({
           onClick={() => onChange(option.id)}
         >
           {option.name}
-          {option.count !== undefined && <span className="n">{option.count}</span>}
+          {option.count !== undefined && <span className="n">{number(option.count)}</span>}
         </button>
       ))}
     </div>

@@ -356,5 +356,5 @@ def test_device_links_apply_only_to_later_lookups(client, app, admin_headers):
         after = db.get(Observation, "demo-nextdns:block:after")
         assert after.device_id == "laptop-jamie" and after.attribution == "assigned"
     signin(client, member=True)
-    visible = {x["id"] for x in client.get("/api/blocks").json()}
+    visible = {x["id"] for x in client.get("/api/blocks").json()["rows"]}
     assert "demo-nextdns:block:after" in visible and "demo-nextdns:block:before" not in visible

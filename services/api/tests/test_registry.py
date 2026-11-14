@@ -234,7 +234,7 @@ def test_the_demo_shows_two_dns_sources_behaving_differently(client):
     """
     member = client.post("/api/auth/login", json={"email": "jamie@nyctr.demo", "password": "nyctr-demo"}).json()
     headers = {"X-CSRF-Token": member["csrf_token"]}
-    blocks = {b["id"]: b for b in client.get("/api/blocks").json()}
+    blocks = {b["id"]: b for b in client.get("/api/blocks").json()["rows"]}
     assert blocks["block-print"]["risk_score"] is None and blocks["block-fonts"]["risk_score"] == 16
     assert "does not say" in blocks["block-print"]["risk_factors"][0]["label"]
     opened = client.post("/api/requests", headers=headers, json={

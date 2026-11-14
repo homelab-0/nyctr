@@ -10,7 +10,7 @@ import {
   ShieldAlert,
   X,
 } from 'lucide-react';
-import { post, useApi } from '../../api';
+import { api, ApiError, post, useApi } from '../../api';
 import { everyText, useScheduleSummary } from '../../lib/schedule';
 import { useAuth } from '../../auth';
 import {
@@ -24,8 +24,17 @@ import {
   Score,
   Seg,
 } from '../../components/ui';
+import { counted } from '../../lib/counts';
 import { ago, detectOs, left, span, useNow, type DeviceOs } from '../../lib/format';
-import type { AccessRequest, Block, BlockCoverage, Lease, Resource, ThisDevice } from '../../types';
+import type {
+  AccessRequest,
+  Block,
+  BlockCoverage,
+  BlockList,
+  Lease,
+  Resource,
+  ThisDevice,
+} from '../../types';
 
 /** Steps to make a device forget that an address was blocked. Wording is deliberately non-technical. */
 const RECONNECT: Record<DeviceOs, { name: string; steps: string[] }> = {
@@ -80,7 +89,13 @@ const STATUS: Record<string, { text: string; tone: string }> = {
 };
 
 function useMemberData() {
-  const blocks = useApi<Block[]>('/blocks');
+  // One page: the latest lookups this person may see. `beyond` is how many older ones are not on it.
+  const list = useApi<BlockList>('/blocks');
+  const blocks = {
+    ...list,
+    data: list.data ? list.data.rows : null,
+    beyond: list.data ? list.data.total - list.data.rows.length : 0,
+  };
   const requests = useApi<AccessRequest[]>('/requests');
   const leases = useApi<Lease[]>('/leases');
   const device = useApi<ThisDevice>('/me/device');
@@ -306,6 +321,13 @@ function Home({ data }: { data: Data }) {
         </section>
       )}
       {blocks.length > 0 && missing && <p className="aside">{missing}</p>}
+      {data.blocks.beyond > 0 && (
+        <p className="aside">
+          These are the latest blocks on your devices. {counted(data.blocks.beyond, 'older one')}{' '}
+          {data.blocks.beyond === 1 ? 'is' : 'are'} not listed here: to find one, type its address
+          above.
+        </p>
+      )}
       {blocks.length === 0 && found === null && !noDevices && (
         <Empty
           title={
@@ -330,14 +352,41 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
-  if (data.blocks.loading) return <Loading />;
-  const block = (data.blocks.data || []).find((item) => item.id === id);
+  const listed = (data.blocks.data || []).find((item) => item.id === id);
+  // The list is only the latest page. One found by its address may be older than that, so a
+  // block that is not on the page is asked for by itself; the server applies the same rights.
+  const [older, setOlder] = useState<Block | 'gone' | 'failed' | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const waiting = data.blocks.loading;
+  useEffect(() => {
+    if (listed || waiting) return;
+    const controller = new AbortController();
+    setOlder(null);
+    api<Block>(`/blocks/one?id=${encodeURIComponent(id)}`, { signal: controller.signal })
+      .then((found) => setOlder(found))
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setOlder(err instanceof ApiError && err.status === 404 ? 'gone' : 'failed');
+      });
+    return () => controller.abort();
+  }, [id, listed, waiting, attempt]);
+  if (waiting || (!listed && older === null)) return <Loading />;
+  if (!listed && older === 'failed')
+    return (
+      <div className="m-col">
+        <ErrorState
+          message="This block could not be read just now."
+          retry={() => setAttempt((value) => value + 1)}
+        />
+      </div>
+    );
+  const block = listed || (typeof older === 'object' ? older : null);
   if (!block)
     return (
       <div className="m-col">
         <Empty
           title="That block is no longer listed"
-          text="Blocks stay for a day. Open the page again and it will reappear."
+          text="Blocks stay for a day. Open the page again on your device and it will reappear."
           action={
             <a className="button primary" href="#/portal">
               Back to blocked sites
@@ -740,7 +789,8 @@ export default function Portal({ page, params }: { page: string; params: URLSear
         ) : request ? (
           <Result data={data} id={request} />
         ) : block ? (
-          <BlockDetail data={data} id={block} />
+          // Keyed by the block: what was read or typed for one never stands under another.
+          <BlockDetail key={block} data={data} id={block} />
         ) : (
           <Home data={data} />
         )}

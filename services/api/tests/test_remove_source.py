@@ -126,7 +126,7 @@ def test_removal_takes_only_this_sources_data_and_keeps_history(world):
     member = TestClient(app)
     live_signin(member, LIVE_MEMBER)
     assert [d["id"] for d in member.get("/api/devices").json()] == ["unifi:client:laptop"]
-    assert [b["id"] for b in member.get("/api/blocks").json()] == ["dns:block:one"]
+    assert [b["id"] for b in member.get("/api/blocks").json()["rows"]] == ["dns:block:one"]
     response = remove(client, headers)
     assert response.status_code == 200, response.text
     with app.state.session_factory() as db:
@@ -147,7 +147,7 @@ def test_removal_takes_only_this_sources_data_and_keeps_history(world):
             "devices": 1, "networks": 1, "rules": 1, "other_items": 0, "lookups": 0, "assignments": 1, "links": 1}}
     # A member who had the laptop sees it gone, with no error.
     assert member.get("/api/devices").status_code == 200 and member.get("/api/devices").json() == []
-    assert member.get("/api/blocks").json() == []
+    assert member.get("/api/blocks").json()["rows"] == []
     assert [r["id"] for r in member.get("/api/requests").json()] == ["request"]
     assert [i["id"] for i in client.get("/api/integrations").json()] == ["dns"]
     # Removing the DNS source too keeps the request, still naming the source as it was.
@@ -274,7 +274,7 @@ def test_a_new_source_for_the_same_place_starts_from_nothing(world):
         assert db.get(Observation, "dns:block:later").device_id is None
     member = TestClient(app)
     live_signin(member, LIVE_MEMBER)
-    assert member.get("/api/devices").json() == [] and member.get("/api/blocks").json() == []
+    assert member.get("/api/devices").json() == [] and member.get("/api/blocks").json()["rows"] == []
 
 
 def test_a_link_to_a_device_removed_before_it_is_stored_is_refused_in_plain_words(world, monkeypatch):

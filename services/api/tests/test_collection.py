@@ -47,9 +47,9 @@ def test_collection_persists_namespaced_evidence_without_claiming_user_attributi
         response = client.post(f"/api/integrations/{id_}/sync", headers=headers)
         assert response.status_code == 200, response.text
         assert client.get("/api/resources").json()[0]["owner_id"] is None
-        assert client.get("/api/blocks").json()[0]["attribution"] == "unattributed"
+        assert client.get("/api/blocks").json()["rows"][0]["attribution"] == "unattributed"
         # The score is rule-based on the stored reason; it never changes who may see the event.
-        assert client.get("/api/blocks").json()[0]["risk_category"] == "privacy_list"
+        assert client.get("/api/blocks").json()["rows"][0]["risk_category"] == "privacy_list"
         assert "test-api-key" not in client.get("/api/audit").text
 
 
@@ -73,7 +73,7 @@ def test_replayed_observation_does_not_extend_expiry(tmp_path, monkeypatch):
             event.expires_at = now + timedelta(minutes=10)
             db.commit()
         client.post(f"/api/integrations/{id_}/sync", headers=headers)
-        assert client.get("/api/blocks").json()[0]["expires_at"].startswith((now + timedelta(minutes=10)).isoformat()[:19])
+        assert client.get("/api/blocks").json()["rows"][0]["expires_at"].startswith((now + timedelta(minutes=10)).isoformat()[:19])
 
 
 def test_failed_collection_does_not_destroy_previous_snapshot_or_leak_secret(tmp_path, monkeypatch):
@@ -144,7 +144,7 @@ def test_busy_source_is_stored_and_audited_as_partial_not_as_an_error(tmp_path, 
         source = client.get("/api/integrations").json()[0]
         assert source["status"] == "partial"
         assert source["last_error"] is None and source["last_sync"]
-        assert {block["domain"] for block in client.get("/api/blocks").json()} == {
+        assert {block["domain"] for block in client.get("/api/blocks").json()["rows"]} == {
             f"p{page}r{k}.example" for page in (1, 2, 3) for k in range(10)}
         action, details = collection_audits(client, id_)[-1]
         assert action == "integration.collected"
@@ -180,7 +180,7 @@ def test_refused_credential_after_rows_were_read_fails_and_stores_none_of_them(t
         source = client.get("/api/integrations").json()[0]
         assert source["status"] == "error" and "denied access" in source["last_error"]
         assert source["last_sync"] is None
-        assert client.get("/api/blocks").json() == []
+        assert client.get("/api/blocks").json()["rows"] == []
         assert client.get("/api/resources").json() == []
         assert collection_audits(client, id_) == [("integration.collection_failed", {"name": "DNS"})]
         with client.app.state.session_factory() as db:

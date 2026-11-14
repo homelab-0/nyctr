@@ -364,9 +364,15 @@ class CheckerGuardCase(unittest.TestCase):
         client = StandIn({**self.START, ("GET", "/api/integrations"): [{"name": "Scenario - site at real size"}]})
         code, printed = self.run_checker(acceptance_check.main, client=client, argv=["--verify-persistence"])
         self.assertEqual((code, "Scenario sources are saved" in printed), (1, True))
-        client = StandIn({("GET", "/api/blocks"): [{"id": "b", "domain": "lookup-00.example.test"}],
+        asked = ("GET", "/api/blocks?q=lookup-00.example.test")
+        client = StandIn({asked: {"rows": [{"id": "b", "domain": "lookup-00.example.test"}]},
                           ("POST", "/api/requests"): {"status": "approved"}})
         self.assertIn("already decided (approved)", self.run_checker(acceptance_check.request_exception, client)[1])
+        # The lookup is asked for by name, so it is found though Blocks answers one page of several hundred.
+        self.assertEqual(client.calls[0], asked)
+        client = StandIn({asked: {"rows": [{"id": "c", "domain": "other.lookup-00.example.test"}]}})
+        with self.assertRaisesRegex(acceptance_check.AcceptanceFailure, "is not in Blocks"):
+            acceptance_check.request_exception(client)
 
 
 class AcceptanceURLCase(unittest.TestCase):

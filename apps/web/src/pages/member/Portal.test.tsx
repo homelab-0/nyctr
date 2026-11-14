@@ -1,10 +1,10 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App';
 import { setCsrfToken } from '../../api';
 import { AuthProvider } from '../../auth';
-import { mockApi } from '../../test/mock-api';
+import { blockList, mockApi } from '../../test/mock-api';
 import { memberSchedule } from '../../test/schedule';
 import type { AccessRequest, Block, Lease, User } from '../../types';
 
@@ -81,15 +81,17 @@ const lease = (extra: Partial<Lease> = {}): Lease => ({
 
 function open(routes: Record<string, unknown>, hash = '/portal') {
   window.location.hash = hash;
+  const given = routes['GET /blocks'];
   const calls = mockApi({
     'GET /auth/me': member,
     'GET /me/device': { device_id: 'laptop', name: "Sam's laptop", simulated: false },
-    'GET /blocks': [],
     'GET /requests': [],
     'GET /leases': [],
     'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
     'GET /blocks/coverage': { collected: 'yes', unassigned: false },
     ...routes,
+    // Tests give the lookups; the route answers with them as its one page.
+    'GET /blocks': Array.isArray(given) ? blockList(given as Block[]) : (given ?? blockList([])),
   });
   render(
     <AuthProvider>
@@ -315,6 +317,77 @@ describe('member portal', () => {
     await user.click(ask);
     const sent = calls.find((call) => call.method === 'POST' && call.path === '/requests');
     expect(sent?.body).toEqual({ block_id: 'b1', reason: 'Wedding photos', duration_minutes: 60 });
+  });
+
+  it('opens a block found by its address that is older than the page it holds', async () => {
+    const latest = block('b1', 'photos.example', 'laptop');
+    const old = { ...block('b9', 'older.example', 'laptop'), risk_explanation: 'A privacy list.' };
+    const { user, calls } = open(
+      {
+        'GET /blocks': blockList([latest], { total: 250 }),
+        'GET /blocks/one?id=b9': old,
+        'POST /requests': request({}),
+      },
+      '/portal?block=b9',
+    );
+    expect(await screen.findByText('older.example')).toBeDefined();
+    expect(screen.queryByText('That block is no longer listed')).toBeNull();
+    await user.type(screen.getByLabelText('What do you need it for?'), 'Needed for work');
+    await user.click(screen.getByRole('button', { name: 'Ask to open it' }));
+    const sent = calls.find((call) => call.method === 'POST' && call.path === '/requests');
+    expect(sent?.body).toEqual({ block_id: 'b9', reason: 'Needed for work', duration_minutes: 60 });
+  });
+
+  it('shows nothing of one older block while the next one opened is still loading', async () => {
+    const first = block('b9', 'first-older.example', 'laptop');
+    const second = block('b8', 'second-older.example', 'laptop');
+    let answerSecond = (_: unknown) => {};
+    const { user } = open(
+      {
+        'GET /blocks/one?id=b9': first,
+        'GET /blocks/one?id=b8': () => new Promise((resolve) => (answerSecond = resolve)),
+      },
+      '/portal?block=b9',
+    );
+    expect(await screen.findByText('first-older.example')).toBeDefined();
+    await user.type(screen.getByLabelText('What do you need it for?'), 'For the first one');
+    // Straight to another older block, without leaving the portal. Every render is looked at,
+    // the first one included: the first block must never stand under the second's address.
+    const shown: string[] = [];
+    const watch = new MutationObserver(() => shown.push(document.body.textContent || ''));
+    watch.observe(document.body, { childList: true, subtree: true, characterData: true });
+    await act(async () => {
+      window.location.hash = '/portal?block=b8';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(screen.queryByText('first-older.example')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Ask to open it' })).toBeNull();
+    await act(async () => answerSecond(second));
+    expect(await screen.findByText('second-older.example')).toBeDefined();
+    watch.disconnect();
+    // What was typed for the first block is not carried into a request for the second.
+    const reason = screen.getByLabelText('What do you need it for?') as HTMLTextAreaElement;
+    expect(reason.value).toBe('');
+    expect(
+      (screen.getByRole('button', { name: 'Ask to open it' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(shown.some((text) => text.includes('first-older.example'))).toBe(false);
+  });
+
+  it('says the same of a block the member may not see as of one that does not exist', async () => {
+    const refused = { __status: 404, detail: 'Block event not found' };
+    const said = [];
+    for (const id of ['someone-elses', 'never-stored']) {
+      open({ [`GET /blocks/one?id=${id}`]: refused }, `/portal?block=${id}`);
+      expect(await screen.findByText('That block is no longer listed')).toBeDefined();
+      said.push(document.body.textContent);
+      cleanup();
+    }
+    expect(said[0]).toBe(said[1]);
+    // A read that failed for another reason is not called a block that has gone.
+    open({ 'GET /blocks/one?id=b9': { __status: 500, detail: 'Unavailable' } }, '/portal?block=b9');
+    expect(await screen.findByText('This block could not be read just now.')).toBeDefined();
+    expect(screen.queryByText('That block is no longer listed')).toBeNull();
   });
 
   it('says a block with no score is unknown, not safe', async () => {
