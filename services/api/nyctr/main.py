@@ -310,6 +310,12 @@ def create_app(settings: Settings | None = None):
         """List evidence-backed findings for an administrator without running new analysis."""
         return [finding_json(f) for f in db.scalars(select(Finding).order_by(Finding.title))]
 
+    @app.get("/api/findings/checks")
+    def finding_checks(_user=Depends(admin), db: Session = Depends(get_db)):
+        """Say what the finding rules check with the sources connected and what they never look at."""
+        from .analysis import coverage
+        return coverage(db)
+
     @app.get("/api/integrations")
     def integrations(_user=Depends(admin), db: Session = Depends(get_db)):
         """List administrator connector metadata while excluding resolved secrets.

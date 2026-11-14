@@ -26,7 +26,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `reads` | What collection reads, as `(id, label)`. Diagnostics report each one as verified, unavailable or unknown |
 | `provides` | The capabilities below |
 | `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell |
-| `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gap_notes` are also shown on the source's card after a collection that recorded their code |
+| `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gaps` also travel in the catalog as `limits`, and the Briefing lists them under "Not collected" for each connected source. `gap_notes` are also shown on the source's card after a collection that recorded their code |
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
 | `allow_domain`, `disallow_domain`, `issue_pass`, `end_pass`, `guest_access` | Actions, present exactly for the write capabilities declared |
 

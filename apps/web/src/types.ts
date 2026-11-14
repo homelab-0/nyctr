@@ -105,6 +105,13 @@ export interface CatalogProvider {
   reads: { id: string; label: string }[];
   changes: string[];
   write_mode: WriteMode | 'none';
+  /** What a source of this kind never gives Nyctr, in the integration's own words. */
+  limits?: { id: string; title: string; summary: string }[];
+}
+/** What the finding rules check with the sources connected, and what is collected but never checked. */
+export interface FindingChecks {
+  checks: { text: string; active: boolean }[];
+  not_checked: string[];
 }
 export interface Catalog {
   capabilities: Capability[];

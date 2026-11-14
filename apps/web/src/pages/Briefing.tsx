@@ -3,10 +3,11 @@ import { ArrowRight, Sparkles } from 'lucide-react';
 import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { counted, lookupSpan, namedCounts } from '../lib/counts';
+import { uncollected, whyEmpty } from '../lib/coverage';
 import { ago, left, useNow, word } from '../lib/format';
 import { askNyctr, hrefFor } from '../lib/links';
 import { nextCollection, useSchedule } from '../lib/schedule';
-import type { AttentionItem, Integration, Lease, Overview } from '../types';
+import type { AttentionItem, Catalog, FindingChecks, Integration, Lease, Overview } from '../types';
 
 const KIND: Record<AttentionItem['kind'], string> = {
   guest: 'Guest Wi-Fi',
@@ -17,13 +18,23 @@ const KIND: Record<AttentionItem['kind'], string> = {
   suggestion: 'Suggestion',
 };
 
-/** What Nyctr cannot see today. Shown hatched so a quiet list is never read as "all clear". */
-const NOT_COLLECTED = [
-  'Firewall connection logs and port scans',
-  'DNS lookups that were allowed',
-  'Devices that have left the network',
-  'Workload firewall rules (only the on/off switches are read)',
-];
+/**
+ * What Nyctr cannot see here, built from the sources connected: one still to collect, what the last
+ * collection could not read, and what each kind of source declares it never gives. Shown hatched so
+ * a quiet list is never read as "all clear".
+ */
+function notCollected(sources: Integration[], catalog: Catalog | null) {
+  return sources.flatMap((source) => {
+    const declared = catalog?.providers.find((item) => item.id === source.provider)?.limits || [];
+    return [
+      ...(source.last_sync ? [] : [{ id: 'never', title: whyEmpty(source), summary: '' }]),
+      ...[...(source.gaps || []), ...declared].map((gap) => ({
+        ...gap,
+        title: `${source.name}: ${gap.title}`,
+      })),
+    ].map((line) => ({ ...line, id: `${source.id}:${line.id}` }));
+  });
+}
 
 /** Where a "Needs you" row leads. A source that stored only part names its Edit form or its card. */
 function needHref(item: AttentionItem) {
@@ -34,16 +45,22 @@ function needHref(item: AttentionItem) {
 }
 
 /** What the sources reported, each kind named with its own count, then the span of stored lookups. */
-function briefingCounts(overview: Overview, now: number) {
+function briefingCounts(overview: Overview, now: number, connected: Integration[] | null) {
   const named = namedCounts(overview.kind_counts || {});
   const sources = counted(overview.integration_count, 'source');
-  const span = lookupSpan(
-    overview.recent_block_count,
-    overview.oldest_block_at,
-    overview.newest_block_at,
-    now,
-  );
-  return `${named ? `${named} from ${sources}.` : `Nothing inventoried yet from ${sources}.`} ${span}`;
+  // A count with no stored collection behind it is not a zero: it has not been collected.
+  const waiting = uncollected(connected).length;
+  const span =
+    !overview.recent_block_count && uncollected(connected, 'dns.blocks').length
+      ? 'Blocked lookups have not been collected yet.'
+      : lookupSpan(
+          overview.recent_block_count,
+          overview.oldest_block_at,
+          overview.newest_block_at,
+          now,
+        );
+  const pending = waiting ? ` ${counted(waiting, 'source')} not collected yet.` : '';
+  return `${named ? `${named} from ${sources}.` : waiting ? `Not collected yet from ${sources}.` : `Nothing inventoried yet from ${sources}.`}${named ? pending : ''} ${span}`;
 }
 
 /**
@@ -61,6 +78,10 @@ export default function Briefing({
   const leases = useApi<Lease[]>('/leases');
   const sources = useApi<Integration[]>('/integrations');
   const schedule = useSchedule();
+  const catalog = useApi<Catalog>('/integrations/catalog');
+  const cover = useApi<FindingChecks>('/findings/checks').data;
+  const idle = cover?.checks.filter((check) => !check.active).length || 0;
+  const missing = notCollected(sources.data || [], catalog.data);
   const [question, setQuestion] = useState('');
   const now = useNow();
   // A schedule read again means a collection was due, so "Collected ... ago" is read again too.
@@ -88,7 +109,7 @@ export default function Briefing({
           <h1 className="display d1">{headline}</h1>
           <p className="lede">
             {overview.data
-              ? briefingCounts(overview.data, now)
+              ? briefingCounts(overview.data, now, sources.data)
               : 'Ranked by fixed rules from what your sources reported.'}
           </p>
         </div>
@@ -183,11 +204,13 @@ export default function Briefing({
                     <span className="d">
                       {source.status === 'error'
                         ? source.last_error || 'Last collection failed'
-                        : source.status === 'partial'
-                          ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
-                          : source.gaps?.length
-                            ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
-                            : `Collected ${ago(source.last_sync, now)}`}
+                        : !source.last_sync
+                          ? 'Not collected yet'
+                          : source.status === 'partial'
+                            ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
+                            : source.gaps?.length
+                              ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
+                              : `Collected ${ago(source.last_sync, now)}`}
                     </span>
                     {schedule.data && (
                       <span className="d">
@@ -213,11 +236,26 @@ export default function Briefing({
           <div className="note hatch">
             <div>
               <b>Not collected</b>
-              <ul className="plain">
-                {NOT_COLLECTED.map((line) => (
-                  <li key={line}>{line}</li>
-                ))}
-              </ul>
+              {sources.data?.length === 0 ? (
+                <p>No sources are connected, so nothing is collected yet.</p>
+              ) : (
+                <ul className="plain">
+                  {missing.map((line) => (
+                    <li key={line.id} title={line.summary}>
+                      {line.title}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {cover && (
+                <p>
+                  Findings come from {cover.checks.length} checks
+                  {idle ? `, ${idle} with nothing to look at here` : ''}.
+                  {cover.not_checked.length > 0 &&
+                    ` Collected but not checked: ${cover.not_checked.join(', ')}.`}{' '}
+                  <a href="#/findings">What is checked</a>
+                </p>
+              )}
             </div>
           </div>
         </div>

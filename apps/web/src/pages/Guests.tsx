@@ -214,6 +214,24 @@ export default function Guests({
     );
   const live = data.passes.filter((pass) => pass.state !== 'ended');
   const source = data.sources.map((item) => item.name).join(' and ') || 'your network source';
+  // Why Nyctr cannot tell who is a guest here, when it cannot. Said first, before passes or cut-offs.
+  const wifi = data.portal.wifi;
+  const blind = !data.sources.length
+    ? {
+        title: 'No connected source can tell guests from other devices.',
+        text: 'Nyctr does not know who is a guest here. Connect a network source that reports guest Wi-Fi to see them.',
+      }
+    : !wifi.length
+      ? {
+          title: `Wi-Fi names have not been collected from ${source} yet.`,
+          text: 'Until they are, Nyctr does not know whether anyone is on the guest Wi-Fi.',
+        }
+      : !wifi.some((item) => item.captive_portal)
+        ? {
+            title: `${source} reports that no Wi-Fi name uses a sign-in page.`,
+            text: `Nyctr tells guests apart by that page, so it cannot say who is a guest: it has nothing to count, and passes and the cut-off have nothing to act on. Turn on the guest sign-in page with passes at ${source} to change that.`,
+          }
+        : null;
   return (
     <div className="page">
       <header className="page-head">
@@ -222,13 +240,23 @@ export default function Guests({
           <p className="lede">
             {data.devices.length
               ? `${plural(data.devices.length, 'guest device')} seen, ${plural(live.length, 'pass', 'passes')} live.`
-              : 'No guest devices are connected.'}{' '}
+              : blind
+                ? 'Nyctr cannot tell who is a guest here.'
+                : 'No guest devices are connected.'}{' '}
             Guests sign in on the page your network shows. Nyctr stays out of their path and reads
             who is on from {source}.
           </p>
         </div>
       </header>
-      {readOnly && (
+      {blind && (
+        <div className="note yellow" role="status">
+          <div>
+            <b>{blind.title}</b>
+            <p>{blind.text}</p>
+          </div>
+        </div>
+      )}
+      {readOnly && !!data.sources.length && (
         <div className="note yellow">
           <div>
             <b>Nyctr is read-only for {source}.</b>
@@ -244,7 +272,11 @@ export default function Guests({
         <div className="stack">
           <Panel title="Who is on" flush>
             {data.devices.length === 0 ? (
-              <p className="pad muted">Nobody is on the guest Wi-Fi.</p>
+              <p className="pad muted">
+                {blind
+                  ? 'Not known. Nyctr cannot tell who is a guest here.'
+                  : 'Nobody is on the guest Wi-Fi.'}
+              </p>
             ) : (
               <div className="tblwrap">
                 <table className="tbl">

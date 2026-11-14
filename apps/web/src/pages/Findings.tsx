@@ -4,7 +4,7 @@ import { post, useApi } from '../api';
 import { everyText, useSchedule } from '../lib/schedule';
 import { Empty, ErrorState, InlineError, Loading, Panel, Seg, kindIcon } from '../components/ui';
 import { askNyctr } from '../lib/links';
-import type { Finding, Insight, Resource } from '../types';
+import type { Finding, FindingChecks, Insight, Resource } from '../types';
 
 const ORDER = ['high', 'medium', 'low', 'informational'];
 const TONE: Record<string, string> = { high: 'red', medium: 'yellow', low: '', informational: '' };
@@ -93,10 +93,45 @@ function Read({ finding }: { finding: Finding }) {
   );
 }
 
+/** What the rules look at and what they never do, so an empty list is not read as "all checked". */
+function Checked({ cover }: { cover: FindingChecks }) {
+  return (
+    <Panel title="What Nyctr checks" hint="Only these. Nothing else can produce a finding.">
+      <div className="stack">
+        <ul className="bullets">
+          {cover.checks.map((check) => (
+            <li key={check.text}>
+              {check.text}
+              {!check.active && (
+                <span className="muted">
+                  {' '}
+                  (no collected source reports this, so there is nothing to check)
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {cover.not_checked.length > 0 && (
+          <div className="note hatch">
+            <div>
+              <b>Collected but not checked</b>
+              <p>
+                {cover.not_checked.join(', ')}. You can see these on the Map and in Inventory, but
+                no check reads them, so nothing wrong with them would show up here.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 /** Findings from fixed rules over stored evidence, each with the evidence and what it does not prove. */
 export default function Findings({ params }: { params: URLSearchParams }) {
   const findings = useApi<Finding[]>('/findings');
   const resources = useApi<Resource[]>('/resources');
+  const cover = useApi<FindingChecks>('/findings/checks').data;
   const every = everyText(useSchedule().data);
   const [show, setShow] = useState<'open' | 'resolved'>('open');
   const [selected, setSelected] = useState<string | null>(params.get('id'));
@@ -147,7 +182,13 @@ export default function Findings({ params }: { params: URLSearchParams }) {
       </header>
       {!finding ? (
         <Empty
-          title={show === 'open' ? 'No open findings' : 'Nothing resolved yet'}
+          title={
+            show !== 'open'
+              ? 'Nothing resolved yet'
+              : cover
+                ? `No open findings from the ${cover.checks.length} checks listed below`
+                : 'No open findings'
+          }
           text={
             every
               ? `Findings are re-checked after every collection, ${every}.`
@@ -218,6 +259,7 @@ export default function Findings({ params }: { params: URLSearchParams }) {
           </div>
         </div>
       )}
+      {cover && <Checked cover={cover} />}
     </div>
   );
 }

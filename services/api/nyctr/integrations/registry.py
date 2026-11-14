@@ -147,6 +147,8 @@ class Provider:
                          for c in CAPABILITIES if c in self.provides],
             "reads": [{"id": read, "label": label} for read, label in self.reads],
             "changes": self.changes, "write_mode": write_mode if self.changes else "none",
+            # What a source of this kind never gives Nyctr, however well a collection goes.
+            "limits": [{"id": id_, "title": title, "summary": text} for id_, title, text in self.gaps],
         }
 
 

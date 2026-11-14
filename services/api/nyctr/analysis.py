@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from .integrations import registry
-from .models import Finding, GuestAction, Lease, Resource, utc
+from .models import Finding, GuestAction, Integration, Lease, Resource, utc
 
 
 def _workload_firewall(resources: list[Resource]) -> list[dict]:
@@ -94,6 +94,34 @@ def _stuck_leases(db) -> list[dict]:
                    "Remove it by hand if this persists.",
         "resource_ids": [], "evidence": [f"Provider error: {lease.last_error}"],
     } for lease in db.scalars(select(Lease).where(Lease.status == "active", Lease.last_error.is_not(None)))]
+
+
+# Every rule above in plain words, with the capability a collected source must offer for it to have
+# anything to look at. The Findings page lists these so an empty list is not read as "all checked".
+CHECKS = (
+    ("compute", "A hosted workload whose firewall is switched off"),
+    ("dns.blocks", "A DNS profile with logging switched off"),
+    ("guest.devices", "A guest device that was cut off, or that matched the cut-off rule and is still online"),
+    ("dns.exceptions", "A temporary exception that could not be closed when its time ran out"),
+)
+# Kinds of thing sources report that no rule reads, in the words shown to people.
+UNCHECKED = {"policy": "Firewall rules", "network": "Networks and VLANs", "client": "Devices that are not guests",
+             "gateway": "Network equipment", "switch": "Network equipment", "access_point": "Network equipment",
+             "host": "Hosts and bridges", "bridge": "Hosts and bridges", "domain": "Blocked addresses"}
+
+
+def coverage(db) -> dict:
+    """Say what the rules check with the sources connected, and what is collected but never checked.
+
+    A check is active only when a source that has stored a collection offers what it reads.
+    """
+    collected = select(Integration.provider).where(Integration.last_sync.is_not(None)).distinct()
+    offered = {capability for provider in db.scalars(collected)
+               for capability in registry.CAPABILITIES if registry.provides(provider, capability)}
+    kinds = set(db.scalars(select(Resource.kind).distinct()))
+    unchecked = list(dict.fromkeys(text for kind, text in UNCHECKED.items() if kind in kinds))
+    return {"checks": [{"text": text, "active": needs in offered} for needs, text in CHECKS],
+            "not_checked": unchecked}
 
 
 def refresh_findings(db) -> None:

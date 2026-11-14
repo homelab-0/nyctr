@@ -89,6 +89,38 @@ afterEach(() => {
 });
 
 describe('guests', () => {
+  it('leads with why it cannot tell who is a guest, and does not say nobody is on', async () => {
+    const base = overview('enabled');
+    const ungated = {
+      ...base,
+      devices: [],
+      portal: { ...base.portal, wifi: [base.portal.wifi[0]] },
+    };
+    open('enabled', { 'GET /guests': ungated });
+    expect(
+      await screen.findByText('Office network reports that no Wi-Fi name uses a sign-in page.'),
+    ).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page.indexOf('no Wi-Fi name uses a sign-in page.')).toBeLessThan(
+      page.indexOf('Who is on'),
+    );
+    expect(page).toContain('Nyctr cannot tell who is a guest here.');
+    expect(page).not.toContain('Nobody is on the guest Wi-Fi');
+    expect(page).not.toContain('No guest devices are connected');
+    cleanup();
+    open('disabled', {
+      'GET /guests': {
+        ...ungated,
+        sources: [],
+        portal: { ...base.portal, served_by: [], wifi: [] },
+      },
+    });
+    expect(
+      await screen.findByText('No connected source can tell guests from other devices.'),
+    ).toBeDefined();
+    expect(screen.queryByText(/read-only/)).toBeNull();
+  });
+
   it('says how often the cut-off rule is applied, and promises nothing while the schedule is off', async () => {
     open('enabled', { 'GET /collection': scheduleFixture() });
     expect(

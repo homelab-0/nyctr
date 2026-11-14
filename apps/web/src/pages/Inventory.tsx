@@ -12,8 +12,9 @@ import {
   kindIcon,
 } from '../components/ui';
 import { GROUPS, UNLISTED, type Group } from '../lib/counts';
+import { uncollected, whyEmpty } from '../lib/coverage';
 import { ago, useNow } from '../lib/format';
-import type { Person, Resource } from '../types';
+import type { Integration, Person, Resource } from '../types';
 
 /** The kind as the table shows it. A kind Nyctr deduced says so, so it never reads as the source's word. */
 export function kindText(row: Resource) {
@@ -35,6 +36,9 @@ function detail(row: Resource) {
 export default function Inventory({ params }: { params: URLSearchParams }) {
   const resources = useApi<Resource[]>('/resources');
   const people = useApi<Person[]>('/users');
+  const sources = useApi<Integration[]>('/integrations');
+  // With a source still to collect, an empty kind is unknown, so it is shown without a zero.
+  const waiting = uncollected(sources.data);
   const [group, setGroup] = useState<Group>(
     (params.get('show') as Group) in GROUPS ? (params.get('show') as Group) : 'all',
   );
@@ -74,19 +78,36 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
           label="Kind"
           value={group}
           onChange={setGroup}
-          options={(Object.keys(GROUPS) as Group[]).map((id) => ({
-            id,
-            name: GROUPS[id].name,
-            count: all.filter(
+          options={(Object.keys(GROUPS) as Group[]).map((id) => {
+            const count = all.filter(
               (row) =>
                 !GROUPS[id].kinds || (GROUPS[id].kinds as readonly string[]).includes(row.kind),
-            ).length,
-          }))}
+            ).length;
+            return {
+              id,
+              name: GROUPS[id].name,
+              count: count || !waiting.length ? count : undefined,
+            };
+          })}
         />
         <SearchInput value={text} onChange={setText} placeholder="Find by name, address or model" />
       </div>
       {rows.length === 0 ? (
-        <Empty title="Nothing matches" text="Clear the search or pick another kind." />
+        text.trim() ? (
+          <Empty title="Nothing matches" text="Clear the search or pick another kind." />
+        ) : waiting.length ? (
+          <Empty
+            title="Not collected yet"
+            text={`${waiting.map(whyEmpty).join('. ')}. What it reports will be listed here after a collection that works.`}
+          />
+        ) : sources.data?.length === 0 ? (
+          <Empty title="No sources connected yet" text="Connect a source to see what it reports." />
+        ) : (
+          <Empty
+            title="No connected source reported any of these"
+            text="Pick another kind to see what was reported."
+          />
+        )
       ) : (
         <Panel flush>
           <div className="tblwrap">
