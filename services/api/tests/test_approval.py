@@ -695,3 +695,39 @@ def test_a_member_is_given_no_note_that_is_no_longer_true_and_none_written_for_a
                 assert by_hand in [row["last_error"] for row in all_of_them]
 
         asyncio.run(scenario())
+
+
+def test_a_store_that_fails_after_the_claim_was_taken_over_leaves_the_entry_to_a_person(tmp_path, monkeypatch):
+    """The source accepted the add, storing failed, and by then another attempt holds the claim: the same check
+    applies. The record says not known and Nyctr sends nothing more."""
+    with started(tmp_path) as (app, _client, member, admin):
+        source, real, now = Source(monkeypatch), access.release_entry, [utcnow()]
+
+        def broken(*_args, **_more):
+            raise RuntimeError("fabricated storage failure")
+
+        def taken_over_first(db, claim, unstored=False):
+            if not unstored:
+                return real(db, claim, unstored)
+            age(app, "ending:")
+            with app.state.session_factory() as other:
+                theirs = access._claim(other, str(claim))
+                assert theirs
+                real(db, claim, unstored)  # While the other attempt still holds it.
+                real(other, theirs)
+
+        async def scenario():
+            Sources(monkeypatch)
+            async with console(app, member) as sam, console(app, admin) as owner:
+                made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                monkeypatch.setattr("nyctr.main.audit", broken)
+                monkeypatch.setattr(access, "release_entry", taken_over_first)
+                with pytest.raises(RuntimeError):
+                    await review(owner, made)
+                up, now[0] = upkeep(app, now), utcnow() + access.ENDING_HOLD + timedelta(seconds=1)
+                up.tick()
+                await up.stop()
+
+        asyncio.run(scenario())
+        assert rows(app) == [("unconfirmed", None, False)] and source.calls == ["GET", "GET", "POST", "GET"]
+        assert source.listed == [DOMAIN] and claims(app) == [] and gates(app) == []
