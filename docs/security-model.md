@@ -132,9 +132,14 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   removal of one address cannot cross. Each change at a source ends within 60
   seconds, as failed if it has not finished. An opening that fails after its add
   may have been sent leaves a record, and Nyctr removes the entry itself. Known
-  limit: if a person adds the same address at the source in the second between
+  limits: if a person adds the same address at the source in the second between
   Nyctr asking whether it is there and Nyctr's own add, and that opening then
-  fails or is killed, Nyctr removes the entry as its own. The nudge and the
+  fails or is killed, Nyctr removes the entry as its own. If the address was
+  there when Nyctr asked, a person removes it in that second, Nyctr's add is
+  sent and that copy is killed before it records the add's answer, the entry
+  stays with nothing on record (a failure short of a kill is recorded and the
+  entry removed). After a copy is killed during an approval, that request can
+  be decided again only once its claim is five minutes old. The nudge and the
   assistant's limit are still per process.
 - Scheduled collection is on by default and only an administrator can change it
   (`PUT /api/collection`); every change is audited with the old and new
