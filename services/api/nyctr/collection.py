@@ -23,6 +23,7 @@ from .models import (
     utc,
     utcnow,
 )
+from .schedule import drop_retry
 from .security import audit
 
 SECRET_REF = re.compile(r"NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}")
@@ -277,6 +278,11 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 retry_at = hold(db, failure) if hold else None
             except Exception:  # noqa: BLE001 - e.g. a copy claimed the next run meanwhile; that run covers it
                 db.rollback()
+                if not _still_holds(db, integration_id, started):
+                    db.rollback()
+                    return None, "replaced"
+                # The failure is final, so the claimed retry that led here ends with it.
+                drop_retry(db, integration_id)
                 integration = db.get(Integration, integration_id)
                 integration.last_error, retry_at = failure.message, None
             integration.status = previous if retry_at and previous != "syncing" else "error"

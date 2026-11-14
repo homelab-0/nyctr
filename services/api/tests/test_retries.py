@@ -181,7 +181,7 @@ def test_a_retry_waits_while_the_source_is_being_collected_and_never_runs_in_dem
         db.add(Setting(key=schedule.RETRY_PREFIX + "demo", value={"integration_id": "dns", "attempt": 1},
                        updated_at=start))
         db.commit()
-        assert schedule.claim_retries(db, schedule.in_force(db, app.state.settings), start + timedelta(hours=1)) == []
+        assert schedule.due_retries(db, schedule.in_force(db, app.state.settings), start + timedelta(hours=1)) == []
         assert utc(db.get(Setting, schedule.RETRY_PREFIX + "demo").updated_at) == start
 
 
@@ -283,3 +283,95 @@ def test_a_scheduled_run_that_finds_the_secret_gone_ends_the_retries_it_replaced
         monkeypatch.delenv("NYCTR_CONNECTOR_SECRET_DNS")
         assert tick(app, start + timedelta(minutes=15)) is True
         assert dns(app)[:2] == ("error", "Collection timed out.") and stopped(app) == ["secret"]
+
+
+def test_a_retry_whose_staging_fails_ends_its_claimed_retry_with_the_failure(tmp_path, monkeypatch):
+    """The source is shown failed once; the claimed retry is not run again after its hold runs out."""
+    asked = fail_dns(monkeypatch, [PASSING["broken connection"]] * 3)
+    app, start = live_app(tmp_path), utcnow()
+    with TestClient(app):
+        seed_live_member(app)
+        tick(app, start)
+        monkeypatch.setattr(schedule, "plan_retry", lambda *args, **kwargs: 1 / 0)
+        tick(app, start + timedelta(minutes=1))
+        assert dns(app)[0] == "error" and pending(app) == []
+        tick(app, start + timedelta(minutes=7))
+        assert len(asked) == 2
+
+
+@pytest.mark.parametrize("then", ["succeeds", "fails"])
+def test_a_retry_whose_lease_was_replaced_ends_and_leaves_the_source_to_its_holder(tmp_path, monkeypatch, then):
+    """A replaced attempt stores nothing, stages nothing and ends the retries; the new holder is not disturbed."""
+    asked = fail_dns(monkeypatch, [PASSING["broken connection"]])
+    app, start = live_app(tmp_path), utcnow()
+    other = utcnow() + timedelta(seconds=1)
+
+    async def replaced(provider, integration_id, config, api_key):
+        if integration_id == "dns":
+            asked.append(integration_id)
+            with app.state.session_factory() as db:
+                db.get(Integration, "dns").sync_started_at = other  # Another collection took the lease.
+                db.commit()
+            if then == "fails":
+                raise PASSING["timeout"]()
+        return Snapshot()
+
+    with TestClient(app):
+        seed_live_member(app)
+        tick(app, start)
+        monkeypatch.setattr("nyctr.integrations.collect", replaced)
+        tick(app, start + timedelta(minutes=1))
+        status, error, audits = dns(app)
+        assert (status, error, audits) == ("syncing", "Could not connect.", [("collection_failed", 0)])
+        assert pending(app) == [] and stopped(app) == []
+        with app.state.session_factory() as db:
+            assert utc(db.get(Integration, "dns").sync_started_at) == other
+        tick(app, start + timedelta(minutes=7))
+        assert len(asked) == 2
+
+
+def test_a_copy_claims_each_retry_just_before_running_it(tmp_path, monkeypatch):
+    """A retry another copy ran while this copy was busy with a slow one is not run a second time."""
+    one, two = live_app(tmp_path), live_app(tmp_path)
+    clock = [utcnow()]
+    start, asked = clock[0], []
+
+    async def collect(provider, integration_id, config, api_key):
+        asked.append(integration_id)
+        if clock[0] == start:
+            raise PASSING["broken connection"]()
+        if len(asked) == 3:  # Copy one's first retry is slow; copy two works meanwhile.
+            clock[0] += timedelta(minutes=6)
+            await worker.tick(two.state.session_factory, two.state.settings, clock=lambda: clock[0])
+        return Snapshot()
+
+    fail_dns(monkeypatch, [])
+    monkeypatch.setattr("nyctr.integrations.collect", collect)
+    with TestClient(one), TestClient(two):
+        seed_live_member(one)
+        asyncio.run(worker.tick(one.state.session_factory, one.state.settings, clock=lambda: clock[0]))
+        clock[0] = start + timedelta(minutes=1)
+        asyncio.run(worker.tick(one.state.session_factory, one.state.settings, clock=lambda: clock[0]))
+        assert sorted(asked) == ["dns", "dns", "unifi", "unifi"]
+
+
+def test_no_retry_runs_once_the_next_scheduled_run_is_due_even_in_a_long_pass(tmp_path, monkeypatch):
+    """A retry staged early in a pass that then runs past the next run time is left to that run."""
+    clock = [utcnow()]
+    start, asked = clock[0], []
+
+    async def collect(provider, integration_id, config, api_key):
+        asked.append(integration_id)
+        if len(asked) == 1:
+            raise PASSING["broken connection"]()
+        clock[0] += timedelta(minutes=15)  # The other source is very slow.
+        return Snapshot()
+
+    fail_dns(monkeypatch, [])
+    monkeypatch.setattr("nyctr.integrations.collect", collect)
+    app = live_app(tmp_path)
+    with TestClient(app):
+        seed_live_member(app)
+        asyncio.run(worker.tick(app.state.session_factory, app.state.settings, clock=lambda: clock[0]))
+        assert len(asked) == 2 and clock[0] == start + timedelta(minutes=15)
+        assert tick(app, clock[0]) is True and len(asked) == 4

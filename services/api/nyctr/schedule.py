@@ -8,8 +8,8 @@ not from when a process started, and only one copy can claim a run.
 A source that fails a scheduled run for a reason that may pass is tried again
 after 1, 2 and 4 minutes, never at or past the next run. Each pending retry is
 one row in the same table, keyed by the source, whose time is when it is due;
-a copy claims it by moving that time forward in one conditional write, exactly
-as a run is claimed, so no schema change is needed.
+just before running it, a copy claims it by moving that time forward in one
+conditional write, exactly as a run is claimed, so no schema change is needed.
 """
 
 from __future__ import annotations
@@ -154,23 +154,27 @@ def pending_retries(db: Session) -> list[str]:
     return [value["integration_id"] for value in rows]
 
 
-def claim_retries(db: Session, schedule: dict, now: datetime | None = None) -> list[tuple[str, int]]:
-    """Take every retry that is due, each by one conditional write, and return (source, attempt) pairs.
-
-    A second copy asking at the same moment finds the time already moved
-    forward and gets nothing. A claimant that stops leaves the retry to be taken
-    again after RETRY_HOLD, or to the next run. Commits.
-    """
+def due_retries(db: Session, schedule: dict, now: datetime | None = None) -> list[str]:
+    """Return the sources whose retry is due, without claiming any. Nothing is due while the schedule is off."""
     if not schedule["enabled"]:
         return []
+    rows = db.scalars(select(Setting.value).where(Setting.key.startswith(RETRY_PREFIX),
+                                                  Setting.updated_at <= (now or utcnow())))
+    return [value["integration_id"] for value in rows]
+
+
+def claim_retry(db: Session, integration_id: str, now: datetime | None = None) -> int | None:
+    """Take one source's due retry by one conditional write, just before running it, and return its attempt.
+
+    A copy asking a moment later finds the time already moved forward and gets
+    None, as does a copy whose retry was taken, run or cleared meanwhile. A
+    claimant that stops leaves the retry to be taken again after RETRY_HOLD, or
+    to the next run. Commits.
+    """
     now = now or utcnow()
-    due = db.execute(select(Setting.key, Setting.value).where(Setting.key.startswith(RETRY_PREFIX),
-                                                              Setting.updated_at <= now)).all()
-    taken = []
-    for key, value in due:
-        claimed = db.execute(update(Setting).where(Setting.key == key, Setting.updated_at <= now)
-                             .values(updated_at=now + RETRY_HOLD).execution_options(synchronize_session=False))
-        db.commit()
-        if claimed.rowcount == 1:
-            taken.append((value["integration_id"], int(value["attempt"])))
-    return taken
+    key = _retry_key(integration_id)
+    claimed = db.execute(update(Setting).where(Setting.key == key, Setting.updated_at <= now)
+                         .values(updated_at=now + RETRY_HOLD).execution_options(synchronize_session=False))
+    attempt = db.scalar(select(Setting.value).where(Setting.key == key)) if claimed.rowcount == 1 else None
+    db.commit()
+    return int(attempt["attempt"]) if attempt else None

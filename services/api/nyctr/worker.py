@@ -98,9 +98,11 @@ async def _analyse(factory, settings) -> None:
 async def retry_due(factory, settings, plan, clock) -> None:
     """Run the retries that are due and this copy claimed, or end them all if the schedule is off.
 
-    A source already being collected is put back a minute later rather than
-    run alongside; a source that no longer exists or has no secret is shown as
-    failed and its retries end.
+    Each retry is claimed just before it runs, and none runs once the next run
+    is due. A source already being collected is put back a minute later rather
+    than run alongside; a source that no longer exists or has no secret is shown
+    as failed and its retries end; an attempt whose lease was replaced ends the
+    retries and leaves the source to whoever holds it now.
     """
     with factory() as db:
         if not plan["enabled"]:
@@ -108,9 +110,16 @@ async def retry_due(factory, settings, plan, clock) -> None:
                 _stop_retries(db, integration_id, "schedule_off")
             db.commit()
             return
-        taken = schedule.claim_retries(db, plan, clock())
+        due = schedule.due_retries(db, plan, clock())
     collected = False
-    for integration_id, attempt in taken:
+    for integration_id in due:
+        with factory() as db:
+            upcoming = schedule.next_run(db, plan, clock())
+            if upcoming is None or clock() >= upcoming:
+                break  # The pass ran long and the next run is due; it collects every source and clears retries.
+            attempt = schedule.claim_retry(db, integration_id, clock())
+        if attempt is None:
+            continue  # Another copy took it, ran it or cleared it meanwhile.
         snapshot, error = await collect_integration(factory, settings, integration_id, None, attempt=attempt,
                                                     hold=_hold(plan, integration_id, attempt, clock))
         with factory() as db:
@@ -118,7 +127,9 @@ async def retry_due(factory, settings, plan, clock) -> None:
                 schedule.defer_retry(db, plan, integration_id, attempt, clock())
             elif error in ENDED:
                 _stop_retries(db, integration_id, error)
-            elif snapshot is not None:
+            elif snapshot is not None or error == "replaced":
+                # A replaced attempt stored nothing and staged nothing: whoever holds the
+                # source now gives its verdict, so this chain of retries ends here.
                 schedule.drop_retry(db, integration_id)
             db.commit()
         collected = collected or snapshot is not None
