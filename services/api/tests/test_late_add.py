@@ -131,8 +131,10 @@ def test_a_second_opening_while_the_first_is_still_checked_takes_the_entry_as_ny
                     # Its look for the earlier attempt finds nothing; its own question finds the entry there.
                     source.land_at = len(source.calls) + 1
                 assert (await review(owner, made)).status_code == 200
+                with app.state.session_factory() as db:  # As stored, before any later look could correct it.
+                    stored = db.scalars(select(Lease).where(Lease.status == "active")).one()
+                    assert stored.owned is True and stored.execution == "applied"
                 lease = next(row for row in (await owner.get("/api/leases")).json() if row["status"] == "active")
-                assert lease["owned"] is True and lease["execution"] == "applied"
                 if second == "before the add lands":
                     source.land()  # The source already holds the entry the second opening added: nothing changes.
                     await ticked(app)
