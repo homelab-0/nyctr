@@ -142,17 +142,78 @@ never stored under the wrong explanation.
 Each network's address range and each device's uplink come from one detail read
 per network and per device. These are optional reads too: a read the key may not
 make, or an answer that is malformed or about a different record, keeps nothing
-from that read and reports the gap. The vendor's Site Manager API description
-limits its cloud pass-through to 100 requests a minute for each console (and 25
-seconds for a request, 10 MB for a response). These detail reads therefore stop
-once the collection has made 96 requests, after setting aside the guest and
-closing reads. That is not a ceiling on the whole collection: lists long enough
-to need several pages, or many sites, can take a collection past 100, and a
-second collection or connection test in the same minute counts against the same
-limit. The source then answers with its rate-limit error and the collection
-fails, as it does for any rate limit. A site with 10 networks, 13 pieces of
-equipment and 67 devices costs 30 requests, plus one for each guest device up
-to 40.
+from that read and reports the gap. They stop once the collection has made 96
+requests, after setting aside the guest and closing reads. With several sites,
+every site's lists are read first and the detail reads that fit are shared: each
+site gets what it needs up to the same level, so a small site is read in full
+and large ones are cut short alike. The gap is reported once, and each site that
+was cut short carries `detail_reads_skipped` with how many network and equipment
+reads were left out. A site with 10 networks, 13 pieces of equipment and 67
+devices costs 30 requests, plus one for each guest device up to 40.
+
+### Through the cloud address
+
+The adapter accepts two addresses: the console's own (below) and the vendor's
+cloud pass-through, `https://api.ui.com/v1/connector/consoles/<console id>/proxy/network/integration`,
+with `api.ui.com` in `NYCTR_CONNECTOR_HOSTS`. The vendor's Site Manager API
+description limits the pass-through to 100 requests a minute for each console,
+25 seconds for a request and 10 MB for a response (Nyctr refuses an answer over
+2 MB from any source).
+
+Through the cloud address one copy of Nyctr sends at most 96 requests to one
+console in any 60 seconds. Scheduled and manual collections, connection tests
+and a collection started by the console's webhook share that count, as do two
+saved sources that point at the same console. A request that does not fit waits
+for its turn instead of being sent and refused. A request is counted from when
+its answer arrived. The console's own address is not paced.
+
+A collection through the cloud address, with the `proxy` segment in the path as
+above, succeeded against a real console on 2026-11-13: one installation, read
+only. Everything else here, including the pacing, the error answers and the
+sharing between sites, is tested with fabricated answers only.
+
+- A collection whose lists each fit one page makes at most 96 requests and does
+  not wait. One that needs more (a guest pass or Wi-Fi list long enough to page)
+  finishes about a minute later.
+- Reading is limited to 60 seconds for every source; time spent waiting for a
+  turn is not counted in it. A collection waits at most 120 seconds in total,
+  which is two full minutes of the limit and happens only when something else
+  used the console just before. If it would have to wait longer it ends as a
+  rate limit and the scheduled retry comes back after the wait. So a collection
+  ends within 180 seconds, a backstop stops it at 210, and its lease on the
+  source lasts 300.
+- A connection test waits at most 20 seconds in total for a turn. Past that it
+  reports that the request limit is in use and to try again shortly.
+- While a scheduled collection waits, the console and the API are served as
+  usual. The collection pass it belongs to does not move on: the other sources
+  in that pass, and a run or retry that comes due meanwhile, wait for it. Any
+  source may hold the pass for its 60 seconds of reading; a paced source may
+  hold it for up to the 180 seconds above. The ending of expired exceptions
+  does not wait: the upkeep loop starts it on every tick, whether or not a
+  collection pass is still going.
+
+What pacing does not cover:
+
+- The count is kept in the running process. Two copies of Nyctr on one database
+  each keep their own, so together they can send up to twice the pace to one
+  console; so can a restart inside the same minute. The scheduled run is claimed
+  by one copy only, so this needs a test or manual collection on one copy while
+  another collects. The source then answers with its rate-limit error and the
+  collection fails and is retried, as for any rate limit.
+- Changes Nyctr makes at the console (issuing or ending a guest pass, letting a
+  guest on or cutting one off) are not paced or counted. The four requests a
+  minute between the pace and the vendor's limit are left for them.
+- Anything else that uses the same console through the cloud address counts
+  against the same limit at the vendor.
+
+The cloud's own error answers are read by their status only; nothing in their
+body is shown or stored. A rate limit fails the collection as a rate limit and
+keeps the wait the cloud asked for, when it gives one in seconds. A device
+timeout (408) or a bad gateway (502) on a read the collection needs fails it as
+a fault that may pass, so a scheduled collection is retried; on an optional read
+it is reported as that read's gap, as any server error is. "Unauthorized" (401) and "forbidden or not the
+owner of the host" (403) are refusals: nothing is retried until the key or its
+access is put right.
 
 What the adapter states and what Nyctr works out are kept apart:
 
@@ -197,7 +258,7 @@ deduction and is never shown as the source's statement. A device with nothing
 attached, a site with a single piece of equipment, and equipment reporting an
 IPv6 address are never filed by this rule.
 
-The local integration base URL has this shape:
+The console's own integration base URL has this shape:
 
 ```text
 https://console.example.internal/proxy/network/integration

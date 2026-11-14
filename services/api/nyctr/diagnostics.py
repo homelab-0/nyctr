@@ -13,9 +13,19 @@ from pydantic import BaseModel
 
 from . import integrations
 from .integrations import registry
-from .integrations.core import IntegrationError, ProbeEvidence, capture_probe, describe_gaps, utc_now
+from .integrations.core import (
+    IntegrationError,
+    ProbeEvidence,
+    capture_probe,
+    describe_gaps,
+    patience,
+    utc_now,
+)
 
 DIAGNOSTICS_TIMEOUT_SECONDS = 90
+# Someone is waiting on a connection test. Where a source's request limit is in use, the test
+# waits this long in total for a turn and then says so, instead of holding the request open.
+DIAGNOSTICS_WAIT_SECONDS = 20
 
 CheckStatus = Literal["passed", "failed", "unknown", "unavailable"]
 ErrorCategory = Literal[
@@ -107,8 +117,8 @@ _FAILURES = {
         "Check the supported provider API version and scope. Missing, malformed, redirected, or oversized data is not accepted.",
     ),
     "rate_limit": (
-        "The provider rate-limited a requested read.",
-        "Wait before retrying and review the integration scope and request frequency.",
+        "The source's request limit was reached or is in use, so a requested read was not made.",
+        "Try again shortly. If it keeps happening, review the integration scope and request frequency.",
     ),
     "timeout": (
         "The bounded provider check reached its deadline before completion.",
@@ -218,10 +228,11 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
     with capture_probe() as evidence:
         if valid_config is not None and api_key is not None:
             try:
-                snapshot = await asyncio.wait_for(
-                    integrations.collect(provider, integration_id, valid_config, api_key),
-                    timeout=DIAGNOSTICS_TIMEOUT_SECONDS,
-                )
+                with patience(DIAGNOSTICS_WAIT_SECONDS):
+                    snapshot = await asyncio.wait_for(
+                        integrations.collect(provider, integration_id, valid_config, api_key),
+                        timeout=DIAGNOSTICS_TIMEOUT_SECONDS,
+                    )
                 counts = SnapshotCounts(resources=len(snapshot.resources), relationships=len(snapshot.relationships),
                                         observations=len(snapshot.blocks))
             except TimeoutError:
