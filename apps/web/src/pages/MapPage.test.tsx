@@ -209,4 +209,30 @@ describe('what a full square on the Map could not draw', () => {
     const named = screen.getByRole('button', { name: 'Late, Device, from Later source' });
     expect(named.getAttribute('class')).toContain('t-teal');
   });
+
+  it('draws a row of an open list again when its source is named after the list was opened', async () => {
+    const site: Graph = {
+      nodes: [
+        thing('net', 'network', 'Net'),
+        ...Array.from({ length: 9 }, (_, i) => thing(`r${i}`, 'client', `Item ${i}`, 'row_later')),
+      ],
+      edges: Array.from({ length: 9 }, (_, i) => link(`r${i}`, 'net', 'member_of')),
+    };
+    mockApi({ 'GET /graph': site, 'GET /findings': [] });
+    const { rerender } = render(<MapPage params={new URLSearchParams()} />);
+    fireEvent.click(await screen.findByRole('button', { name: '4 more devices on Net' }));
+    const chips = () =>
+      within(screen.getByRole('complementary'))
+        .getAllByRole('button', { name: /Item/ })
+        .map((row) => row.querySelector('.src')!);
+    expect(chips()).toHaveLength(4);
+    expect(chips().map((chip) => chip.getAttribute('title'))).toEqual(Array(4).fill('Row Later'));
+    ui.registerSources([{ id: 'row_later', name: 'Later rows', letter: 'R', tone: 'teal' }]);
+    rerender(<MapPage params={new URLSearchParams()} />);
+    for (const chip of chips()) {
+      expect(chip.getAttribute('title')).toBe('Later rows');
+      expect(chip.getAttribute('class')).toContain('t-teal');
+      expect(chip.textContent).toBe('R');
+    }
+  });
 });
