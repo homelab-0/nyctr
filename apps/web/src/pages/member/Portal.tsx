@@ -25,7 +25,7 @@ import {
   Seg,
 } from '../../components/ui';
 import { ago, detectOs, left, span, useNow, type DeviceOs } from '../../lib/format';
-import type { AccessRequest, Block, Lease, Resource, ThisDevice } from '../../types';
+import type { AccessRequest, Block, BlockCoverage, Lease, Resource, ThisDevice } from '../../types';
 
 /** Steps to make a device forget that an address was blocked. Wording is deliberately non-technical. */
 const RECONNECT: Record<DeviceOs, { name: string; steps: string[] }> = {
@@ -84,9 +84,42 @@ function useMemberData() {
   const requests = useApi<AccessRequest[]>('/requests');
   const leases = useApi<Lease[]>('/leases');
   const device = useApi<ThisDevice>('/me/device');
-  return { blocks, requests, leases, device };
+  const devices = useApi<Resource[]>('/devices');
+  const coverage = useApi<BlockCoverage>('/blocks/coverage');
+  return { blocks, requests, leases, device, devices, coverage };
 }
 type Data = ReturnType<typeof useMemberData>;
+
+const ASK = 'Ask whoever runs Nyctr';
+
+/**
+ * Why Nyctr cannot show this person a blocked site, most basic reason first. Null means it could
+ * have: an empty list then really is "nothing was blocked", not "nothing is known".
+ */
+function notKnown(data: Data): { title: string; text: string } | null {
+  if (data.devices.data?.length === 0)
+    return {
+      title: 'No devices are assigned to you yet',
+      text: `Nyctr shows blocked sites only for devices that are yours, and it does not know of any. ${ASK} to add your devices.`,
+    };
+  const cover = data.coverage.data;
+  if (cover?.collected === 'failed')
+    return {
+      title: 'Blocked sites could not be collected',
+      text: `Nyctr tried to read what was blocked and could not, so it does not know whether a site was blocked for you. ${ASK} to look into it.`,
+    };
+  if (cover && cover.collected !== 'yes')
+    return {
+      title: 'Blocked sites have not been collected yet',
+      text: `Nyctr has not read what was blocked on this network so far, so it does not know whether a site was blocked for you. ${ASK} when it will.`,
+    };
+  if (cover?.devices_named === 'none')
+    return {
+      title: 'Blocked sites cannot be shown per device here',
+      text: `Sites are being blocked on this network, but Nyctr cannot tell which device each one was on, so it cannot show you yours. ${ASK} about a page that will not load.`,
+    };
+  return null;
+}
 
 /** One row per address, newest first, so a page that retried ten times shows once. */
 function latestPerDomain(blocks: Block[]) {
@@ -143,11 +176,20 @@ function Home({ data }: { data: Data }) {
       ? 'ask whoever runs Nyctr to collect. New blocks show up here only after that.'
       : 'come back here later.';
   const here = data.device.data;
+  const gap = notKnown(data);
+  const noDevices = data.devices.data?.length === 0;
+  // Some lookups name no device, so a block of theirs may be among those and missing here.
+  const partly =
+    data.coverage.data?.devices_named === 'some'
+      ? ` Some blocked sites here cannot be tied to a device, so one of yours may be missing. ${ASK} if a page will not load.`
+      : '';
   const requestFor = useMemo(
     () => new Map((data.requests.data || []).map((row) => [row.block_id, row])),
     [data.requests.data],
   );
-  if (data.blocks.loading) return <Loading text="Looking for blocked sites…" />;
+  // What an empty list means depends on these, so "nothing was blocked" is never shown before them.
+  if (data.blocks.loading || data.devices.loading || data.coverage.loading)
+    return <Loading text="Looking for blocked sites…" />;
   if (data.blocks.error)
     return <ErrorState message={data.blocks.error} retry={data.blocks.reload} />;
   const blocks = latestPerDomain(data.blocks.data || []);
@@ -175,7 +217,11 @@ function Home({ data }: { data: Data }) {
     <div className="m-col">
       <header className="stack tight">
         <h1 className="display d1">What got blocked?</h1>
-        {here?.name ? (
+        {gap && noDevices ? (
+          <p className="lede">
+            <b>{gap.title}.</b> {gap.text}
+          </p>
+        ) : here?.name ? (
           <p className="lede">
             <Laptop size={15} style={{ verticalAlign: '-2px' }} /> You're on <b>{here.name}</b>
             {here.simulated ? ' (demo: pretending this browser is that device).' : '.'}
@@ -219,8 +265,11 @@ function Home({ data }: { data: Data }) {
           </section>
         ) : (
           <Empty
-            title="Nyctr has not seen that blocked on your devices"
-            text={`Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here.`}
+            title={gap?.title || 'Nyctr has not seen that blocked on your devices'}
+            text={
+              gap?.text ||
+              `Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here.${partly}`
+            }
           />
         ))}
       {mine.length > 0 && (
@@ -239,10 +288,10 @@ function Home({ data }: { data: Data }) {
           ))}
         </section>
       )}
-      {blocks.length === 0 && found === null && (
+      {blocks.length === 0 && found === null && !noDevices && (
         <Empty
-          title="Nothing has been blocked on your devices in the last day"
-          text={`If a page will not load, open it again, then ${comeBack}`}
+          title={gap?.title || 'Nothing has been blocked on your devices in the last day'}
+          text={gap?.text || `If a page will not load, open it again, then ${comeBack}${partly}`}
         />
       )}
     </div>
@@ -517,6 +566,7 @@ function Result({ data, id }: { data: Data; id: string }) {
 
 function MyRequests({ data }: { data: Data }) {
   const now = useNow();
+  const gap = notKnown(data);
   if (data.requests.loading) return <Loading />;
   const rows = data.requests.data || [];
   const leaseFor = new Map((data.leases.data || []).map((lease) => [lease.request_id, lease]));
@@ -526,7 +576,11 @@ function MyRequests({ data }: { data: Data }) {
       {rows.length === 0 ? (
         <Empty
           title="You have not asked for anything yet"
-          text="When a page is blocked, find it under Blocked sites and ask to open it."
+          text={
+            gap
+              ? `${gap.title}, so there is nothing to ask about yet. ${gap.text}`
+              : 'When a page is blocked, find it under Blocked sites and ask to open it.'
+          }
         />
       ) : (
         <section className="m-card">
@@ -566,15 +620,21 @@ function MyRequests({ data }: { data: Data }) {
 }
 
 function MyDevices({ data }: { data: Data }) {
-  const devices = useApi<Resource[]>('/devices');
+  const devices = data.devices;
   if (devices.loading) return <Loading />;
   if (devices.error) return <ErrorState message={devices.error} retry={devices.reload} />;
+  const gap = devices.data?.length === 0 ? notKnown(data) : null;
+  if (gap)
+    return (
+      <div className="m-col">
+        <h1 className="display d2">My devices</h1>
+        <Empty title={gap.title} text={gap.text} icon={Laptop} />
+      </div>
+    );
   return (
     <div className="m-col">
       <h1 className="display d2">My devices</h1>
-      <p className="lede">
-        You see blocked sites only from these. Ask whoever runs the network to add one.
-      </p>
+      <p className="lede">You see blocked sites only from these. {ASK} to add one.</p>
       <section className="m-card">
         {(devices.data || []).map((device) => (
           <div className="m-row" key={device.id}>
@@ -589,9 +649,6 @@ function MyDevices({ data }: { data: Data }) {
             )}
           </div>
         ))}
-        {devices.data?.length === 0 && (
-          <p className="pad muted">No devices are assigned to you yet.</p>
-        )}
       </section>
     </div>
   );

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 
 from nyctr.integrations import registry
-from nyctr.models import Integration, Resource, utcnow
+from nyctr.models import Integration, Observation, Resource, utcnow
 
 
 def test_finding_checks_follow_the_sources_connected(tmp_path):
@@ -46,3 +46,43 @@ def test_catalog_carries_what_each_kind_of_source_never_gives(client, admin_head
     for provider in registry.providers().values():
         if "dns.blocks" in provider.provides:
             assert "DNS lookups that were allowed" in listed[provider.id]["not_collected"]
+
+
+def test_block_coverage_needs_a_session_and_gives_two_words_only(client):
+    """Signed out it is refused; signed in it carries no source, count, address or device."""
+    assert client.get("/api/blocks/coverage").status_code == 401
+    client.post("/api/auth/login", json={"email": "jamie@nyctr.demo", "password": "nyctr-demo"})
+    body = client.get("/api/blocks/coverage").json()
+    assert body == {"collected": "yes", "devices_named": "some"}
+
+
+def test_block_coverage_tells_not_collected_and_failed_from_nothing_blocked(tmp_path):
+    """A source that never stored a collection is not the same as a quiet one, and a failure is named."""
+    app = live_app(tmp_path)
+    with TestClient(app) as client:
+        seed_live_member(app)
+        live_signin(client, LIVE_MEMBER)
+
+        def answer(**values):
+            with app.state.session_factory() as db:
+                if values:
+                    db.execute(update(Integration).values(**values))
+                db.commit()
+            return client.get("/api/blocks/coverage").json()
+
+        assert answer() == {"collected": "yes", "devices_named": "all"}
+        # The source stops naming devices: the member's list empties, and the reason is given.
+        with app.state.session_factory() as db:
+            db.execute(update(Observation).values(device_id=None, attribution="unattributed"))
+            db.commit()
+        assert client.get("/api/blocks").json() == []
+        assert answer() == {"collected": "yes", "devices_named": "none"}
+        assert answer(last_sync=None)["collected"] == "no"
+        assert answer(last_sync=None, last_error="The source refused the key")["collected"] == "failed"
+        with app.state.session_factory() as db:
+            for row in db.query(Observation):
+                db.delete(row)
+            for row in db.query(Integration):
+                row.provider = "not_a_dns_source"
+            db.commit()
+        assert client.get("/api/blocks/coverage").json() == {"collected": "none", "devices_named": "unknown"}

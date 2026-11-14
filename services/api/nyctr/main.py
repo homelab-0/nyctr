@@ -614,6 +614,23 @@ def create_app(settings: Settings | None = None):
         rows = db.scalars(select(Observation).where(Observation.expires_at > utcnow()).order_by(Observation.observed_at.desc()))
         return [observation_json(r) for r in rows if observation_permitted(db, r, auth[0])]
 
+    @app.get("/api/blocks/coverage")
+    def block_coverage(_auth=Depends(identity), db: Session = Depends(get_db)):
+        """Tell a signed-in person why their list of blocked sites may be empty, and nothing else.
+
+        Two words: whether any source of blocked lookups has stored a collection,
+        and whether the stored lookups name a device. No source, count, address or
+        device is given, so a member learns only what their own page says.
+        """
+        from .integrations import registry
+        sources = [i for i in db.scalars(select(Integration)) if registry.provides(i.provider, "dns.blocks")]
+        live = Observation.expires_at > utcnow()
+        total, named = db.execute(select(func.count(), func.count(Observation.device_id)).where(live)).one()
+        return {"collected": ("none" if not sources else "yes" if any(i.last_sync for i in sources)
+                              else "failed" if any(i.last_error for i in sources) else "no"),
+                "devices_named": "unknown" if not total else "none" if not named
+                                 else "all" if named == total else "some"}
+
     @app.get("/api/requests")
     def requests(auth=Depends(identity), db: Session = Depends(get_db)):
         """List all access requests for admins or only the authenticated member requests."""

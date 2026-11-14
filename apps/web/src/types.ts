@@ -115,6 +115,11 @@ export interface FindingChecks {
   checks: { text: string; active: boolean }[];
   not_checked: string[];
 }
+/** Why a list of blocked sites may be empty. Carries no source, count, address or device. */
+export interface BlockCoverage {
+  collected: 'none' | 'no' | 'failed' | 'yes';
+  devices_named: 'unknown' | 'none' | 'some' | 'all';
+}
 export interface Catalog {
   capabilities: Capability[];
   providers: CatalogProvider[];

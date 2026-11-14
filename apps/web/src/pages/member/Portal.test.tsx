@@ -105,6 +105,45 @@ afterEach(() => {
 });
 
 describe('member portal', () => {
+  it('tells a member with no devices that first, with who to ask', async () => {
+    open({
+      'GET /me/device': { device_id: null, name: null, simulated: false },
+      'GET /devices': [],
+      'GET /blocks/coverage': { collected: 'yes', devices_named: 'all' },
+    });
+    expect(await screen.findByText('No devices are assigned to you yet.')).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page).toContain('Ask whoever runs Nyctr to add your devices.');
+    expect(page).not.toContain('could not tell which of your devices');
+    expect(page).not.toContain('Nothing has been blocked');
+  });
+
+  it('says why it cannot show blocked sites instead of saying nothing was blocked', async () => {
+    const cases = [
+      [
+        { collected: 'yes', devices_named: 'none' },
+        'Blocked sites cannot be shown per device here',
+      ],
+      [{ collected: 'no', devices_named: 'unknown' }, 'Blocked sites have not been collected yet'],
+      [{ collected: 'failed', devices_named: 'unknown' }, 'Blocked sites could not be collected'],
+    ] as const;
+    for (const [coverage, title] of cases) {
+      open({
+        'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
+        'GET /blocks/coverage': coverage,
+      });
+      expect(await screen.findByText(title)).toBeDefined();
+      expect(document.body.textContent).toContain('Ask whoever runs Nyctr');
+      expect(document.body.textContent).not.toContain('Nothing has been blocked');
+      cleanup();
+    }
+    open({
+      'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
+      'GET /blocks/coverage': { collected: 'yes', devices_named: 'some' },
+    });
+    expect(await screen.findByText(/one of yours may be missing/)).toBeDefined();
+  });
+
   it('only tells a member to come back when a collection is scheduled', async () => {
     open({ 'GET /collection': memberSchedule(true) });
     expect(
