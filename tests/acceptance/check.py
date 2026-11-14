@@ -433,7 +433,8 @@ def verify_mode(client: Client, writes: str) -> bool:
     The default start must be read only for both features. A start with changes allowed
     must say so for each kind of source named, so neither mode can pass as the other.
     """
-    allowed = {kind.strip() for kind in writes.split(",")}
+    allowed = {kind.strip() for kind in writes.split(",") if kind.strip()}
+    require(allowed <= set(CHANGES.values()), "--writes names a kind of source this stack does not have.")
     found = client.json("/api/rules").get("writes") or {}
     require(
         {feature: found.get(feature) for feature in CHANGES}
@@ -455,8 +456,8 @@ def request_exception(client: Client) -> None:
     block = next((row for row in client.json("/api/blocks") if row["domain"] == "lookup-00.example.test"), None)
     require(block is not None, "The blocked lookup to ask about is not in Blocks; use a fresh project.")
     made = client.json("/api/requests", method="POST", body={"block_id": block["id"], **asked}, expected=201)
-    require(made.get("status") == "pending", "The request is not waiting for a decision; use a fresh project.")
-    print("PASS request: lookup-00.example.test is waiting under Requests")
+    print("PASS request: lookup-00.example.test " + ("is waiting under Requests" if made["status"] == "pending" else
+          f"was already decided ({made['status']}); a project has one request, so nothing new is waiting"))
 
 
 def verify_placement(client: Client, graph: dict) -> None:
@@ -623,8 +624,9 @@ def main() -> int:
         client.json("/api/integrations", expected=401)
         client.login()
         if args.scenarios:
+            access = verify_mode(client, args.writes)
             verify_scenarios(client, keep=True)
-            if verify_mode(client, args.writes):
+            if access:
                 request_exception(client)
             return 0
         # Nyctr collects every saved source on its schedule, first 30 seconds after it starts. That

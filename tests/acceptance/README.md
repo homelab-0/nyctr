@@ -244,14 +244,24 @@ administrator, for `lookup-00.example.test` to be opened for 15 minutes, and
 prints `PASS request`. In the console: Requests shows it waiting; Approve opens
 it; Open now lists the name with the time left and "Changed at the provider and
 checked."; End now ends it. The name is on the DNS profile's allowed list while
-the exception is open and leaves it when it is ended or runs out.
+the exception is open and leaves it when it is ended or runs out. One project
+has one request: once it is decided, `--scenarios` prints that it found it so.
 
-**Guests.** On Guests, issue and end a pass, let the waiting guest on
-(`Example speaker 62`), cut one off. A guest who is cut off is disconnected, so
-the fixture no longer lists it, as a real gateway may not, and Nyctr cannot read
-the result back. The row says Cut off and stays after the next collection, which
-reads one item fewer (320). Let it back on then fails with the source's answer,
-because the source no longer knows the device.
+**Guests.** On Guests, let the waiting guest on (`Example speaker 62`) and cut
+one off; What this stack cannot show says what a cut-off looks like here.
+
+**A pass, by API until the console can choose the source.** The pass form names
+no source, so Nyctr takes the first by name, here one that never collects, and
+refuses. This issues one at the site at real size (one more sign-in) and prints
+it; End on its row on Guests ends it:
+
+```sh
+PYTHONPATH=tests/acceptance python3 - <<'EOF'
+import check; client = check.Client("http://localhost:8091"); client.login()
+source = next(row["id"] for row in client.json("/api/guests")["sources"] if row["name"] == "Scenario - site at real size")
+print(client.json("/api/guests/passes", method="POST", expected=201, body={"name": "Example pass", "minutes": 60, "integration_id": source}))
+EOF
+```
 
 Three more switch values act on changes only:
 
@@ -283,6 +293,11 @@ open a 15 minute exception and collect the site at real size as it ends.
   one DNS service are fabricated.
 - A request limit that counts: the cloud address is served without one, so
   pacing is seen as a longer collection, and a rate limit only when switched on.
+- Issuing a pass from the console: its form cannot choose the source (see above).
+- A verified cut-off or a working "Let it back on". A guest who is cut off is
+  gone for good here, where a real device normally rejoins and is listed again.
+  So Nyctr cannot read the result back, the row stays Cut off after the next
+  collection (320 items), and Let it back on fails with the source's answer.
 - A guest signing in on the Wi-Fi's own page, using up a pass, moving between
   access points, or making lookups that are tied to it.
 - Firewall events, single sign-on, and anything that depends on how a real

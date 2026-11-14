@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http.client
+import io
 import ipaddress
 import json
 import re
@@ -177,7 +179,8 @@ class FixtureContractCase(unittest.TestCase):
         # The gateway's lists give 25 rows unless asked and never more than 200, so the policies take two reads.
         listed = [json.loads(response_for(f"{fixture.LARGE}/{rows}", GOOD_API_KEY)[1])
                   for rows in ("firewall/policies", "firewall/policies?limit=200", "clients?limit=200")]
-        self.assertEqual([(page["count"], page["totalCount"]) for page in listed], [(25, 230), (200, 230), (67, 67)])
+        self.assertEqual([[page[key] for key in ("limit", "count", "totalCount")] for page in listed],
+                         [[25, 25, 230], [200, 200, 230], [200, 67, 67]])
         self.assertEqual(response_for(f"{fixture.LARGE}/clients?limit=201", GOOD_API_KEY)[0], 400)
         # Only the read of one client says how and until when a guest was let on.
         self.assertNotIn("authorization", json.dumps(listed[2]))
@@ -306,6 +309,64 @@ class ReadOnlyDefaultCase(unittest.TestCase):
         compose = (Path(__file__).parent / "compose.yaml").read_text()
         self.assertEqual(re.findall(r"(?:FIXTURE_WRITES=|NYCTR_PROVIDER_WRITES: )(.*)", compose),
                          ["${NYCTR_ACCEPTANCE_WRITES:+on}", "${NYCTR_ACCEPTANCE_WRITES:-}"])
+
+
+class StandIn:
+    """Answer the checker's calls from a table, with no socket, and keep what was asked."""
+
+    def __init__(self, answers):
+        self.answers, self.calls, self.login, self.request = answers, [], lambda: None, lambda _path: b'id="root"'
+
+    def json(self, path, method="GET", **_options):
+        self.calls.append((method, path))
+        return self.answers[(method, path)]
+
+
+class CheckerGuardCase(unittest.TestCase):
+    """The checker's own guards, which otherwise only a run against the stack would hold."""
+
+    START = {("GET", "/api/health"): {"status": "ok"}, ("GET", "/api/collection"): {"enabled": False},
+             ("GET", "/api/auth/config"): {"mode": "live", "local_enabled": True, "oidc_enabled": False}}
+    OFF, ON = ({("GET", "/api/rules"): {"writes": dict.fromkeys(acceptance_check.CHANGES, m)}} for m in ("disabled", "enabled"))
+
+    def run_checker(self, call, *given, client=None, argv=()):
+        """Run part or all of the checker against a stand-in; return what it gave back and what it printed."""
+        printed = io.StringIO()
+        with (patch.object(acceptance_check, "Client", lambda _url: client), patch.object(sys, "argv", ["", *argv]),
+              contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed)):
+            return call(*given), printed.getvalue()
+
+    def test_the_mode_must_be_the_one_the_start_gave(self):
+        """Neither mode passes as the other, no kind of source that does not exist passes, and scenarios stop first."""
+        mode = acceptance_check.verify_mode
+        self.assertIs(self.run_checker(mode, StandIn(self.OFF), "")[0], False)
+        self.assertIs(self.run_checker(mode, StandIn(self.ON), " nextdns , unifi_network ")[0], True)
+        for found, writes, said in ((self.OFF, "unifi_network,nextdns", "match"), (self.ON, "", "match"), (self.ON, "nextdns", "match"),
+                                    ({("GET", "/api/rules"): {}}, "", "match"), (self.OFF, "proxmox", "not have")):
+            with self.subTest(writes=writes), self.assertRaisesRegex(acceptance_check.AcceptanceFailure, said):
+                mode(StandIn(found), writes)
+        client = StandIn({**self.START, **self.OFF, ("GET", "/api/integrations"): []})
+        code, printed = self.run_checker(acceptance_check.main, client=client, argv=["--scenarios", "--writes", "nextdns"])
+        self.assertEqual((code, client.calls[-1], "does not match this start" in printed), (1, ("GET", "/api/rules"), True))
+
+    def test_a_scenario_source_saved_otherwise_is_not_collected(self):
+        """Another site, another key or a second copy under the scenario's name stops before any collection."""
+        kept = {**acceptance_check.SCENARIOS["site at real size"][0], "id": "a"}
+        for saved in ([{**kept, "config": acceptance_check.CONNECTIONS["unifi"]["config"]}],
+                      [{**kept, "secret_ref": acceptance_check.BAD_SECRET_REF}], [kept, {**kept, "id": "b"}]):
+            client = StandIn({("GET", "/api/integrations"): saved})
+            with self.assertRaisesRegex(acceptance_check.AcceptanceFailure, "refusing to use it"):
+                acceptance_check.verify_scenarios(client, keep=False)
+            self.assertEqual(client.calls, [("GET", "/api/integrations")])
+
+    def test_kept_scenario_sources_and_a_decided_request_are_reported_as_what_they_are(self):
+        """Persistence after the scenarios names them as the cause, not a loss; a decided request passes and says so."""
+        client = StandIn({**self.START, ("GET", "/api/integrations"): [{"name": "Scenario - site at real size"}]})
+        code, printed = self.run_checker(acceptance_check.main, client=client, argv=["--verify-persistence"])
+        self.assertEqual((code, "Scenario sources are saved" in printed), (1, True))
+        client = StandIn({("GET", "/api/blocks"): [{"id": "b", "domain": "lookup-00.example.test"}],
+                          ("POST", "/api/requests"): {"status": "approved"}})
+        self.assertIn("already decided (approved)", self.run_checker(acceptance_check.request_exception, client)[1])
 
 
 class AcceptanceURLCase(unittest.TestCase):
