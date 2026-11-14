@@ -155,7 +155,8 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 assert (await asking).json()["status"] == "auto_approved"
                 up.tick()
                 await up.ending["dns"]
-                assert source.calls == ["GET", "GET"]  # The entry is now the new exception's too, so it stays.
+                # The entry is now the new exception's too, so it stays; the source was asked that it is there.
+                assert source.calls == ["GET", "GET", "GET"]
         await up.stop()
         with app.state.session_factory() as db:
             assert [(row.id == old, row.execution, row.owned) for row in db.scalars(select(Lease).where(

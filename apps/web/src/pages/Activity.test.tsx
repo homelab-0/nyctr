@@ -177,6 +177,8 @@ describe('Activity rows about a change at a source', () => {
           reason: 'not_confirmed',
           execution: 'not_applied',
         }),
+        event('s', 'access.close_failed', { domain: 'trying.example', record: true }),
+        event('t', 'access.close_failed', { domain: 'stuck-open.example' }),
         ...['secret', 'secret_ref', 'missing'].map((reason) =>
           event(reason, 'integration.retries_stopped', { name: `Source ${reason}`, reason }),
         ),
@@ -211,12 +213,17 @@ describe('Activity rows about a change at a source', () => {
     expect(about('unsure.example')).toBe(
       'unsure.example · the source did not confirm it, so it may be open there',
     );
-    expect(about('undone.example')).toBe(
-      'undone.example · taken back out at the source · the opening was never confirmed',
+    expect(about('undone.example')).toBe('undone.example · taken back out at the source');
+    expect(about('never.example')).toBe('never.example · nothing was removed at the source');
+    // Never "Access closed" or "could not be closed" for something that was never access.
+    const named = (domain: string) =>
+      screen.getByText(domain, { exact: false }).closest('tr')!.textContent;
+    for (const domain of ['undone.example', 'never.example'])
+      expect(named(domain)).toContain('Settled an opening that was never confirmed');
+    expect(named('trying.example')).toContain(
+      'Could not settle an opening that was never confirmed',
     );
-    expect(about('never.example')).toBe(
-      'never.example · nothing was removed at the source · the opening was never confirmed',
-    );
+    expect(named('stuck-open.example')).toContain('Access could not be closed');
     expect(detail('Cut a guest off')).toBe('without access at the source · Asked to leave');
     // A headline reads as done only when the record says applied.
     expect(detail('Tried to lock a guest out')).toBe('did not go through');
