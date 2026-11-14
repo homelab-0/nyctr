@@ -147,12 +147,15 @@ def test_a_source_removed_while_an_opening_waits_is_refused_as_removed_and_leave
         assert source.calls == [] and claims(app) == [] and gates(app) == [] and rows(app) == []
 
 
-@pytest.mark.parametrize("taken_by", ["opening", "ending"])
+@pytest.mark.parametrize("taken_by", ["opening", "ending", "the tick, then a person"])
 def test_an_opening_whose_claim_was_taken_over_stores_nothing_on_trust(tmp_path, monkeypatch, taken_by):
     """It stood still past the hold. Taken over by a second opening after its add: one exception and one entry.
-    Taken over by the ending of an older exception whose entry it had read: no exception and no entry."""
+    Taken over by the ending of an older exception whose entry it had read: no exception and no entry.
+    Taken over by the tick, which removes its entry; a person then allows the address by hand and an approval
+    finds it there: the opening that comes back cannot know whose the entry is, so its record says so, nothing
+    is passed on, and the person's entry is never removed."""
     with started(tmp_path) as (app, _client, member, admin):
-        source = Source(monkeypatch, hold=(2, "after") if taken_by == "opening" else (1, "after"))
+        source = Source(monkeypatch, hold=(1, "after") if taken_by == "ending" else (2, "after"))
 
         async def scenario():
             async with console(app, member) as sam, console(app, admin) as owner:
@@ -167,20 +170,36 @@ def test_an_opening_whose_claim_was_taken_over_stores_nothing_on_trust(tmp_path,
                     assert source.calls[3:] == ["GET", "DELETE", "GET", "GET", "GET", "POST", "GET"]
                 else:
                     with app.state.session_factory() as db:
+                        if taken_by != "ending":  # The opening's own record is due once the hold has run out.
+                            db.execute(update(Lease).values(expires_at=utcnow()))
+                            db.commit()
                         assert await access.reconcile(db, app.state.settings) == 1
                     assert source.listed == []
+                if taken_by == "the tick, then a person":
+                    source.listed.append(DOMAIN)  # By hand, at the source.
+                    assert (await review(owner, two)).status_code == 200 and rows(app)[-1] == ("active", None, False)
                 source.go.set()
                 late = await stalled
                 assert late.status_code == 409 and "took too long" in late.json()["detail"]
                 assert note(app, one) == ("pending", access.NOT_OPENED)
+                listed = (await owner.get("/api/leases")).json()
+                if taken_by != "ending":  # What the administrator is asked to check, and what Nyctr then leaves alone.
+                    record = next(row for row in listed if row["status"] == "unconfirmed")
+                    assert not record["owned"] and record["expires_at"] is None
+                    assert "cannot tell whether it put it there" in record["last_error"]
+                    for row in listed:
+                        if row["status"] != "ended":
+                            assert (await owner.post(f"/api/leases/{row['id']}/end")).status_code == 200
 
         asyncio.run(scenario())
         assert claims(app) == [] and gates(app) == []
-        if taken_by == "opening":
-            assert source.listed == [DOMAIN] and "DELETE" not in source.calls[10:]
-            assert sorted(row[0] for row in rows(app)) == ["active", "ended", "ended"]
-        else:
+        if taken_by == "opening":  # The second opening's own entry, removed when its exception was ended.
+            assert source.listed == [] and source.calls.count("DELETE") == 2
+        elif taken_by == "ending":
             assert source.listed == [] and [row[0] for row in rows(app)] == ["ended"]
+        else:  # Only the tick's removal of Nyctr's entry; the person's is still there and was never Nyctr's.
+            assert source.listed == [DOMAIN] and source.calls.count("DELETE") == 1
+            assert [row[2] for row in rows(app)] == [True, False, False]
 
 
 @pytest.mark.parametrize("first", ["own", "other", "theirs"])
@@ -258,7 +277,8 @@ def test_an_attempt_is_on_record_when_the_address_was_already_there_and_the_adds
                 assert (await review(owner, made)).status_code == 502
             assert source.seen[0] == [] and source.seen[1] == [("unconfirmed", False)]  # On record before the add.
             assert source.calls == ["GET", "GET", "POST", "GET", "GET", "DELETE", "GET"] and source.listed == []
-            assert trail(app) == [("access.open_unconfirmed", "failed"), ("access.closed", "applied")]
+            assert trail(app) == [("access.open_unconfirmed", "failed"), ("access.closed", "applied"),
+                                  ("access.approve_failed", None)]
             source.fail.clear()
             source.listed.append(DOMAIN)
             with app.state.session_factory() as db:  # A copy killed after asking: the address really was there.
@@ -544,3 +564,53 @@ def test_the_add_marks_its_error_only_when_its_add_was_sent(monkeypatch, failure
 
     assert asyncio.run(add()) is sent
     assert source.calls.count("POST") == (1 if sent else 0) and (source.listed == ["slow.example"]) == bool(sent)
+
+
+def test_why_an_approval_opened_nothing_is_kept_for_administrators_and_no_member_can_read_it(tmp_path, monkeypatch):
+    """The reason is in the audit record. The member reads their own sentence and nothing else, by any route."""
+    with started(tmp_path) as (app, _client, member, admin):
+        Failing(monkeypatch, fail=set(range(99)))
+        why = "Provider returned HTTP 500."
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                failed = await review(owner, made)
+                assert failed.status_code == 502 and failed.json()["detail"] == why
+                kept = [row for row in (await owner.get("/api/audit")).json() if row["action"] == "access.approve_failed"]
+                assert [(row["target_id"], row["details"]) for row in kept] == [(made, {"domain": DOMAIN, "why": why})]
+                assert (await owner.get("/api/requests")).json()[0]["decision_note"] == access.NOT_OPENED
+                assert (await sam.get("/api/audit")).status_code == 403
+                read = [await sam.get(path) for path in ("/api/requests", "/api/leases", "/api/blocks", "/api/me")]
+                read.append(await sam.post("/api/requests", json=ask("one")))  # The same request, asked again.
+                assert read[0].json()[0]["decision_note"] == access.NOT_OPENED
+                assert all("500" not in answer.text and "Provider" not in answer.text for answer in read)
+                assert (await sam.post("/api/graph/query", json={"query": "{ leases { id } }"})).status_code == 403
+
+        asyncio.run(scenario())
+
+
+def test_the_tick_leaves_a_claim_on_a_request_that_another_copy_took_over_in_that_instant(tmp_path, monkeypatch):
+    """Old enough to be a killed copy's when the tick read it, taken over before the tick deleted it: it stays,
+    and the request gets no note."""
+    with started(tmp_path) as (app, _client, member, _admin):
+        Source(monkeypatch)
+
+        async def scenario():
+            async with console(app, member) as sam:
+                return (await sam.post("/api/requests", json=ask("one"))).json()
+
+        made = asyncio.run(scenario())
+        with app.state.session_factory() as db, app.state.session_factory() as other:
+            assert access.hold_review(db, made["id"])
+            age(app, "review:")
+            real = db.scalars
+
+            def read_then_taken_over(query):
+                found = real(query).all()
+                taken = access.hold_review(other, made["id"])
+                assert taken and found
+                return type("Rows", (), {"all": lambda self: found})()
+            monkeypatch.setattr(db, "scalars", read_then_taken_over)
+            access.clear_stale_reviews(db)
+        assert len(gates(app)) == 1 and note(app, made["id"])[1] == made["decision_note"]

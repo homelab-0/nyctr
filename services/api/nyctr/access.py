@@ -199,7 +199,7 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
             # Given back in the transaction that stores the lease, so the next attempt counts it. If another
             # attempt took the claim over meanwhile, what this one saw may no longer be true: it stores nothing.
             if not _give_back(db, claim):
-                raise EntryBusy(f"Nyctr took too long to open {domain} at {about[0]}, and another change to it "
+                raise TakenOver(f"Nyctr took too long to open {domain} at {about[0]}, and another change to it "
                                 "went ahead. Nothing was opened.", category="configuration")
         except BaseException as error:  # Failed, refused or stopped: no lease, and the claim goes back now.
             if claim:
@@ -241,7 +241,12 @@ async def _not_confirmed(db: Session, settings: Settings, claim: Claim, error: B
     if not sent or added is False or isinstance(error, SourceGone) or (claim.said is not None and not ours) \
             or (record is None and not ours):
         return release_entry(db, claim)
-    if ours and not (record and record.owned):  # First read as already there, or settled and then added to.
+    if isinstance(error, TakenOver):
+        # It stood still past the hold and others changed the address meanwhile: its entry may have been
+        # removed, and one now there may be a person's. Not known, so Nyctr never acts on it: a person checks.
+        db.execute(delete(Lease).where(Lease.id == claim.record))
+        record = _record(db, claim, None)
+    elif ours and not (record and record.owned):  # First read as already there, and the add then added it.
         db.execute(delete(Lease).where(Lease.id == claim.record))
         record = _record(db, claim, False)
     claim.record = None  # Kept.
@@ -317,6 +322,10 @@ class BeingEnded(Exception):
 
 class EntryBusy(IntegrationError):
     """An opening waited for another change to the same address at the same source and was refused."""
+
+
+class TakenOver(EntryBusy):
+    """An opening came back from the source to find its claim taken over: it stores nothing as its own."""
 
 
 class Claim(str):
@@ -433,9 +442,11 @@ def clear_stale_reviews(db: Session) -> None:
     """Clear claims on requests left by a copy killed mid-decision (a person's or the rule's), and say so."""
     for gate in db.scalars(select(Setting).where(Setting.key.startswith("review:"),
                                                  Setting.updated_at <= utcnow() - ENDING_HOLD)).all():
-        db.execute(update(AccessRequest).where(AccessRequest.id == gate.key[7:], AccessRequest.status == "pending")
-                   .values(decision_note="Nyctr was stopped while this was being decided. Nothing was opened."))
-        db.delete(gate)
+        # By key and mark: a claim another copy took over in this instant is theirs and stays.
+        if db.execute(delete(Setting).where(Setting.key == gate.key, Setting.updated_by == gate.updated_by)
+                      .execution_options(synchronize_session=False)).rowcount:
+            db.execute(update(AccessRequest).where(AccessRequest.id == gate.key[7:], AccessRequest.status == "pending")
+                       .values(decision_note="Nyctr was stopped while this was being decided. Nothing was opened."))
     db.commit()
 
 

@@ -87,6 +87,10 @@ describe('Activity rows the reviews found unworded', () => {
         event('i', 'auth.sent_to_portal', {}),
         event('j', 'integration.nudged', {}),
         event('k', 'made.up_later', {}),
+        event('l', 'access.approve_failed', {
+          domain: 'shop.example',
+          why: 'Nyctr is already changing shop.example at Resolver. Nothing was opened. Try again in a moment.',
+        }),
       ],
       'GET /users': [],
       'GET /integrations': [{ id: 'source-c', name: 'Lab hypervisor' } as Integration],
@@ -114,6 +118,9 @@ describe('Activity rows the reviews found unworded', () => {
     expect(await row('Was sent to the member portal to sign in')).toBeTruthy();
     expect(await row('Started a collection when the server was asked to')).toBeTruthy();
     expect(await row('Something this version of the page cannot describe')).toBeTruthy();
+    expect(await row('Approved a request, and nothing was opened')).toContain(
+      'shop.example · Nyctr is already changing shop.example at Resolver. Nothing was opened.',
+    );
     expect(document.body.textContent).not.toMatch(/[a-z]+\.[a-z]+_|[a-z]_[a-z]|lookback/);
   });
 });

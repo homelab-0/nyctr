@@ -83,10 +83,12 @@ that address first settles it or is refused. A source that offers no such
 read gets a record Nyctr never acts on: it says Nyctr cannot tell whether it
 put the entry there, and an administrator checks and ends it.
 
-An entry Nyctr added always has an exception or a record that will remove it.
-An opening that comes back to find its claim taken over (it stood still for
-more than five minutes) stores nothing: what it may have added is on record
-and is removed, or left to the exception that now uses it. When an exception
+An entry Nyctr added has an exception or a record that will remove it, within
+the known limits listed in docs/security-model.md. An opening that comes back
+to find its claim taken over (it stood still for more than five minutes)
+stores nothing, and cannot know what became of its entry meanwhile: its
+record says so, Nyctr never acts on it, and an administrator is asked to
+check at the source and end it. When an exception
 of Nyctr's own ends while another open exception uses the entry, the duty to
 remove it passes to that one, whatever it was recorded as. Nyctr tells its
 own entry from a person's by the add's own read: the entry is Nyctr's if the
