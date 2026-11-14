@@ -123,9 +123,11 @@ export default function Briefing({
   // Open means applied at a source. A decision that changed nothing there is listed after, in the
   // words Open now uses, and never as open.
   const open = (leases.data || []).filter(isOpen);
-  const unchanged = (leases.data || []).filter(
-    (lease) => lease.status !== 'ended' && !isOpen(lease),
-  );
+  // An opening that was not confirmed is not known either way: it may be open at the source. It is
+  // listed before the decisions that changed nothing, and nothing is said to be closed over it.
+  const rest = (leases.data || []).filter((lease) => lease.status !== 'ended' && !isOpen(lease));
+  const unconfirmed = rest.filter((lease) => lease.status === 'unconfirmed');
+  const unchanged = [...unconfirmed, ...rest.filter((lease) => lease.status !== 'unconfirmed')];
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (question.trim()) askNyctr(question);
@@ -214,7 +216,9 @@ export default function Briefing({
               <div className="rows">
                 {open.length === 0 && (
                   <p className="pad muted">
-                    Nothing is open at a source. Decided here, with nothing changed there:
+                    {unconfirmed.length
+                      ? "Nothing is open on Nyctr's record. What was not confirmed below may still be open at the source."
+                      : 'Nothing is open at a source. Decided here, with nothing changed there:'}
                   </p>
                 )}
                 {[...open, ...unchanged].slice(0, 5).map((lease) => (

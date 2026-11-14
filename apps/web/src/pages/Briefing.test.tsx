@@ -283,13 +283,46 @@ describe('what the Briefing lists as open right now', () => {
     [{ execution: 'simulated' }, 'Simulated. Demo mode never contacts a source.'],
     [{ execution: 'not_applied' }, 'Not changed. Nyctr is read-only for this source.'],
     [{ execution: 'failed' }, 'The source refused the change.'],
-    [{ status: 'unconfirmed', execution: 'not_applied' }, 'Not confirmed. It may be open'],
   ] as [Partial<Lease>, string][])('never lists %o as open', async (more, words) => {
     const text = await panel([lease(more)]);
     expect(text).toContain('Nothing is open at a source.');
     expect(text).toContain(words);
     expect(text).not.toMatch(/min left|Closing|Permanent/);
   });
+
+  const unconfirmed = lease({
+    id: 'l3',
+    domain: 'slow.example',
+    status: 'unconfirmed',
+    execution: 'not_applied',
+  });
+  const MAY_BE_OPEN =
+    "Nothing is open on Nyctr's record. What was not confirmed below may still be open at the source.";
+
+  it.each([
+    ['alone', [unconfirmed]],
+    ['among decisions that changed nothing', [lease({ execution: 'simulated' }), unconfirmed]],
+  ] as [string, Lease[]][])(
+    'never says nothing changed at the source over an opening that was not confirmed, %s',
+    async (_name, leases) => {
+      mockApi({
+        'GET /overview': overview,
+        'GET /leases': leases,
+        'GET /integrations': [],
+        'GET /collection': scheduleFixture(),
+      });
+      render(<Briefing attention={[]} loading={false} />);
+      const row = (await screen.findByText('slow.example')).closest('a')!;
+      const text = row.closest('section')!.textContent!;
+      expect(row.textContent).toContain('Not confirmed. It may be open at the source.');
+      expect(text).toContain(MAY_BE_OPEN);
+      expect(text).not.toMatch(/Nothing is open at a source|nothing changed there|min left/);
+      // What may be open is listed before what changed nothing.
+      expect(text.indexOf('slow.example')).toBeLessThan(
+        leases.length > 1 ? text.indexOf('cdn.printshop.example') : Infinity,
+      );
+    },
+  );
 
   it('puts what is open first and words the rest as unchanged', async () => {
     const text = await panel([

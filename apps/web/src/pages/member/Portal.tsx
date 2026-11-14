@@ -339,6 +339,16 @@ function Home({ data }: { data: Data }) {
         </button>
       </form>
       <InlineError message={error} />
+      {/* Without the list of requests, a site already asked about looks like one that was not. */}
+      {data.requests.error && (
+        <p className="aside" role="status">
+          Nyctr could not read your requests just now, so it cannot show which of these sites you
+          have already asked about.{' '}
+          <button className="linklike" onClick={data.requests.reload}>
+            Try again
+          </button>
+        </p>
+      )}
       {found !== null &&
         (found.length ? (
           <section className="m-card">

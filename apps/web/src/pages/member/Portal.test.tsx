@@ -691,3 +691,25 @@ describe('what the member portal says happened', () => {
     },
   );
 });
+
+describe('the list of blocked sites when the requests could not be read', () => {
+  it('says it cannot show which sites were already asked about, and reads again when told to', async () => {
+    let broken = true;
+    const { user } = open({
+      'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+      'GET /requests': () =>
+        broken ? { __status: 500, detail: 'Internal Server Error' } : [request({})],
+      'GET /leases': [lease()],
+    });
+    const note = (await screen.findByText(/^Nyctr could not read your requests just now/)).closest(
+      'p',
+    )!;
+    expect(note.textContent).toContain(
+      'so it cannot show which of these sites you have already asked about.',
+    );
+    broken = false;
+    await user.click(within(note).getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/min left/)).toBeDefined();
+    expect(screen.queryByText(/could not read your requests/)).toBeNull();
+  });
+});

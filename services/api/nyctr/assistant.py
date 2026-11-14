@@ -180,16 +180,22 @@ def evidence_pack(db: Session, settings: Settings, focus: Finding | None = None)
         "their_reason": _clean(r.reason, 200),
         "risk_factors": [_clean(x.get("label")) for x in (r.risk_factors or [])[:4]]}
         for r in db.scalars(select(AccessRequest).where(AccessRequest.status == "pending").limit(15))]
-    decided = [{
-        "ref": ref("l", "lease", x.id, x.domain), "kind": "lease", "domain": _clean(x.domain, 120),
-        "type": x.kind, "decided_by": "access rule" if x.decided_by == "rule" else "administrator",
-        "provider_result": x.execution, "affects": _clean(x.scope, 120),
-        "ends": utc(x.expires_at).isoformat(timespec="minutes") if x.expires_at else "never",
-        "close_error": _clean(x.last_error) if x.last_error else None}
-        for x in db.scalars(select(Lease).where(Lease.status == "active").limit(20))]
+    def exception(x: Lease) -> dict[str, Any]:
+        return {"ref": ref("l", "lease", x.id, x.domain), "kind": "lease", "domain": _clean(x.domain, 120),
+                "type": x.kind, "decided_by": "access rule" if x.decided_by == "rule" else "administrator",
+                "provider_result": x.execution, "affects": _clean(x.scope, 120),
+                "ends": utc(x.expires_at).isoformat(timespec="minutes") if x.expires_at else "never",
+                "close_error": _clean(x.last_error) if x.last_error else None}
+
+    # Applied ones first, so the limit never leaves out an exception that is open.
+    decided = [exception(x) for x in db.scalars(select(Lease).where(Lease.status == "active").order_by(
+        Lease.execution != "applied", Lease.created_at.desc()).limit(20))]
     # Open means applied at a source. A decision that changed nothing there is listed apart and never as open.
     pack["access_open_now"] = [x for x in decided if x["provider_result"] == "applied"]
     pack["decided_not_changed_at_source"] = [x for x in decided if x["provider_result"] != "applied"]
+    # An opening that could not be confirmed is neither: it may be open at the source.
+    pack["opening_not_confirmed_may_be_open"] = [exception(x) for x in db.scalars(
+        select(Lease).where(Lease.status == "unconfirmed").order_by(Lease.created_at.desc()).limit(10))]
     passes = list(db.scalars(select(GuestPass)))
     pack["guest_devices"] = []
     for device in guest_devices(db)[:20]:
@@ -286,11 +292,15 @@ def _sample_answer(question: str, pack: dict[str, Any]) -> str:
         return (" ".join(f"{f['title']} {cite(f)}." for f in hits)
                 + " These are configuration facts from the source. They do not show that anything connected.")
     if any(w in q for w in ("open", "lease", "exception", "allow")):
-        unchanged = pack["decided_not_changed_at_source"]
+        unchanged, unsure = pack["decided_not_changed_at_source"], pack["opening_not_confirmed_may_be_open"]
+        # "Nothing is open" is said only when no opening is left unconfirmed.
         said = [f"{len(open_now)} exception{'s are' if len(open_now) != 1 else ' is'} open. " + ". ".join(
             f"{x['domain']} ({x['type']}, ends {x['ends']}) {cite(x)}" for x in open_now)
             + ". A DNS exception applies to everyone on the profile, not one person."] if open_now else [
-            "Nothing is open at a source right now."]
+            "Nothing is open on Nyctr's record." if unsure else "Nothing is open at a source right now."]
+        if unsure:
+            said.append(f"{len(unsure)} opening{'s' if len(unsure) != 1 else ''} could not be confirmed and may be "
+                        "open at the source: " + ". ".join(f"{x['domain']} {cite(x)}" for x in unsure) + ".")
         if unchanged:
             said.append(f"{len(unchanged)} decided here changed nothing at a source: " + ". ".join(
                 f"{x['domain']} ({_UNCHANGED.get(x['provider_result'], 'not changed')}) {cite(x)}"

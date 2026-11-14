@@ -146,7 +146,13 @@ TRANSPORT_FAILURES = {
 
 
 def _transport_category(error: Exception) -> str:
-    """Classify typed timeout and TLS causes without inspecting potentially secret-bearing messages."""
+    """Classify typed timeout and TLS causes without inspecting potentially secret-bearing messages.
+
+    A timeout is told first. On an HTTPS connection a read that got no answer, and a handshake that
+    never finished, end in `ssl.SSLWantReadError`, which is an `SSLError` and no certificate fault.
+    """
+    if isinstance(error, httpx.TimeoutException):
+        return "timeout"
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen and len(seen) < 12:
@@ -154,7 +160,7 @@ def _transport_category(error: Exception) -> str:
         if isinstance(current, ssl.SSLError):
             return "tls"
         current = current.__cause__ or current.__context__
-    return "timeout" if isinstance(error, httpx.TimeoutException) else "transport"
+    return "transport"
 
 
 @dataclass

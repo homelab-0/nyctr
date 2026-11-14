@@ -136,3 +136,44 @@ def test_wifi_names_that_could_not_be_read_are_told_apart_from_no_sign_in_page(c
         db.commit()
     portal = client.get("/api/guests").json()["portal"]
     assert portal["unread"] == unread and bool(portal["wifi"]) is names_read
+
+
+def exception(id_, **changes):
+    """A fabricated exception on the demo's DNS source."""
+    values = {"id": id_, "integration_id": "demo-nextdns", "domain": f"{id_}.example", "device_name": "Tablet",
+              "kind": "temporary", "execution": "simulated", "owned": True, "scope": "Everyone using Office DNS",
+              "decided_by": "rule", "risk_score": 10, "status": "active", "expires_at": utcnow()}
+    return Lease(**{**values, **changes})
+
+
+def test_an_applied_exception_is_never_left_out_of_what_the_assistant_is_told_is_open(app, client, admin_headers):
+    """The pack holds 20 decisions: the applied one comes first, however many that changed nothing are on record."""
+    with app.state.session_factory() as db:
+        for index in range(24):
+            db.add(exception(f"unchanged-{index}"))
+        db.flush()
+        db.add(exception("applied-last", execution="applied"))  # Stored last, so an unordered read of 20 misses it.
+        db.commit()
+        pack, _refs = assistant.evidence_pack(db, app.state.settings)
+    assert [x["domain"] for x in pack["access_open_now"]] == ["applied-last.example"]
+    assert len(pack["decided_not_changed_at_source"]) == 19
+
+
+def test_the_assistant_never_says_nothing_is_open_over_an_opening_that_was_not_confirmed(app, client, admin_headers):
+    """An unconfirmed opening has its own place in the pack, and the sample answer says it may be open."""
+    words = "Nyctr tried to open slow.example at 192.0.2.7 and has not confirmed it. It may be open there."
+    with app.state.session_factory() as db:
+        db.add(exception("slow", status="unconfirmed", execution="not_applied", last_error=words))
+        db.commit()
+        pack, _refs = assistant.evidence_pack(db, app.state.settings)
+    unsure = pack["opening_not_confirmed_may_be_open"]
+    assert [x["domain"] for x in unsure] == ["slow.example"]
+    assert not any(x["domain"] == "slow.example"
+                   for x in pack["access_open_now"] + pack["decided_not_changed_at_source"])
+    # Redacted like every other row: the address in the stored words does not reach a model.
+    assert "192.0.2.7" not in str(unsure) and "[removed]" in unsure[0]["close_error"]
+    answer = client.post("/api/assistant/ask", headers=admin_headers,
+                         json={"question": "What is open right now?"}).json()["answer"]
+    assert "Nothing is open at a source" not in answer
+    assert answer.startswith("Nothing is open on Nyctr's record. 1 opening could not be confirmed and may be open at "
+                             "the source: slow.example")
