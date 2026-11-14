@@ -862,3 +862,57 @@ def test_an_ending_that_finds_the_shared_entry_gone_says_so_and_a_settled_record
 
         assert sorted(asyncio.run(scenario())) == ["already_gone", "already_gone", "nothing_removed"]
         assert words(app) == ["already_gone", "already_gone", "nothing_removed"] and claims(app) == []
+
+
+def test_a_missing_secret_ends_nothing_when_another_exception_shares_the_entry(tmp_path, monkeypatch):
+    """Nyctr's own exception is ended beside one recorded as not Nyctr's while the source's secret is missing: it
+    cannot ask the source, so nothing is ended and nothing is said to be kept. With the secret back the duty is
+    passed on, and the last ending removes the entry."""
+    with started(tmp_path) as (app, _client, _member, admin):
+        source = Source(monkeypatch)
+        source.listed.append(DOMAIN)
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                for owned in (False, True):
+                    db.add(Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=owned))
+                    db.commit()
+            async with console(app, admin) as owner:
+                theirs, own = sorted((await owner.get("/api/leases")).json(), key=lambda row: row["owned"])
+                with monkeypatch.context() as patch:
+                    patch.delenv("NYCTR_CONNECTOR_SECRET_DNS")
+                    refused = await owner.post(f"/api/leases/{own['id']}/end")
+                assert refused.status_code == 502 and source.calls == [] and words(app) == []
+                assert [row[0] for row in rows(app)] == ["active", "active"]
+                with app.state.session_factory() as db:
+                    failed = db.scalars(select(Audit).where(Audit.action == "access.close_failed")).one()
+                    assert failed.details == {"domain": DOMAIN, "asked": True}
+                for lease in (own, theirs):
+                    assert (await owner.post(f"/api/leases/{lease['id']}/end")).status_code == 200
+
+        asyncio.run(scenario())
+        assert words(app) == ["kept_for_another", "removed"] and source.listed == [] and claims(app) == []
+
+
+def test_one_pass_settles_a_record_and_ends_the_exception_it_passed_the_entry_to(tmp_path, monkeypatch):
+    """A record and an exception read as not Nyctr's are both due and one pass reads both first. The entry the
+    record passes on is removed when that exception is ended in the same pass, from what is stored."""
+    with started(tmp_path) as (app, *_):
+        source = Source(monkeypatch)
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                await access.hold_entry(db, app.state.settings, db.get(Integration, "dns"), DOMAIN)  # Then killed.
+                db.add(Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=False))
+                age(app, "ending:")
+                db.execute(update(Lease).values(expires_at=utcnow() - timedelta(seconds=1)))
+                db.commit()
+                source.listed.append(DOMAIN)  # The killed copy's add had landed.
+                due = db.scalars(select(Lease).order_by(Lease.status.desc())).all()  # As a pass reads them: all first.
+                assert [row.status for row in due] == ["unconfirmed", "active"]
+                for row in due:  # The record first, then the exception from the copy read before that.
+                    assert await access.end_lease(db, app.state.settings, row, "expired")
+                    db.commit()
+
+        asyncio.run(scenario())
+        assert words(app) == ["kept_for_another", "removed"] and source.listed == [] and claims(app) == []

@@ -135,7 +135,9 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   limits. From the moment a record is listed as not confirmed until it is
   settled, Nyctr takes an entry for that address at that source to be its own
   and removes it: an administrator must not add the address there by hand while
-  Open now lists it as not confirmed, and the row says so. Nyctr keeps no such
+  Open now lists it as not confirmed, and the row says so. An entry added by
+  hand meanwhile may also be handed to another open exception for that address
+  and removed later, when that exception ends, after the row is gone. Nyctr keeps no such
   record when the add itself reports that nothing was sent. It does keep one
   when it cannot know: after a copy is killed between storing the record and
   the add's answer, the record lives five minutes, and an entry a person adds

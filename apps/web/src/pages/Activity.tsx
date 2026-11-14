@@ -133,7 +133,7 @@ const APPLIED: Record<string, string> = {
 const LEFT_ALONE = 'already allowed at the source, left as it was';
 /** A failure is any error: the source may have refused, not answered, or never been asked. */
 const FAILED: Record<string, string> = {
-  'access.open_unconfirmed': 'the source did not confirm it, so it may be open there',
+  'access.open_unconfirmed': 'the opening could not be confirmed, so it may be open there',
   'access.open_undone': 'could not be taken back out, so remove it at the source by hand',
   'guest.pass_undone': 'could not be ended, so end it at the source by hand',
 };
@@ -143,8 +143,10 @@ function outcome(event: AuditEvent) {
   const d = event.details || {};
   if (event.action === 'access.close_failed')
     return d.record === true
-      ? 'the source could not be reached, so it stays listed as not confirmed'
-      : 'could not be removed at the source, so it is still open';
+      ? 'could not be checked or removed at the source, so it stays listed as not confirmed'
+      : d.asked === true
+        ? 'the source could not be asked whether the entry is there, so nothing was ended and it is still open'
+        : 'could not be removed at the source, so it is still open';
   if (d.execution === 'simulated') return 'simulated, nothing was sent to the source';
   if (d.execution === 'failed') return FAILED[event.action] || 'did not go through';
   // For an opening that was never confirmed, the record does say what closing it did at the source.

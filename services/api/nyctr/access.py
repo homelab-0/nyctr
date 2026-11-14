@@ -593,11 +593,14 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
         key = _secret(integration) if integration else None
         opener = _opener(integration)
-        if others and key and getattr(opener, "domain_listed", None):
+        asked = False  # Whether what failed was the question before passing on, not a removal.
+        if others and not key:  # The source cannot be asked: as a read that failed, nothing is ended.
+            asked, failure = True, "The source's secret is not configured on the server."
+        elif others and getattr(opener, "domain_listed", None):
             try:
                 there = await opener.domain_listed(integration.config, key, lease.domain)
             except IntegrationError as error:
-                there, failure = False, str(error)
+                there, asked, failure = False, True, str(error)
             except BaseException:  # Stopped mid-call: give the claim back so the next start can end it.
                 release_entry(db, claim)
                 raise
@@ -626,7 +629,8 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         raise BeingEnded
     if failure:
         lease.last_error = lease.last_error if unconfirmed else failure
-        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain, **({"record": True} if unconfirmed else {}))
+        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain,
+              **({"record": True} if unconfirmed else {}), **({"asked": True} if claim and asked else {}))
         return False
     if not still_open(db, lease.id):
         db.refresh(lease)

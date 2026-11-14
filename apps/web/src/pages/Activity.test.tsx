@@ -217,7 +217,7 @@ describe('Activity rows about a change at a source', () => {
       'left.example · already allowed at the source, left as it was',
     );
     expect(about('unsure.example')).toBe(
-      'unsure.example · the source did not confirm it, so it may be open there',
+      'unsure.example · the opening could not be confirmed, so it may be open there',
     );
     // A record kept before the ending recorded its word says it from the outcome; later ones from the word.
     expect(about('undone.example')).toBe('undone.example · removed at the source');
@@ -226,7 +226,7 @@ describe('Activity rows about a change at a source', () => {
       'handed.example · left at the source, another open exception still needs it',
     );
     expect(about('trying.example')).toBe(
-      'trying.example · the source could not be reached, so it stays listed as not confirmed',
+      'trying.example · could not be checked or removed at the source, so it stays listed as not confirmed',
     );
     // Never "Access closed" or "could not be closed" for something that was never access.
     const named = (domain: string) =>
@@ -274,6 +274,20 @@ describe('Activity rows about a change at a source', () => {
     );
     expect(document.body.textContent).not.toMatch(/changed at the source ·|the source refused/);
     expect(document.body.textContent).toContain('a sign-in that failed');
+  });
+});
+
+describe('Activity for an ending that could not ask the source', () => {
+  it('says no removal was tried, only that nothing was ended', async () => {
+    mockApi({
+      'GET /audit': [event('a', 'access.close_failed', { domain: 'unasked.example', asked: true })],
+      'GET /users': [],
+      'GET /integrations': [],
+    });
+    render(<Activity />);
+    expect((await screen.findByText(/^unasked\.example · /)).textContent).toBe(
+      'unasked.example · the source could not be asked whether the entry is there, so nothing was ended and it is still open',
+    );
   });
 });
 
