@@ -757,11 +757,9 @@ def create_app(settings: Settings | None = None):
             access.release_entry(db, claim, unstored=opened)
             if isinstance(error, access.SourceGone):
                 error.record(db)  # the request stays waiting; what was done at the source is kept
-            known = isinstance(error, (IntegrationError, HTTPException))
-            words = str(error) if isinstance(error, IntegrationError) else getattr(error, "detail", None) if known \
-                else "Nyctr met an error. Nothing was recorded as opened."
-            access.end_review(db, gate, f"An approval did not go through, so this is still waiting. {words}"
-                              if approving else None)
+            # The person who asked reads this note: it says nothing of the source or the reason. The
+            # administrator is told those in the answer to their own click.
+            access.end_review(db, gate, access.NOT_OPENED if approving else None)
             if not isinstance(error, IntegrationError):
                 raise
             refused = isinstance(error, (access.SourceGone, access.NotCollected, access.EntryBusy))

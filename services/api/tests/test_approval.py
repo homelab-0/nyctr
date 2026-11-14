@@ -7,6 +7,7 @@ claim or the removal of the source can arrive in the middle of an opening.
 import asyncio
 from datetime import timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select, update
 from test_crossing import DOMAIN, Source, ask, claims, console, started
@@ -14,7 +15,7 @@ from test_unconfirmed import Failing, rows, trail
 from test_upkeep import Sources, opened, upkeep
 
 from nyctr import access
-from nyctr.integrations import IntegrationError, actions
+from nyctr.integrations import IntegrationError, actions, core
 from nyctr.models import AccessRequest, Integration, Lease, Observation, Setting, utcnow
 
 GONE = {"name": "Office DNS"}
@@ -86,8 +87,7 @@ def test_an_approval_that_cannot_be_stored_or_whose_copy_is_killed_leaves_the_re
                 with monkeypatch.context() as patch, pytest.raises(RuntimeError):
                     patch.setattr("nyctr.main.audit", broken)
                     await review(owner, made)
-                assert note(app, made) == ("pending", "An approval did not go through, so this is still waiting. "
-                                                      "Nyctr met an error. Nothing was recorded as opened.")
+                assert note(app, made) == ("pending", access.NOT_OPENED)  # Nothing of the source or the reason.
                 assert gates(app) == [] and claims(app) == [] and source.listed == [DOMAIN]
                 assert rows(app) == [("unconfirmed", None, True)]
                 up, now[0] = upkeep(app, now), utcnow() + timedelta(seconds=1)
@@ -103,7 +103,7 @@ def test_an_approval_that_cannot_be_stored_or_whose_copy_is_killed_leaves_the_re
                 age(app, "review:")
                 up.tick()
                 await up.stop()
-                assert gates(app) == [] and "Nyctr was stopped while" in note(app, made)[1]
+                assert gates(app) == [] and "Nyctr was stopped while this was being decided" in note(app, made)[1]
                 assert (await review(owner, made, "denied")).status_code == 200
 
         asyncio.run(scenario())
@@ -140,7 +140,8 @@ def test_a_source_removed_while_an_opening_waits_is_refused_as_removed_and_leave
                 assert answer.status_code == (201 if by_rule else 409)
                 assert "was removed from Nyctr while" in (answer.json().get("detail") or answer.json()["decision_note"])
                 status, why = note(app, made)
-                assert status == "pending" and "was removed from Nyctr while" in why
+                assert status == "pending" and (
+                    "was removed from Nyctr while" in why if by_rule else why == access.NOT_OPENED)
 
         asyncio.run(scenario())
         assert source.calls == [] and claims(app) == [] and gates(app) == [] and rows(app) == []
@@ -171,7 +172,7 @@ def test_an_opening_whose_claim_was_taken_over_stores_nothing_on_trust(tmp_path,
                 source.go.set()
                 late = await stalled
                 assert late.status_code == 409 and "took too long" in late.json()["detail"]
-                assert note(app, one)[0] == "pending" and "took too long" in note(app, one)[1]
+                assert note(app, one) == ("pending", access.NOT_OPENED)
 
         asyncio.run(scenario())
         assert claims(app) == [] and gates(app) == []
@@ -356,3 +357,190 @@ def test_a_decision_stored_just_before_the_requests_claim_is_taken_is_left_alone
 
         assert asyncio.run(scenario()) == "denied"
         assert source.calls == [] and rows(app) == [] and gates(app) == [] and claims(app) == []
+
+
+@pytest.mark.parametrize("first", ["own", "other"])
+def test_one_pass_that_ends_both_exceptions_of_an_entry_removes_it_whichever_comes_first(tmp_path, monkeypatch,
+                                                                                        first):
+    """Both run out together and one pass reads both before it ends either (the list of exceptions): the duty
+    passed on while ending Nyctr's own is seen when the other is ended, and the entry is removed once."""
+    with started(tmp_path) as (app, *_):
+        source, past = Source(monkeypatch), utcnow() - timedelta(seconds=1)
+        source.listed.append(DOMAIN)
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                for owned in ((True, False) if first == "own" else (False, True)):
+                    db.add(Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=owned, expires_at=past))
+                    db.commit()
+                assert [row.owned for row in db.scalars(select(Lease))] == [first == "own", first != "own"]
+                assert await access.reconcile(db, app.state.settings) == 2
+
+        asyncio.run(scenario())
+        assert source.calls == ["GET", "DELETE", "GET"] and source.listed == [] and claims(app) == []
+        assert [row[0] for row in rows(app)] == ["ended", "ended"]
+
+
+@pytest.mark.parametrize("moment", ["passed on while ending", "ended while claiming"])
+def test_an_ending_acts_on_what_is_stored_when_another_copy_changes_it_in_the_middle(tmp_path, monkeypatch, moment):
+    """Another copy passes the duty to an exception this copy is ending as "not Nyctr's": it is ended as Nyctr's
+    own and the entry removed. Another copy ends the exception this one is about to end, and a person's entry
+    then backs a new exception: nothing is passed on to it, and the person's entry is never removed."""
+    with started(tmp_path) as (app, *_):
+        source, past = Source(monkeypatch), utcnow() - timedelta(seconds=1)
+        source.listed.append(DOMAIN)
+        mine = opened(app, [], DOMAIN, past)
+
+        def other_copy(change):
+            with app.state.session_factory() as db:
+                change(db)
+                db.commit()
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                lease = db.get(Lease, mine)
+                if moment == "passed on while ending":
+                    lease.owned, real = False, access.still_open
+                    db.commit()
+
+                    def passed_on_first(session, key):
+                        session.commit()  # Nothing is unsaved here; SQLite lets the other copy write only then.
+                        other_copy(lambda other: other.execute(update(Lease).values(owned=True)))
+                        return real(session, key)
+                    monkeypatch.setattr(access, "still_open", passed_on_first)
+                else:
+                    real = access._claim_entry
+
+                    def ended_first(session, entry):  # The other copy ended it; the entry now there is a person's.
+                        other_copy(lambda other: (other.execute(update(Lease).values(status="ended")), other.add(
+                            Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=False))))
+                        return real(session, entry)
+                    monkeypatch.setattr(access, "_claim_entry", ended_first)
+                assert await access.end_lease(db, app.state.settings, lease, "expired")
+                db.commit()
+
+        asyncio.run(scenario())
+        if moment == "passed on while ending":
+            assert source.calls == ["GET", "DELETE", "GET"] and source.listed == []
+        else:
+            assert source.calls == [] and source.listed == [DOMAIN] and rows(app)[-1] == ("active", None, False)
+        assert claims(app) == []
+
+
+@pytest.mark.parametrize("person", ["removes", "adds"])
+def test_a_store_that_fails_after_the_source_answered_goes_by_what_the_add_itself_found(tmp_path, monkeypatch, person):
+    """Between Nyctr's question and the add's own read a person removes the address (the add adds it: Nyctr's, on
+    record, removed) or adds it (the add finds it there and sends nothing: no record, never removed)."""
+    with started(tmp_path) as (app, _client, member, admin):
+        source, now = Source(monkeypatch), [utcnow()]
+        source.listed.extend([DOMAIN] * (person == "removes"))
+        real = source.answer
+
+        async def answer(request):
+            if len(source.calls) == 1:
+                source.listed[:] = [] if person == "removes" else [DOMAIN]
+            return await real(request)
+        source.answer = answer
+
+        def broken(*_args, **_more):
+            raise RuntimeError("fabricated storage failure")
+
+        async def scenario():
+            Sources(monkeypatch)
+            async with console(app, member) as sam, console(app, admin) as owner:
+                made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                with monkeypatch.context() as patch, pytest.raises(RuntimeError):
+                    patch.setattr("nyctr.main.audit", broken)
+                    await review(owner, made)
+                assert rows(app) == ([("unconfirmed", None, True)] if person == "removes" else [])
+                up, now[0] = upkeep(app, now), utcnow() + access.ENDING_HOLD + timedelta(seconds=1)
+                up.tick()
+                await asyncio.gather(*up.ending.values())
+                await up.stop()
+
+        asyncio.run(scenario())
+        if person == "removes":
+            assert source.calls == ["GET", "GET", "POST", "GET", "GET", "DELETE", "GET"] and source.listed == []
+        else:
+            assert source.calls == ["GET", "GET"] and source.listed == [DOMAIN] and rows(app) == []
+        assert claims(app) == [] and gates(app) == []
+
+
+@pytest.mark.parametrize("by_rule", [False, True])
+def test_a_decision_by_a_copy_that_does_not_know_the_claim_while_the_opening_is_at_the_source_stands(
+        tmp_path, monkeypatch, by_rule):
+    """An older copy denies the request while the add is at the source. The final write finds it decided: nothing
+    is stored over the denial, and what was added stays on record and is removed."""
+    with started(tmp_path, rule=by_rule) as (app, _client, member, admin):
+        source = Source(monkeypatch, hold=(2, "after"))
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                if by_rule:
+                    opening = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
+                else:
+                    made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
+                    opening = asyncio.create_task(review(owner, made))
+                await asyncio.wait_for(source.reached.wait(), 5)
+                with app.state.session_factory() as db:
+                    db.execute(update(AccessRequest).values(status="denied"))
+                    db.commit()
+                source.go.set()
+                answer = await opening
+                assert (answer.json()["status"] == "denied") if by_rule else (
+                    answer.status_code == 409 and "already been reviewed" in answer.json()["detail"])
+                assert rows(app) == [("unconfirmed", None, True)] and source.listed == [DOMAIN]
+                with app.state.session_factory() as db:
+                    assert await access.reconcile(db, app.state.settings) == 1 and db.scalar(
+                        select(AccessRequest.status)) == "denied"
+
+        asyncio.run(scenario())
+        assert source.listed == [] and rows(app) == [("ended", "not_confirmed", True)]
+        assert claims(app) == [] and gates(app) == []
+
+
+def test_a_turn_that_does_not_come_is_said_as_that_and_not_as_a_failure_of_the_source(tmp_path, monkeypatch):
+    """The person's earlier automatic openings are still going when the wait runs out: a person decides, and the
+    note says why. Nothing is sent and nothing is left held."""
+    with started(tmp_path, rule=True) as (app, _client, member, _admin):
+        source, real = Source(monkeypatch), access._claim
+        monkeypatch.setattr(access, "OPENING_WAITS", 0.3)
+        monkeypatch.setattr(access, "_claim", lambda db, name: db.rollback() if name.startswith(
+            "ending:auto:") else real(db, name))
+
+        async def scenario():
+            async with console(app, member) as sam:
+                return (await sam.post("/api/requests", json=ask("one"))).json()
+
+        made = asyncio.run(scenario())
+        assert made["status"] == "pending" and made["risk_score"] is not None
+        assert made["decision_note"] == "Nyctr was still opening your earlier requests, so a person decides this one."
+        assert source.calls == [] and rows(app) == [] and gates(app) == [] and claims(app) == []
+
+
+@pytest.mark.parametrize("failure, sent", [("no connection", False), ("refused before sending", False),
+                                           ("the source answers 500", True), ("the read-back fails", True),
+                                           ("its own read fails", None)])
+def test_the_add_marks_its_error_only_when_its_add_was_sent(monkeypatch, failure, sent):
+    """Sent after its own read found the address absent: marked. Never left, or failed before that: not."""
+    source = Source(monkeypatch)
+    real = source.answer
+
+    async def answer(request):
+        call = len(source.calls)
+        if failure == "no connection" and call == 1:
+            raise httpx.ConnectError("fabricated: no connection", request=request)
+        reply = await real(request)
+        return httpx.Response(500) if call == {"the source answers 500": 1, "the read-back fails": 2,
+                                               "its own read fails": 0}.get(failure) else reply
+    source.answer = answer
+    if failure == "refused before sending":
+        monkeypatch.setattr(core, "MAX_REQUESTS", 1)
+
+    async def add():
+        with pytest.raises(IntegrationError) as error:
+            await actions.nextdns_allow({"profile_id": "abc123"}, "key", "slow.example", allowed=True)
+        return getattr(error.value, "add_sent", None)
+
+    assert asyncio.run(add()) is sent
+    assert source.calls.count("POST") == (1 if sent else 0) and (source.listed == ["slow.example"]) == bool(sent)

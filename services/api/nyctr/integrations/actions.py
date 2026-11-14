@@ -26,6 +26,8 @@ import functools
 import re
 from typing import Any
 
+import httpx
+
 from . import core
 from .core import IntegrationError, ReadClient, exchange, offset_pages
 
@@ -94,6 +96,16 @@ async def _allowlist(reader: ReadClient, profile: str) -> dict[str, bool]:
     return {str(x.get("id", "")).lower(): bool(x.get("active", True)) for x in rows}
 
 
+def _never_left(error: BaseException) -> bool:
+    """Whether a request that failed is known never to have been sent: refused before sending, or no connection.
+
+    `exchange` raises its own error in place of the transport's, which stays as the context. A request cut
+    off or stopped while it was going is not known either way, so it counts as sent.
+    """
+    return isinstance(error, core.BudgetExceeded) or isinstance(
+        error.__context__, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol))
+
+
 @_limited
 async def nextdns_listed(config: dict[str, Any], api_key: str, domain: str) -> bool:
     """Say whether a domain is on the profile allowlist, switched on or off. A read: it changes nothing."""
@@ -118,13 +130,15 @@ async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, al
             return {"owned": False, "verified": True}
         if name in before:
             raise IntegrationError("That domain is on the allowlist but switched off. Nyctr will not change it.")
+        sent = False
         try:
             await exchange(reader, "POST", f"/profiles/{profile}/allowlist", body={"id": name, "active": True})
+            sent = True
             after = await _allowlist(reader, profile)
             if after.get(name) is not True:
                 raise IntegrationError("NextDNS accepted the request but the domain is not on the allowlist.")
-        except BaseException as error:  # Its own read found the address absent and its add was sent: say so.
-            error.add_sent = True
+        except BaseException as error:  # Its own read found the address absent: say whether its add was sent.
+            error.add_sent = sent or not _never_left(error)
             raise
         return {"owned": True, "verified": True}
 
