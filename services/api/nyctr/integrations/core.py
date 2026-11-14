@@ -32,10 +32,18 @@ PAGE_SIZE = 200
 class IntegrationError(Exception):
     """A safe error with a fixed diagnostic category and no provider response content."""
 
-    def __init__(self, message: str, *, category: str = "provider_contract"):
-        """Retain a sanitized collector message and classify failure without parsing its text."""
+    def __init__(self, message: str, *, category: str = "provider_contract", transient: bool = False,
+                 retry_after: int | None = None):
+        """Retain a sanitized collector message and classify failure without parsing its text.
+
+        `transient` marks a server error at the source, which may pass by waiting; its
+        category is unchanged, so optional reads and diagnostics treat it as before.
+        `retry_after` is the wait in seconds a rate-limited source asked for, if it said.
+        """
         super().__init__(message)
         self.category = category
+        self.transient = transient
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -291,6 +299,20 @@ class BudgetExceeded(IntegrationError):
     """
 
 
+MAX_RETRY_AFTER = 3600
+RETRY_AFTER_SECONDS = re.compile(r"[0-9]{1,9}")
+
+
+def _retry_after(value: str | None) -> int | None:
+    """Read a Retry-After wait given in seconds, capped at an hour.
+
+    Never raises: a 429 is a rate limit whatever its header says, and a date,
+    a non-ASCII digit or an overlong number only means no wait is known.
+    """
+    seconds = value.strip() if value is not None else ""
+    return min(int(seconds), MAX_RETRY_AFTER) if RETRY_AFTER_SECONDS.fullmatch(seconds) else None
+
+
 def must_stop(error: IntegrationError) -> bool:
     """Say whether an error on an optional read must fail the collection instead of becoming a gap.
 
@@ -349,9 +371,11 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
                 raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
                                        category="authentication")
             if response.status_code == 429:
-                raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit")
+                raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit",
+                                       retry_after=_retry_after(response.headers.get("retry-after")))
             if response.status_code >= 400:
-                raise IntegrationError(f"Provider returned HTTP {response.status_code}.")
+                raise IntegrationError(f"Provider returned HTTP {response.status_code}.",
+                                       transient=response.status_code >= 500)
             chunks: list[bytes] = []
             size = 0
             async for chunk in response.aiter_bytes():

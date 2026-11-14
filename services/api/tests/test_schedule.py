@@ -145,8 +145,8 @@ def test_a_saved_change_applies_at_the_next_upkeep_pass_without_a_restart(tmp_pa
         assert tick(app, start + timedelta(days=2)) is True and len(asked) == 8
 
 
-def test_a_failing_source_is_not_retried_before_the_next_scheduled_time(tmp_path, monkeypatch):
-    """The run is recorded before sources are contacted, so one failure does not collect on every pass."""
+def test_a_source_failing_for_an_unknown_reason_is_not_retried_before_the_next_scheduled_time(tmp_path, monkeypatch):
+    """The run is recorded before sources are contacted, and a fault that may not pass gets no retry."""
     fake_sources(monkeypatch)
     attempts = []
 

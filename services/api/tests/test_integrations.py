@@ -353,7 +353,7 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
         {"name": "Home Guest", "enabled": True, "captive_portal": True, "network_id": "network-one"}]
 
 
-def unifi_guests(monkeypatch, sites, guests_per_site, *, detail_status=200, voucher_status=200):
+def unifi_guests(monkeypatch, sites, guests_per_site, *, detail_status=200, voucher_status=200, voucher_headers=None):
     """Serve a synthetic UniFi with guest clients on every site and count the detail reads."""
     monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "unifi.example")
 
@@ -372,7 +372,7 @@ def unifi_guests(monkeypatch, sites, guests_per_site, *, detail_status=200, vouc
                 "type": "GUEST", "authorized": True,
                 "authorization": {"authorizationMethod": "VOUCHER", "authorizedAt": "2026-07-02T11:00:00Z"}}})
         if rest == "hotspot/vouchers":
-            return httpx.Response(voucher_status, json=unifi_page([]))
+            return httpx.Response(voucher_status, headers=voucher_headers or {}, json=unifi_page([]))
         return httpx.Response(200, json=unifi_page([]))
 
     calls = mock_client(monkeypatch, handler)
@@ -399,10 +399,13 @@ def test_a_spent_request_budget_fails_the_collection_instead_of_posing_as_a_miss
         run()
 
 
-@pytest.mark.parametrize("status, stops", [(429, True), (403, False), (404, False)])
-def test_optional_reads_stop_on_a_rate_limit_but_record_a_gap_when_unavailable(monkeypatch, status, stops):
-    """A rate limit must end the collection; a read this key or site lacks is only a gap."""
-    _calls, run = unifi_guests(monkeypatch, sites=1, guests_per_site=1, voucher_status=status)
+@pytest.mark.parametrize("status, stops, headers", [
+    (429, True, {}), (429, True, {"Retry-After": "\u00b2".encode()}), (429, True, {"Retry-After": "9" * 5000}),
+    (403, False, {}), (404, False, {}), (503, False, {})])
+def test_optional_reads_stop_on_a_rate_limit_but_record_a_gap_when_unavailable(monkeypatch, status, stops, headers):
+    """A rate limit must end the collection, whatever its wait header says; a read this key lacks is a gap."""
+    _calls, run = unifi_guests(monkeypatch, sites=1, guests_per_site=1, voucher_status=status,
+                               voucher_headers=headers)
     if stops:
         with pytest.raises(IntegrationError) as caught:
             run()
@@ -410,6 +413,25 @@ def test_optional_reads_stop_on_a_rate_limit_but_record_a_gap_when_unavailable(m
     else:
         snapshot = run()
         assert "hotspot_vouchers:read" not in snapshot.capabilities and len(snapshot.resources) == 2
+
+
+@pytest.mark.parametrize("status, headers, category, transient, wait", [
+    (503, {}, "provider_contract", True, None), (500, {}, "provider_contract", True, None),
+    (404, {}, "provider_contract", False, None), (429, {"Retry-After": "120"}, "rate_limit", False, 120),
+    (429, {"Retry-After": "86400"}, "rate_limit", False, 3600),
+    (429, {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, "rate_limit", False, None),
+    (429, {"Retry-After": "\u00b2".encode()}, "rate_limit", False, None),
+    (429, {"Retry-After": "9" * 5000}, "rate_limit", False, None),
+    (429, {}, "rate_limit", False, None)])
+def test_a_server_error_may_pass_and_a_rate_limit_keeps_its_wait_in_seconds(
+        monkeypatch, status, headers, category, transient, wait):
+    """A 5xx keeps its category and plain message; only Retry-After in seconds is read, capped at an hour."""
+    mock_client(monkeypatch, lambda request: httpx.Response(status, headers=headers, text="secret-bearing body"))
+    with pytest.raises(IntegrationError) as caught:
+        run_nextdns()
+    error = caught.value
+    assert (error.category, error.transient, error.retry_after) == (category, transient, wait)
+    assert "secret" not in str(error) and (status != 503 or str(error) == "Provider returned HTTP 503.")
 
 
 def test_repeated_offset_page_is_rejected(monkeypatch):
