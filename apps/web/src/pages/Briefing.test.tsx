@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
-import type { AttentionItem, CollectionSchedule, Integration, Overview } from '../types';
+import type { AttentionItem, CollectionSchedule, Integration, Lease, Overview } from '../types';
 import Briefing from './Briefing';
 
 const overview: Overview = {
@@ -243,5 +243,71 @@ describe('Briefing counts', () => {
     );
     // No mixed total and no fixed window.
     expect(lede.textContent).not.toMatch(/1,?294|items|last day/);
+  });
+});
+
+describe('what the Briefing lists as open right now', () => {
+  const lease = (more: Partial<Lease>) =>
+    ({
+      id: 'l1',
+      domain: 'cdn.printshop.example',
+      kind: 'temporary',
+      status: 'active',
+      execution: 'applied',
+      owned: true,
+      risk_score: 20,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 58 * 60_000).toISOString(),
+      last_error: null,
+      ...more,
+    }) as Lease;
+  const panel = async (leases: Lease[]) => {
+    mockApi({
+      'GET /overview': overview,
+      'GET /leases': leases,
+      'GET /integrations': [],
+      'GET /collection': scheduleFixture(),
+    });
+    render(<Briefing attention={[]} loading={false} />);
+    await screen.findByText('cdn.printshop.example');
+    return screen.getByRole('heading', { name: 'Open right now' }).closest('section')!.textContent!;
+  };
+
+  it('lists an exception applied at a source as open, with its time left', async () => {
+    const text = await panel([lease({})]);
+    expect(text).toContain('58 min left');
+    expect(text).not.toContain('Nothing is open');
+  });
+
+  it.each([
+    [{ execution: 'simulated' }, 'Simulated. Demo mode never contacts a source.'],
+    [{ execution: 'not_applied' }, 'Not changed. Nyctr is read-only for this source.'],
+    [{ execution: 'failed' }, 'The source refused the change.'],
+    [{ status: 'unconfirmed', execution: 'not_applied' }, 'Not confirmed. It may be open'],
+  ] as [Partial<Lease>, string][])('never lists %o as open', async (more, words) => {
+    const text = await panel([lease(more)]);
+    expect(text).toContain('Nothing is open at a source.');
+    expect(text).toContain(words);
+    expect(text).not.toMatch(/min left|Closing|Permanent/);
+  });
+
+  it('puts what is open first and words the rest as unchanged', async () => {
+    const text = await panel([
+      lease({ id: 'l2', domain: 'docs.example', execution: 'not_applied' }),
+      lease({}),
+    ]);
+    expect(text.indexOf('cdn.printshop.example')).toBeLessThan(text.indexOf('docs.example'));
+    expect(text).not.toContain('Nothing is open');
+  });
+});
+
+describe('a source in the demonstration', () => {
+  it('is sample data, never collected a moment ago', async () => {
+    const rows = await open([source('fine', 'connected')], scheduleFixture({ source: 'demo' }));
+    expect(rows.get('fine')!.textContent).toContain('Sample data is not collected');
+    expect(rows.get('fine')!.textContent).not.toMatch(/Collected|just now|ago/);
+    cleanup();
+    const live = await open([source('real', 'connected')]);
+    expect(live.get('real')!.textContent).toContain('Collected 5 min ago');
   });
 });

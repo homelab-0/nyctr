@@ -5,7 +5,7 @@ import { setCsrfToken } from '../api';
 import { AuthProvider } from '../auth';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
-import type { GuestOverview, User } from '../types';
+import type { GuestOverview, GuestStanding, User } from '../types';
 import Guests from './Guests';
 
 const admin: User = {
@@ -255,5 +255,77 @@ describe('guests', () => {
       hits: 4,
       minutes: 5,
     });
+  });
+});
+
+describe('a guest state said as the record has it', () => {
+  const withState = (standing: GuestStanding) => {
+    const data = overview('enabled');
+    data.devices[0] = { ...data.devices[0], ...standing };
+    open('enabled', { 'GET /guests': data });
+  };
+  /** The state chips on the page: one in the list and one on the device's panel. */
+  const chips = () =>
+    [...document.querySelectorAll('.tag')]
+      .map((item) => item.textContent)
+      .filter((text) => !/sign-in page (on|off)|No sign-in/i.test(text || ''));
+
+  it.each([
+    [{ state: 'cut', simulated: false }, 'Cut off'],
+    [{ state: 'locked', simulated: false }, 'Locked out'],
+    [{ state: 'online', simulated: false }, 'Online'],
+    [{ state: 'cut', simulated: true }, 'Simulated: cut off'],
+    [{ state: 'locked', simulated: true }, 'Simulated: locked out'],
+    [{ state: 'online', simulated: true }, 'Simulated: let on'],
+  ] as [GuestStanding, string][])('says %o as "%s"', async (standing, words) => {
+    withState(standing);
+    await screen.findByRole('heading', { name: 'Visitor phone' });
+    expect(chips()).toEqual([words, words]);
+  });
+
+  it.each([
+    ['not_applied', 'Decided to cut off, not changed at the source'],
+    ['failed', 'Tried to cut off, it did not go through'],
+  ] as const)('leaves a device online and says the cut-off was %s', async (execution, words) => {
+    withState({ state: 'online', simulated: false, attempt: { action: 'cut', execution } });
+    await screen.findByRole('heading', { name: 'Visitor phone' });
+    expect(chips()).toEqual(['Online', 'Online']);
+    expect(screen.getAllByText(words)).toHaveLength(2);
+    expect(document.body.textContent).not.toMatch(/Simulated|Cut off\b(?! )/);
+  });
+});
+
+describe('choosing a guest on a narrow screen', () => {
+  const rect = Element.prototype.getBoundingClientRect;
+  const into = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+  afterEach(() => {
+    Element.prototype.getBoundingClientRect = rect;
+    if (into) Object.defineProperty(Element.prototype, 'scrollIntoView', into);
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+  /** Opens the page with nobody chosen and the panel column `top` pixels down the screen. */
+  const choose = async (top: number) => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    Element.prototype.getBoundingClientRect = () => ({ top }) as DOMRect;
+    mockApi({ 'GET /auth/me': admin, 'GET /guests': overview('enabled') });
+    render(
+      <AuthProvider>
+        <Guests params={new URLSearchParams()} onChange={() => {}} />
+      </AuthProvider>,
+    );
+    await userEvent.click(await screen.findByRole('button', { name: 'Visitor phone' }));
+    await screen.findByRole('heading', { name: 'Visitor phone' });
+    return scrolled;
+  };
+
+  it('brings the panel into view when it sits far below the list', async () => {
+    const scrolled = await choose(2350);
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect((scrolled.mock.contexts[0] as HTMLElement).className).toContain('into-view');
+  });
+
+  it('leaves the page where it is when the panel is already in view', async () => {
+    expect(await choose(120)).not.toHaveBeenCalled();
   });
 });

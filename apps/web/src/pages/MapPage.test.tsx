@@ -299,3 +299,43 @@ describe('what a full square on the Map could not draw', () => {
     }
   });
 });
+
+describe('a guest on the Map', () => {
+  const guestOn = (id: string, name: string, guest_state: Resource['guest_state']): Resource => ({
+    ...thing(id, 'client', name),
+    attributes: { guest: { authorized: guest_state?.state === 'online' } },
+    guest_state,
+  });
+  const card = (name: RegExp) => screen.getByRole('button', { name });
+
+  it('never draws or labels one waiting on the sign-in page as cut off', async () => {
+    await show({
+      nodes: [
+        guestOn('wait', 'Waiting phone', { state: 'waiting', simulated: false }),
+        guestOn('cut', 'Cut phone', { state: 'cut', simulated: false }),
+        guestOn('lock', 'Locked phone', { state: 'locked', simulated: false }),
+        guestOn('demo', 'Demo phone', { state: 'cut', simulated: true }),
+        guestOn('on', 'Online phone', { state: 'online', simulated: false }),
+      ],
+      edges: [],
+    });
+    const waiting = card(/^Waiting phone, Device, from .*, On the sign-in page$/);
+    expect(waiting.querySelector('.sub')!.textContent).toBe('On the sign-in page');
+    expect(waiting.classList.contains('off')).toBe(false);
+    expect(waiting.querySelector('.pin')).toBeNull();
+    // "Cut off" is kept for a device that was cut off at the source.
+    const cut = card(/^Cut phone, .*, Cut off$/);
+    expect(cut.querySelector('.sub')!.textContent).toBe('Cut off');
+    expect(cut.classList.contains('off')).toBe(true);
+    expect(cut.querySelector('.pin')).toBeTruthy();
+    expect(card(/^Locked phone, .*, Locked out$/).classList.contains('off')).toBe(true);
+    const simulated = card(/^Demo phone, .*, Simulated: cut off$/);
+    expect(simulated.classList.contains('off')).toBe(false);
+    expect(card(/^Online phone, Device, from [^,]*$/).querySelector('.sub')!.textContent).toBe(
+      'Device',
+    );
+    fireEvent.click(waiting);
+    expect(within(panel()!).getByText('On the sign-in page')).toBeTruthy();
+    expect(panel()!.textContent).not.toContain('No access');
+  });
+});

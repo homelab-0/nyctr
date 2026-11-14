@@ -589,3 +589,102 @@ describe('member portal', () => {
     }
   });
 });
+
+describe('what the member portal says happened', () => {
+  it.each([
+    ['the server failing', () => ({ __status: 500, detail: 'Internal Server Error' })],
+    [
+      'the connection dropping',
+      () => {
+        throw new TypeError('Failed to fetch');
+      },
+    ],
+  ])(
+    'never says nothing was asked for when the list could not be read, with %s',
+    async (_n, fail) => {
+      let broken = true;
+      const { user } = open(
+        { 'GET /requests': () => (broken ? fail() : [request({})]) },
+        '/requests',
+      );
+      const retry = await screen.findByRole('button', { name: 'Try again' });
+      expect(document.body.textContent).not.toContain('You have not asked for anything yet');
+      broken = false;
+      await user.click(retry);
+      expect(await screen.findByText('photos.example')).toBeDefined();
+    },
+  );
+
+  it('never shows an outcome for a request when the lists could not be read', async () => {
+    open(
+      { 'GET /requests': [request({})], 'GET /leases': { __status: 500, detail: 'Unavailable' } },
+      '/portal?request=r1',
+    );
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeDefined();
+    expect(document.body.textContent).not.toMatch(/It's open|not switched on|could not be found/);
+  });
+
+  it('says a simulated opening is a demonstration and that nothing was opened', async () => {
+    const { user } = open(
+      {
+        'GET /requests': [request({})],
+        'GET /leases': [lease({ execution: 'simulated' })],
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+      },
+      '/portal?request=r1',
+    );
+    expect(await screen.findByRole('heading', { name: 'This is a demonstration.' })).toBeDefined();
+    expect(
+      screen.getByText(/^Nothing was opened: the demonstration never changes a real network\./),
+    ).toBeDefined();
+    expect(document.body.textContent).not.toMatch(/It's open|One more step|works for the next/);
+    // The same in both lists: no countdown and no "Opened" for something that opened nothing.
+    for (const link of [/My requests/, /Blocked sites/]) {
+      await user.click(screen.getAllByRole('link', { name: link })[0]);
+      const row = within((await screen.findByText('photos.example')).closest('a') as HTMLElement);
+      expect(row.getByText('Demonstration, nothing opened')).toBeDefined();
+      expect(row.queryByText(/left|Opened/)).toBeNull();
+    }
+  });
+
+  it.each([
+    ['revoked', 'An administrator closed it.'],
+    ['expired', 'The time ran out.'],
+  ])('says how an opening that ended as %s ended', async (ended_reason, heading) => {
+    open(
+      { 'GET /requests': [request({})], 'GET /leases': [lease({ status: 'ended', ended_reason })] },
+      '/portal?request=r1',
+    );
+    expect(await screen.findByRole('heading', { name: heading })).toBeDefined();
+    expect(screen.getByText(/^Access to photos.example has closed again\./)).toBeDefined();
+  });
+
+  it('does not repeat a decision to the member as if it were a note', async () => {
+    open(
+      { 'GET /requests': [request({ status: 'denied', review_note: 'Not approved' })] },
+      '/portal?request=r1',
+    );
+    expect(await screen.findByText('The request was not approved.')).toBeDefined();
+    expect(document.body.textContent).not.toContain('The note says');
+  });
+
+  it.each([
+    ['high', 72, 'This one waits for a person to decide.'],
+    ['unknown', null, 'This one waits for a person to decide.'],
+    ['low', 16, 'Safe ones open in a few seconds.'],
+  ] as const)(
+    'ends the form for a %s score with a footnote that fits it',
+    async (band, score, words) => {
+      open(
+        {
+          'GET /blocks': [
+            block('b1', 'odd.example', 'laptop', { risk_band: band, risk_score: score }),
+          ],
+        },
+        '/portal?block=b1',
+      );
+      const note = await screen.findByText(/^Nyctr checks the address straight away\./);
+      expect(note.textContent).toBe(`Nyctr checks the address straight away. ${words}`);
+    },
+  );
+});
