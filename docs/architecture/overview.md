@@ -49,16 +49,31 @@ it stays due in the database for the next tick, or for another copy.
 
 An exception is ended at the source once, whoever asks: the tick, someone
 opening the list of exceptions, an administrator ending it, or another copy.
-Before Nyctr removes an entry it added, it takes a claim on that source and
-address (a row in the settings table, as for a run) and saves it, so no
-database lock is held during the provider call. An attempt that finds the claim
-taken sends and records nothing; an administrator is told the exception is
-already being ended. With the claim held the exception is read again, and its
-row is locked and read once more before the ending is recorded. The claim is
-given back with the record, or when Nyctr is stopped mid-call; one left by a
-copy that was killed can be taken over after five minutes. A collection locks
-its source's row and then the rows it stores, only while storing, so the two
-never wait on each other. Opening an exception does not take this claim yet.
+Before Nyctr reads or changes an entry at a source, to open an exception or
+to remove one, it takes a claim on that source and address (a row in the
+settings table, as for a run) and saves it, so no database lock is held
+during the provider call. Openings and endings of one address at one source
+therefore go one at a time: an entry is never removed under an exception
+that is being opened, and two openings at once share one entry that goes
+with the last of them. An ending that finds the claim taken sends and records
+nothing and is tried again at the next tick; an administrator is told the
+exception is already being ended. An opening waits up to ten seconds for the
+claim, because nobody tries it again on the person's behalf, and is then
+refused in plain words with nothing sent. With the claim held the exception
+is read again, and its row is locked and read once more before the ending is
+recorded. The claim is given back with the record, at once when the change
+fails, or when Nyctr is stopped mid-call, and only by the attempt that holds
+it. One left by a copy that was killed can be taken over after five minutes.
+
+Every change at a source (opening or removing an exception, issuing or ending
+a pass, letting a guest on or cutting one off, and each undo) has an overall
+limit of 60 seconds for all its requests together. A source that keeps an
+answer trickling in is cut off at that limit: the change is recorded as
+failed, never as done, and its claim is given back, so one stuck source holds
+up the next ending there by a minute at most. The limit is well under the
+five-minute hold, so a claim does not outlive its call. A collection locks
+its source's row and then the rows it stores, only while storing, so
+collections and endings never wait on each other.
 Stopping Nyctr cancels a pass in progress: the source being read stays marked
 as collecting until its lease is five minutes old, and the next run then takes
 it over.

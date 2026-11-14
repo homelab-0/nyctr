@@ -9,7 +9,9 @@ reconciliation, including after a restart.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import secrets
 from datetime import timedelta
 from hashlib import sha256
 from typing import Literal
@@ -148,7 +150,8 @@ def feature_mode(db: Session, settings: Settings, capability: str) -> str:
 
 async def open_lease(db: Session, settings: Settings, *, integration: Integration | None, domain: str,
                      device_name: str, requester_id: str | None, request_id: str | None,
-                     minutes: int | None, decided_by: str, risk_score: int | None) -> Lease:
+                     minutes: int | None, decided_by: str, risk_score: int | None,
+                     claim: Claim | None = None) -> Lease:
     """Create a lease and carry it out according to the provider's write mode.
 
     The source of the block decides what is possible: only an integration that
@@ -156,6 +159,11 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     changes allowed the exception is added and verified first; a provider
     failure raises and no lease is stored. Otherwise the lease is stored as not
     applied, so the administrator sees exactly what still has to be done by hand.
+
+    Before the source is read or changed the entry's claim is held (`hold_entry`), the same one an
+    ending takes, so openings and endings of one address at one source go one at a time. The claim
+    is given back in the transaction that stores the lease, or at once if the opening fails. Taking
+    it commits the session: a caller with something unsaved takes it earlier and passes it in.
     """
     from .integrations import IntegrationError
 
@@ -168,23 +176,30 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     if mode == "simulated":
         execution, owned = "simulated", True
     elif mode == "enabled":
-        require_collected(integration)
-        key = _secret(integration)
-        if not key:
-            raise IntegrationError(f"The secret for {integration.name} is not configured on the server.",
-                                   category="secret")
-        shared = db.scalar(select(Lease.id).where(
-            Lease.status == "active", Lease.domain == domain, Lease.integration_id == integration.id,
-            Lease.execution == "applied", Lease.owned.is_(True)).limit(1))
-        # Read before the call: if the source goes meanwhile, its row can no longer be loaded.
-        config, place, about = dict(integration.config), where_it_reads(integration), \
-            (integration.name, integration.id, _scope(integration))
-        result = await opener.allow_domain(integration.config, key, domain, allowed=True)
-        execution, owned = "applied", bool(result["owned"] or shared)
-        if not source_unchanged(db, integration, place):
-            await _take_back(opener, about, config, key, domain, owned=bool(result["owned"] and not shared),
-                             decided_by=decided_by, requester_id=requester_id, request_id=request_id,
-                             minutes=minutes, risk_score=risk_score)
+        try:
+            require_collected(integration)
+            key = _secret(integration)
+            if not key:
+                raise IntegrationError(f"The secret for {integration.name} is not configured on the server.",
+                                       category="secret")
+            claim = claim or await hold_entry(db, settings, integration, domain)
+            shared = db.scalar(select(Lease.id).where(
+                Lease.status == "active", Lease.domain == domain, Lease.integration_id == integration.id,
+                Lease.execution == "applied", Lease.owned.is_(True)).limit(1))
+            # Read before the call: if the source goes meanwhile, its row can no longer be loaded.
+            config, place, about = dict(integration.config), where_it_reads(integration), \
+                (integration.name, integration.id, _scope(integration))
+            result = await opener.allow_domain(integration.config, key, domain, allowed=True)
+            execution, owned = "applied", bool(result["owned"] or shared)
+            if not source_unchanged(db, integration, place):
+                await _take_back(opener, about, config, key, domain, owned=bool(result["owned"] and not shared),
+                                 decided_by=decided_by, requester_id=requester_id, request_id=request_id,
+                                 minutes=minutes, risk_score=risk_score)
+        except BaseException:  # Failed, refused or stopped: nothing is stored, and the claim goes back now.
+            if claim:
+                db.rollback()
+                release_entry(db, claim)
+            raise
     now = utcnow()
     lease = Lease(request_id=request_id, integration_id=integration.id if integration else None, domain=domain,
                   device_name=device_name, requester_id=requester_id,
@@ -195,6 +210,8 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
     db.flush()
     audit(db, None if decided_by == "rule" else decided_by, "access.opened", lease.id, domain=domain,
           execution=execution, owned=owned, minutes=minutes, decided_by=decided_by)
+    if claim:
+        _give_back(db, claim)  # With the commit that stores the lease, so the next attempt counts it.
     return lease
 
 
@@ -244,34 +261,81 @@ def source_removed(db: Session, lease: Lease) -> bool:
     return bool(lease.integration_id) and db.get(Integration, lease.integration_id) is None
 
 
-# How long a claim on a source entry is held if the copy ending it was killed mid-call.
+# How long a claim on a source entry is held if the copy that took it was killed mid-call. Longer than an
+# opening and its undo can take: each is one change with its own time limit (`actions.CHANGE_SECONDS`).
 ENDING_HOLD = timedelta(minutes=5)
+# How long an opening waits for an ending or another opening of the same address before it is refused.
+OPENING_WAITS = 10.0
 
 
 class BeingEnded(Exception):
-    """Another attempt is removing this exception's entry at the source right now; this one did nothing."""
+    """Another attempt is changing this exception's entry at the source right now; this one did nothing."""
 
 
-def _claim_entry(db: Session, lease: Lease) -> str | None:
-    """Take the one claim on a source entry before it is removed there, or None while another attempt holds it.
+class EntryBusy(IntegrationError):
+    """An opening waited for another change to the same address at the same source and was refused."""
+
+
+class Claim(str):
+    """The key of a claim on a source entry, with the mark of the one attempt that holds it."""
+    mark: str
+
+
+def _claim_entry(db: Session, lease: Lease) -> Claim | None:
+    """Take the one claim on a source entry before it is read or changed there, or None while another holds it.
 
     The claim is a row in the settings table named after the source and the address, written by one
     insert that a second attempt cannot repeat, and committed here so that no lock is held during the
-    provider call. Every exception for that address at that source shares it, so they are ended one
-    at a time. A claim left by a copy that was killed can be taken over after ENDING_HOLD.
+    provider call. Every opening and ending of that address at that source shares it, so they go one
+    at a time. A claim left by a copy that was killed can be taken over after ENDING_HOLD; the row
+    carries the mark of the attempt that holds it, so only that attempt can give it back.
     """
-    key = "ending:" + sha256(f"{lease.integration_id}\n{lease.domain}".encode()).hexdigest()[:40]
-    now = utcnow()
-    taken = db.execute(update(Setting).where(Setting.key == key, Setting.updated_at <= now - ENDING_HOLD)
-                       .values(updated_at=now).execution_options(synchronize_session=False)).rowcount
+    key = Claim("ending:" + sha256(f"{lease.integration_id}\n{lease.domain}".encode()).hexdigest()[:40])
+    key.mark, now = secrets.token_hex(8), utcnow()
+    taken = db.execute(update(Setting).where(Setting.key == str(key), Setting.updated_at <= now - ENDING_HOLD)
+                       .values(updated_at=now, updated_by=key.mark)
+                       .execution_options(synchronize_session=False)).rowcount
     try:
         if not taken:
-            db.execute(insert(Setting).values(key=key, value={"lease": lease.id}, updated_at=now))
+            db.execute(insert(Setting).values(key=str(key), value={}, updated_at=now, updated_by=key.mark))
         db.commit()
     except IntegrityError:
         db.rollback()
         return None
     return key
+
+
+def _give_back(db: Session, claim: Claim) -> bool:
+    """Delete a claim in the caller's transaction. False if another attempt took it over: it is theirs now."""
+    return db.execute(delete(Setting).where(Setting.key == str(claim), Setting.updated_by == claim.mark)
+                      .execution_options(synchronize_session=False)).rowcount == 1
+
+
+def release_entry(db: Session, claim: Claim | None) -> None:
+    """Give a claim back at once, when what it was taken for will not happen. Commits."""
+    if claim:
+        _give_back(db, claim)
+        db.commit()
+
+
+async def hold_entry(db: Session, settings: Settings, integration: Integration | None, domain: str) -> Claim | None:
+    """Take the claim an opening needs, waiting a short while for whoever holds it. None if nothing is sent.
+
+    An opening that arrives during an ending or another opening of the same address waits, because
+    nobody tries an opening again on a person's behalf and the other change is usually done within a
+    second. After OPENING_WAITS it is refused in plain words (EntryBusy) and nothing was sent.
+    Commits the session at each try, so the caller must hold nothing unsaved.
+    """
+    if not integration or not _opener(integration) or settings.write_mode(integration.provider) != "enabled":
+        return None
+    entry, name, waited = Lease(integration_id=integration.id, domain=domain), integration.name, 0.0
+    while (claim := _claim_entry(db, entry)) is None:
+        if waited >= OPENING_WAITS:
+            raise EntryBusy(f"Nyctr is already changing {domain} at {name}. Nothing was opened. Try again in a moment.",
+                            category="configuration")
+        await asyncio.sleep(0.25)
+        waited += 0.25
+    return claim
 
 
 def still_open(db: Session, lease_id: str) -> bool:
@@ -291,10 +355,12 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
 
     Every ending comes through here, and an exception is ended once. Before an entry of Nyctr's is
     removed its claim is taken (and committed; callers hold nothing unsaved): a second attempt while
-    the first is in flight raises BeingEnded, having sent and recorded nothing. With the claim held
-    the exception is read again, and before the ending is recorded its row is locked and read once
-    more; an attempt that finds it already ended sends and records nothing and returns True. The
-    claim is given back in the transaction the caller commits. No lock is held during the call.
+    the first, or an opening of the same address, is in flight raises BeingEnded, having sent and
+    recorded nothing. With the claim held the exception is read again, and before the ending is
+    recorded its row is locked and read once more; an attempt that finds it already ended sends and
+    records nothing and returns True. The claim is given back in the transaction the caller commits,
+    and only by the attempt that holds it: one whose claim was taken over meanwhile records nothing
+    and raises BeingEnded. No lock is held during the call.
     """
     from .integrations import IntegrationError
 
@@ -305,7 +371,7 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             f"The source was removed, so Nyctr cannot reach it. Remove the exception for {lease.domain} there "
             "by hand.")
         return False
-    claim = None
+    claim = failure = None
     if lease.execution == "applied" and lease.owned:
         claim = _claim_entry(db, lease)
         if claim is None:
@@ -324,17 +390,18 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
                 await opener.disallow_domain(integration.config, key, lease.domain,
                                              allowed=settings.write_mode(integration.provider) == "enabled")
             except IntegrationError as error:
-                lease.last_error = str(error)
-                audit(db, actor, "access.close_failed", lease.id, domain=lease.domain)
-                db.execute(delete(Setting).where(Setting.key == claim))
-                return False
+                failure = str(error)
             except BaseException:  # Stopped mid-call: give the claim back so the next start can end it.
                 db.rollback()
-                db.execute(delete(Setting).where(Setting.key == claim))
-                db.commit()
+                release_entry(db, claim)
                 raise
-    if claim:
-        db.execute(delete(Setting).where(Setting.key == claim))
+    if claim and not _give_back(db, claim):
+        db.rollback()  # Taken over while the call was going: whoever holds it now records what happens.
+        raise BeingEnded
+    if failure:
+        lease.last_error = failure
+        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain)
+        return False
     if not still_open(db, lease.id):
         db.refresh(lease)
         return True
@@ -376,7 +443,7 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
 
     assessment = risk.assess(observation.domain, observation.reason, observation.reason_codes, observation.source)
     row.risk_score, row.risk_category, row.risk_factors = assessment.score, assessment.category, assessment.factors
-    row.integration_id = integration_id = observation.integration_id
+    row.integration_id = observation.integration_id
     rule: AccessRule = get_rule(db, "access_rule")
     integration = db.get(Integration, observation.integration_id)
     why = None
@@ -400,7 +467,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     elif _auto_opens_today(db, row.requester_id) >= rule.per_day:
         why = f"You have reached today's limit of {rule.per_day} automatic openings, so a person decides."
     if why is None:
-        minutes = min(row.duration_minutes, rule.max_minutes)
+        minutes, name = min(row.duration_minutes, rule.max_minutes), integration.name
+        db.commit()  # The assessment is stored now: the opening takes a claim, and may undo what is unsaved.
         try:
             await open_lease(db, settings, integration=integration, domain=row.domain,
                              device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
@@ -409,16 +477,12 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             row.decision_note = f"Opened for {minutes} minutes by the access rule."
             return
         except SourceGone as error:
-            # The check rolled back this transaction before the undo call; store the assessment again.
-            row.risk_score, row.risk_category, row.risk_factors = assessment.score, assessment.category, \
-                assessment.factors
-            row.integration_id = integration_id
             error.record(db)
             why = f"{error} A person decides."
         except NotCollected as error:
             why = f"{error} A person decides."
         except IntegrationError:
-            why = f"Nyctr could not change {integration.name} just now, so a person decides."
+            why = f"Nyctr could not change {name} just now, so a person decides."
     row.decision_note = why
 
 
