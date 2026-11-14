@@ -51,6 +51,13 @@ def _dns_logging(resources: list[Resource]) -> list[dict]:
     } for row in resources if row.kind == "dns_profile" and row.attributes.get("logs_enabled") is False]
 
 
+def cut_title(name: str, locked: bool, simulated: bool) -> str:
+    """The headline for a guest cut off or locked out. It reads as done only when it was applied at the source."""
+    if simulated:
+        return f"Simulated: {name} {'locked out of' if locked else 'cut off'} the guest Wi-Fi"
+    return f"{name} {'is locked out of' if locked else 'was cut off'} the guest Wi-Fi"
+
+
 def _guest_events(db) -> list[dict]:
     """Guest devices currently cut off or locked, and rule matches Nyctr was not allowed to act on."""
     found = []
@@ -64,11 +71,16 @@ def _guest_events(db) -> list[dict]:
         when = utc(action.created_at).strftime("%H:%M UTC")
         if action.action in {"cut", "lock"} and action.execution in {"applied", "simulated"}:
             who = "the cut-off rule" if action.actor == "rule" else "an administrator"
+            locked, simulated = action.action == "lock", action.execution == "simulated"
+            # Only a change applied at the source reads as done; a simulated one says what was decided.
+            did = (f"decided to {'lock this device out' if locked else 'cut this device off'}. Simulated: demo mode "
+                   "never contacts a source, so nothing changed there" if simulated
+                   else "removed this device's guest access")
             found.append({
                 "id": f"auto:guest-cut:{device_id}"[:128], "severity": "high",
-                "title": f"{name} was cut off the guest Wi-Fi",
-                "summary": f"At {when} {who} removed this device's guest access. {action.reason}. It stays off "
-                           "until someone lets it back on.".replace(". .", "."),
+                "title": cut_title(name, locked, simulated),
+                "summary": f"At {when} {who} {did}. {action.reason}. ".replace(". . ", ". ")
+                           + ("" if simulated else "It stays off until someone lets it back on."),
                 "resource_ids": [device_id],
                 "evidence": [f"Observed: {action.reason or 'administrator action'}.",
                              "Nyctr sees DNS lookups only. Connection attempts are not collected."],

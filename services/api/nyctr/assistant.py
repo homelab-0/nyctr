@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .access import suggestions
+from .analysis import cut_title
 from .collection import last_gaps
 from .config import Settings
 from .deps import admin, get_db
@@ -38,6 +39,10 @@ _REF = re.compile(r"\[\[([a-z]+):([A-Za-z0-9_-]{1,12})\]\]")
 _ADDRESS = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b|[\w.+-]+@[\w-]+\.[\w.-]+", re.I)
 _SEVERITY = {"high": 0, "medium": 1, "low": 2, "informational": 3}
 _calls: dict[str, list[float]] = {}
+# A guest's state and what happened at a source, in the words an answer may use.
+_GUEST = {"online": "online", "waiting": "waiting on the sign-in page", "cut": "cut off", "locked": "locked out",
+          "offline": "gone"}
+_UNCHANGED = {"simulated": "simulated", "not_applied": "the source is read-only", "failed": "the source refused"}
 
 SYSTEM = """You are the assistant inside Nyctr, a home and small-office network security workspace. \
 You answer an administrator's questions using ONLY the JSON evidence pack in the user message.
@@ -95,10 +100,15 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
     for device in guest_devices(db):
         guest = guest_json(db, device, passes)
         if guest["state"] in {"cut", "locked"}:
-            items.append({"kind": "guest", "id": device.id, "severity": "high", "at": guest["timeline"][0]["at"]
-                          if guest["timeline"] else None,
-                          "title": f"{device.name} was cut off the guest Wi-Fi",
-                          "detail": "Decide whether to let it back on or lock it out."})
+            # A lock-out is a decision already made, so it is listed without counting as urgent.
+            locked, simulated = guest["state"] == "locked", guest["simulated"]
+            items.append({"kind": "guest", "id": device.id, "severity": "low" if locked else "high",
+                          "at": guest["timeline"][0]["at"] if guest["timeline"] else None,
+                          "title": cut_title(device.name, locked, simulated),
+                          "detail": ("Demo mode never contacts a source, so nothing changed there. " if simulated
+                                     else "")
+                          + ("It stays locked out until someone lets it back on." if locked
+                             else "Decide whether to let it back on or lock it out.")})
     for lease in db.scalars(select(Lease).where(Lease.status == "active", Lease.last_error.is_not(None))):
         items.append({"kind": "lease", "id": lease.id, "severity": "high", "at": utc(lease.created_at).isoformat(),
                       "title": f"{lease.domain} could not be closed", "detail": lease.last_error})
@@ -170,20 +180,24 @@ def evidence_pack(db: Session, settings: Settings, focus: Finding | None = None)
         "their_reason": _clean(r.reason, 200),
         "risk_factors": [_clean(x.get("label")) for x in (r.risk_factors or [])[:4]]}
         for r in db.scalars(select(AccessRequest).where(AccessRequest.status == "pending").limit(15))]
-    pack["access_open_now"] = [{
+    decided = [{
         "ref": ref("l", "lease", x.id, x.domain), "kind": "lease", "domain": _clean(x.domain, 120),
         "type": x.kind, "decided_by": "access rule" if x.decided_by == "rule" else "administrator",
         "provider_result": x.execution, "affects": _clean(x.scope, 120),
         "ends": utc(x.expires_at).isoformat(timespec="minutes") if x.expires_at else "never",
         "close_error": _clean(x.last_error) if x.last_error else None}
         for x in db.scalars(select(Lease).where(Lease.status == "active").limit(20))]
+    # Open means applied at a source. A decision that changed nothing there is listed apart and never as open.
+    pack["access_open_now"] = [x for x in decided if x["provider_result"] == "applied"]
+    pack["decided_not_changed_at_source"] = [x for x in decided if x["provider_result"] != "applied"]
     passes = list(db.scalars(select(GuestPass)))
     pack["guest_devices"] = []
     for device in guest_devices(db)[:20]:
         guest = guest_json(db, device, passes)
         pack["guest_devices"].append({
             "ref": ref("g", "guest", device.id, device.name), "kind": "guest", "name": _clean(device.name, 60),
-            "state": guest["state"], "risk_score": guest["risk"]["score"],
+            "state": _GUEST[guest["state"]] + (" (simulated: nothing changed at the source)" if guest["simulated"]
+                                               else ""), "risk_score": guest["risk"]["score"],
             "access_point": _clean((guest["access_point"] or {}).get("name"), 60),
             "blocked_lookups": guest["lookups"]["blocked"], "threat_lookups": guest["lookups"]["threat"],
             "recent": [_clean(t["text"], 120) for t in guest["timeline"][:5]]})
@@ -252,7 +266,7 @@ def _sample_answer(question: str, pack: dict[str, Any]) -> str:
     if "guest" in q or "wi-fi" in q or "wifi" in q:
         if not guests:
             return "No guest devices are connected right now."
-        parts = [f"{g['name']} is {g['state']}" + (f" on {g['access_point']}" if g["access_point"] else "")
+        parts = [f"{g['name']} is {g['state']}" + (f" at {g['access_point']}" if g["access_point"] else "")
                  + (f", with {g['threat_lookups']} threat-list lookups" if g["threat_lookups"] else "")
                  + f" {cite(g)}" for g in guests]
         return ("There are " + str(len(guests)) + " guest devices. " + ". ".join(parts)
@@ -272,20 +286,24 @@ def _sample_answer(question: str, pack: dict[str, Any]) -> str:
         return (" ".join(f"{f['title']} {cite(f)}." for f in hits)
                 + " These are configuration facts from the source. They do not show that anything connected.")
     if any(w in q for w in ("open", "lease", "exception", "allow")):
-        if not open_now:
-            return "Nothing is open right now."
-        return (f"{len(open_now)} exception{'s are' if len(open_now) != 1 else ' is'} open. " + ". ".join(
+        unchanged = pack["decided_not_changed_at_source"]
+        said = [f"{len(open_now)} exception{'s are' if len(open_now) != 1 else ' is'} open. " + ". ".join(
             f"{x['domain']} ({x['type']}, ends {x['ends']}) {cite(x)}" for x in open_now)
-            + ". A DNS exception applies to everyone on the profile, not one person.")
+            + ". A DNS exception applies to everyone on the profile, not one person."] if open_now else [
+            "Nothing is open at a source right now."]
+        if unchanged:
+            said.append(f"{len(unchanged)} decided here changed nothing at a source: " + ". ".join(
+                f"{x['domain']} ({_UNCHANGED.get(x['provider_result'], 'not changed')}) {cite(x)}"
+                for x in unchanged) + ".")
+        return " ".join(said)
     top = [f for f in pack["findings"] if f["severity"] in ("high", "medium")][:3]
     lines = []
-    if any(g["state"] in ("cut", "locked") for g in guests):
-        cut = next(g for g in guests if g["state"] in ("cut", "locked"))
-        lines.append(f"{cut['name']} was cut off the guest Wi-Fi and needs a decision {cite(cut)}")
+    if cut := next((g for g in guests if g["state"].startswith("cut off")), None):
+        lines.append(f"{cut['name']} is {cut['state']} and needs a decision {cite(cut)}")
     if waiting:
         lines.append(f"{len(waiting)} request{'s are' if len(waiting) != 1 else ' is'} waiting, starting with "
                      f"{waiting[0]['domain']} {cite(waiting[0])}")
-    lines += [f"{f['title']} {cite(f)}" for f in top if "cut off" not in f["title"]]
+    lines += [f"{f['title']} {cite(f)}" for f in top if "the guest Wi-Fi" not in f["title"]]
     if not lines:
         return "Nothing needs you right now. I can answer questions about guests, requests, open access and findings."
     return "In order: " + ". ".join(lines) + "."

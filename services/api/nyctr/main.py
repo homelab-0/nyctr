@@ -128,7 +128,7 @@ class RequestInput(InputModel):
 class ReviewInput(InputModel):
     """Limit administrative review to reviewed or denied states with an explanatory note."""
     decision: Literal["reviewed", "denied", "approved"]
-    note: str = Field(min_length=3, max_length=2000)
+    note: str = Field(default="", max_length=2000)  # optional: an empty note is kept empty
     minutes: int | None = Field(default=None, ge=15, le=240)
 
 
@@ -305,7 +305,11 @@ def create_app(settings: Settings | None = None):
             nodes = [n for n in nodes if n.id in included]
             edges = [e for e in edges if e["source"] in included and e["target"] in included]
         # Which source each item came from, so two with one name can be told apart on the Map.
-        return {"nodes": [{**resource_json(n), "integration_id": n.integration_id} for n in nodes], "edges": edges}
+        # A guest also carries its state from the record of what was done, so the Map never reads one waiting
+        # to sign in as cut off.
+        return {"nodes": [{**resource_json(n), "integration_id": n.integration_id,
+                           **({"guest_state": guests.standing_of(db, n)} if guests.is_guest(n) else {})}
+                          for n in nodes], "edges": edges}
 
     @app.get("/api/findings")
     def findings(_user=Depends(admin), db: Session = Depends(get_db)):

@@ -101,6 +101,26 @@ def state_of(device: Resource, actions: list[GuestAction]) -> str:
     return "online" if _grant(device).get("authorized") else "waiting"
 
 
+def standing(device: Resource, actions: list[GuestAction]) -> dict:
+    """The device's state, whether that state was only simulated, and a change that did not take effect.
+
+    `simulated` is true when the state follows from a change demo mode never sent to a source.
+    `attempt` is the newest action when it changed nothing: decided while read-only, or not gone through.
+    """
+    state = state_of(device, actions)
+    latest = next((a for a in actions if a.execution in EFFECTIVE), None)
+    follows = latest is not None and {"lock": "locked", "cut": "cut"}.get(latest.action, "online") == state
+    newest = actions[0] if actions else None
+    return {"state": state, "simulated": bool(follows and latest.execution == "simulated"),
+            "attempt": {"action": newest.action, "execution": newest.execution}
+            if newest and newest.execution not in EFFECTIVE else None}
+
+
+def standing_of(db: Session, device: Resource) -> dict:
+    """`standing` for a device whose actions have not been loaded."""
+    return standing(device, _actions(db, device.id))
+
+
 def _lookups(db: Session, device_id: str) -> list[tuple[Observation, risk.Assessment]]:
     """Return fresh blocked lookups tied to the device with their assessments, newest first."""
     rows = db.scalars(select(Observation).where(Observation.device_id == device_id,
@@ -210,7 +230,7 @@ def guest_json(db: Session, device: Resource, passes: list[GuestPass]) -> dict:
         "authorization": {key: grant.get(key) for key in ("method", "authorized_at", "expires_at", "bytes",
                                                            "seconds", "data_limit_mb")}
         if grant.get("authorized_at") else None,
-        "state": state_of(device, actions), "observed_at": utc(device.observed_at),
+        **standing(device, actions), "observed_at": utc(device.observed_at),
         "pass": {"id": used.id, "name": used.name, "evidence": "inferred"} if used else None,
         # How the device got on: a pass typed into the network's sign-in page, or let on from here.
         "joined_by": joined_by,
