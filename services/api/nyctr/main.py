@@ -713,53 +713,66 @@ def create_app(settings: Settings | None = None):
         nothing on the network. `approved` opens a temporary lease whose recorded
         execution says whether the provider was actually changed.
         """
+        from .integrations import IntegrationError
+
         row = db.get(AccessRequest, request_id)
         if not row:
             raise HTTPException(404, "Request not found")
         if row.status != "pending":
             raise HTTPException(409, "This request has already been reviewed")
-        claim = None
-        if body.decision == "approved":
-            from .integrations import IntegrationError
+        approving = body.decision == "approved"
+        if approving:
             # An approval changes a provider, so the evidence behind it must still be current.
             # Saying no, or only noting a request, needs no fresh evidence.
             source = db.get(Observation, row.block_id)
             if not source or utc(source.expires_at) <= utcnow():
                 raise HTTPException(409, "The blocked lookup behind this request is no longer current. "
                                          "Ask the person to open the page again and send a new request.")
-            # The entry's claim comes first, while nothing is unsaved: taking it commits, and it may wait.
-            integration = db.get(Integration, row.integration_id) if row.integration_id else None
-            try:
+        # Every decision takes the request's claim first, then (an approval) the entry's. Nothing is unsaved
+        # while the source is called, so a second decision is answered at once and never waits on a lock.
+        gate = access.hold_review(db, request_id)
+        if gate is None:
+            raise HTTPException(409, access.REVIEWING)
+        claim, opened, execution = None, False, "not_performed"
+        try:
+            db.refresh(row)
+            if row.status != "pending":
+                raise HTTPException(409, "This request has already been reviewed")
+            if approving:
+                integration = db.get(Integration, row.integration_id) if row.integration_id else None
                 claim = await access.hold_entry(db, settings, integration, row.domain)
-            except IntegrationError as error:
-                refused = isinstance(error, (access.NotCollected, access.EntryBusy))
-                raise HTTPException(409 if refused else 502, str(error)) from None
-        # Compare and swap prevents simultaneous administrators overwriting each other.
-        result = db.execute(update(AccessRequest).where(AccessRequest.id == request_id,
-                                                       AccessRequest.status == "pending").values(
-            status=body.decision, review_note=body.note, decided_by=user.id))
-        if result.rowcount != 1:
-            db.rollback()
-            access.release_entry(db, claim)
-            raise HTTPException(409, "This request has already been reviewed")
-        execution = "not_performed"
-        if body.decision == "approved":
-            minutes = body.minutes or row.duration_minutes
-            try:
                 lease = await access.open_lease(
                     db, settings, integration=integration, domain=row.domain, device_name=row.device_name,
-                    requester_id=row.requester_id, request_id=row.id, minutes=minutes, decided_by=user.id,
-                    risk_score=row.risk_score, claim=claim)
-            except IntegrationError as error:
-                db.rollback()
-                if isinstance(error, access.SourceGone):
-                    error.record(db)  # the request stays waiting; what was done at the source is kept
-                    db.commit()
-                    raise HTTPException(409, str(error)) from None
-                raise HTTPException(409 if isinstance(error, access.NotCollected) else 502, str(error)) from None
-            execution = lease.execution
-        audit(db, user.id, "access." + body.decision, row.id, execution=execution)
-        db.commit()
+                    requester_id=row.requester_id, request_id=row.id, minutes=body.minutes or row.duration_minutes,
+                    decided_by=user.id, risk_score=row.risk_score, claim=claim)
+                opened, execution = True, lease.execution
+            # Compare and swap: a copy that does not know the request's claim may have decided meanwhile.
+            if db.execute(update(AccessRequest).where(AccessRequest.id == request_id, AccessRequest.status == "pending")
+                          .values(status=body.decision, review_note=body.note, decided_by=user.id)).rowcount != 1:
+                raise HTTPException(409, "This request has already been reviewed")
+            if approving:  # An earlier approval that failed left the member a note that is no longer true.
+                db.execute(update(AccessRequest).where(AccessRequest.id == request_id,
+                                                       AccessRequest.decision_note == access.NOT_OPENED)
+                           .values(decision_note=None))
+            audit(db, user.id, "access." + body.decision, request_id, execution=execution)
+            access.end_review(db, gate)  # Commits the decision, the exception and both claims given back.
+        except BaseException as error:  # Every way out gives both claims back; failed work is rolled back first.
+            db.rollback()
+            access.release_entry(db, claim, unstored=opened)
+            if isinstance(error, access.SourceGone):
+                error.record(db)  # the request stays waiting; what was done at the source is kept
+            # The person who asked reads the note: it says nothing of the source or the reason. The reason is
+            # answered to the administrator's click and kept in the audit record, which only administrators read.
+            try:
+                if approving and not isinstance(error, HTTPException):
+                    audit(db, user.id, "access.approve_failed", request_id, domain=row.domain,
+                          why=str(error) if isinstance(error, IntegrationError) else "Nyctr met an error.")
+            finally:  # Whatever becomes of the record, the request's claim goes back.
+                access.end_review(db, gate, access.NOT_OPENED if approving else None)
+            if not isinstance(error, IntegrationError):
+                raise
+            refused = isinstance(error, (access.SourceGone, access.NotCollected, access.EntryBusy))
+            raise HTTPException(409 if refused else 502, str(error)) from None
         db.refresh(row)
         return request_json(row)
 

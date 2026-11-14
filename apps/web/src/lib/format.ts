@@ -78,6 +78,8 @@ export const REMOVAL: Record<string, string> = {
   already_gone: 'nothing to remove, the entry was already gone at the source',
   kept_for_another: 'left at the source, another open exception still needs it',
   not_owned: "nothing to remove, the entry was not Nyctr's",
+  // Settling an opening that was never confirmed: nothing was there, or Nyctr could not tell whose it was.
+  nothing_removed: 'nothing was removed at the source',
 };
 
 /** "A", "A and B", "A, B and C", then "A, B and 5 more": a long list of names stays one phrase. */

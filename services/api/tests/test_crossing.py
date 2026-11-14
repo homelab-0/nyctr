@@ -128,7 +128,7 @@ def test_two_openings_of_one_address_at_once_share_one_entry_that_goes_with_the_
 @pytest.mark.parametrize("first", ["removal", "opening"])
 def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypatch, first):
     """Whichever is in flight first, the other sends nothing until it is done, and the open exception has its entry."""
-    source = Source(monkeypatch, hold=(1, "before") if first == "removal" else (0, "after"))
+    source = Source(monkeypatch, hold=(1, "before") if first == "removal" else (1, "after"))
     now = [utcnow()]
 
     async def scenario(app, member):
@@ -150,12 +150,13 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 await asyncio.wait_for(source.reached.wait(), 5)
                 up.tick()
                 await up.ending["dns"]
-                assert source.calls == ["GET"] and stored(app, Lease, old) == "active"  # Refused; tried next tick.
+                assert source.calls == ["GET", "GET"] and stored(app, Lease, old) == "active"  # Refused; tried next tick.
                 source.go.set()
                 assert (await asking).json()["status"] == "auto_approved"
                 up.tick()
                 await up.ending["dns"]
-                assert source.calls == ["GET", "GET"]  # The entry is now the new exception's too, so it stays.
+                # The entry is now the new exception's too, so it stays; the source was asked that it is there.
+                assert source.calls == ["GET", "GET", "GET"]
         await up.stop()
         with app.state.session_factory() as db:
             assert [(row.id == old, row.execution, row.owned) for row in db.scalars(select(Lease).where(
@@ -184,11 +185,16 @@ def test_an_approval_takes_the_claim_first_and_gives_it_back_on_every_way_out(tm
 
             with factory() as db:
                 held = access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))  # Being changed.
+                monkeypatch.setattr(access, "OPENING_WAITS", 0.5)
                 waiting = asyncio.create_task(review(two))
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.2)
+                code, status, detail = await review(two, "denied")  # Answered at once: an approval has the request.
+                assert (code, status) == (409, "pending") and detail == access.REVIEWING
+                code, _, detail = await waiting
+                assert code == 409 and "already changing" in detail
                 assert (await review(two, "denied"))[:2] == (200, "denied")  # Opens nothing, so takes no claim.
                 access.release_entry(db, held)
-                code, _, detail = await waiting
+                code, _, detail = await review(two)
                 assert code == 409 and "already been reviewed" in detail and claims(app) == []
                 held = access._claim_entry(db, Lease(integration_id="dns", domain=DOMAIN))
                 monkeypatch.setattr(access, "OPENING_WAITS", 0.3)

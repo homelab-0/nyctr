@@ -26,6 +26,8 @@ import functools
 import re
 from typing import Any
 
+import httpx
+
 from . import core
 from .core import IntegrationError, ReadClient, exchange, offset_pages
 
@@ -56,9 +58,11 @@ def _limited(change):
         try:
             async with asyncio.timeout(CHANGE_SECONDS):
                 return await change(*args, **kwargs)
-        except TimeoutError:
-            raise IntegrationError("The source took too long to answer, so Nyctr stopped waiting. Check there "
-                                   "whether the change went through.", category="timeout") from None
+        except TimeoutError as late:
+            error = IntegrationError("The source took too long to answer, so Nyctr stopped waiting. Check there "
+                                     "whether the change went through.", category="timeout")
+            error.add_sent = getattr(late.__cause__, "add_sent", None)
+            raise error from None
     return within
 
 
@@ -92,6 +96,16 @@ async def _allowlist(reader: ReadClient, profile: str) -> dict[str, bool]:
     return {str(x.get("id", "")).lower(): bool(x.get("active", True)) for x in rows}
 
 
+def _never_left(error: BaseException) -> bool:
+    """Whether a request that failed is known never to have been sent: refused before sending, or no connection.
+
+    `exchange` raises its own error in place of the transport's, which stays as the context. A request cut
+    off or stopped while it was going is not known either way, so it counts as sent.
+    """
+    return isinstance(error, core.BudgetExceeded) or isinstance(
+        error.__context__, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol))
+
+
 @_limited
 async def nextdns_listed(config: dict[str, Any], api_key: str, domain: str) -> bool:
     """Say whether a domain is on the profile allowlist, switched on or off. A read: it changes nothing."""
@@ -111,15 +125,24 @@ async def nextdns_allow(config: dict[str, Any], api_key: str, domain: str, *, al
     name, profile = _domain(domain), _path_id(config["profile_id"])
     async with core.make_http_client(api_key) as client:
         reader = ReadClient(client, NEXTDNS_BASE)
-        before = await _allowlist(reader, profile)
-        if before.get(name) is True:
-            return {"owned": False, "verified": True}
-        if name in before:
-            raise IntegrationError("That domain is on the allowlist but switched off. Nyctr will not change it.")
-        await exchange(reader, "POST", f"/profiles/{profile}/allowlist", body={"id": name, "active": True})
-        after = await _allowlist(reader, profile)
-        if after.get(name) is not True:
-            raise IntegrationError("NextDNS accepted the request but the domain is not on the allowlist.")
+        stage = "read"
+        try:
+            before = await _allowlist(reader, profile)
+            if before.get(name) is True:
+                return {"owned": False, "verified": True}
+            if name in before:
+                raise IntegrationError("That domain is on the allowlist but switched off. Nyctr will not change it.")
+            stage = "add"
+            await exchange(reader, "POST", f"/profiles/{profile}/allowlist", body={"id": name, "active": True})
+            stage = "sent"
+            after = await _allowlist(reader, profile)
+            if after.get(name) is not True:
+                raise IntegrationError("NextDNS accepted the request but the domain is not on the allowlist.")
+        except BaseException as error:
+            # Say whether its add was sent: never before its own read found the address absent, and not when
+            # the add never left. Core keeps no record of an entry of its own when nothing was sent.
+            error.add_sent = stage == "sent" or (stage == "add" and not _never_left(error))
+            raise
         return {"owned": True, "verified": True}
 
 

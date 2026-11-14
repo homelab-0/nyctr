@@ -161,7 +161,12 @@ describe('ending an exception', () => {
           decided_by: '',
           last_error: words,
         }),
-        lease('settled', { status: 'ended', ended_reason: 'not_confirmed' }),
+        lease('settled', { status: 'ended', ended_reason: 'not_confirmed', removal: 'removed' }),
+        lease('nothing', {
+          status: 'ended',
+          ended_reason: 'not_confirmed',
+          removal: 'nothing_removed',
+        }),
       ],
       'GET /suggestions': [],
     });
@@ -172,6 +177,26 @@ describe('ending an exception', () => {
     expect(text).toContain('Not confirmed');
     expect(text).toContain(words);
     expect(text).not.toMatch(/left|Closing|An administrator/);
-    expect(row('settled.example').getByText(/^Not opened/)).toBeTruthy();
+    // Never opened, and what settling it did at the source.
+    expect(
+      row('settled.example').getByText(/^Not opened .* · removed at the source$/),
+    ).toBeTruthy();
+    expect(
+      row('nothing.example').getByText(/^Not opened .* · nothing was removed at the source$/),
+    ).toBeTruthy();
+  });
+
+  it('does not say nothing is open above an opening that may be open at the source', async () => {
+    mockApi({
+      'GET /leases': [
+        lease('slow', { status: 'unconfirmed', execution: 'not_applied', last_error: 'x' }),
+      ],
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={() => {}} />);
+    expect(
+      await screen.findByText(/^No exception is open\. What is listed below was not confirmed/),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Nothing is open');
   });
 });

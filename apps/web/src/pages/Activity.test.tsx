@@ -87,6 +87,10 @@ describe('Activity rows the reviews found unworded', () => {
         event('i', 'auth.sent_to_portal', {}),
         event('j', 'integration.nudged', {}),
         event('k', 'made.up_later', {}),
+        event('l', 'access.approve_failed', {
+          domain: 'shop.example',
+          why: 'Nyctr is already changing shop.example at Resolver. Nothing was opened. Try again in a moment.',
+        }),
       ],
       'GET /users': [],
       'GET /integrations': [{ id: 'source-c', name: 'Lab hypervisor' } as Integration],
@@ -114,6 +118,9 @@ describe('Activity rows the reviews found unworded', () => {
     expect(await row('Was sent to the member portal to sign in')).toBeTruthy();
     expect(await row('Started a collection when the server was asked to')).toBeTruthy();
     expect(await row('Something this version of the page cannot describe')).toBeTruthy();
+    expect(await row('Approved a request, and nothing was opened')).toContain(
+      'shop.example · Nyctr is already changing shop.example at Resolver. Nothing was opened.',
+    );
     expect(document.body.textContent).not.toMatch(/[a-z]+\.[a-z]+_|[a-z]_[a-z]|lookback/);
   });
 });
@@ -169,7 +176,15 @@ describe('Activity rows about a change at a source', () => {
           domain: 'never.example',
           reason: 'not_confirmed',
           execution: 'not_applied',
+          removal: 'nothing_removed',
         }),
+        event('x', 'access.closed', {
+          domain: 'handed.example',
+          reason: 'not_confirmed',
+          execution: 'not_applied',
+          removal: 'kept_for_another',
+        }),
+        event('y', 'access.close_failed', { domain: 'trying.example', record: true }),
         ...['secret', 'secret_ref', 'missing'].map((reason) =>
           event(reason, 'integration.retries_stopped', { name: `Source ${reason}`, reason }),
         ),
@@ -204,11 +219,22 @@ describe('Activity rows about a change at a source', () => {
     expect(about('unsure.example')).toBe(
       'unsure.example · the source did not confirm it, so it may be open there',
     );
-    expect(about('undone.example')).toBe(
-      'undone.example · taken back out at the source · the opening was never confirmed',
+    // A record kept before the ending recorded its word says it from the outcome; later ones from the word.
+    expect(about('undone.example')).toBe('undone.example · removed at the source');
+    expect(about('never.example')).toBe('never.example · nothing was removed at the source');
+    expect(about('handed.example')).toBe(
+      'handed.example · left at the source, another open exception still needs it',
     );
-    expect(about('never.example')).toBe(
-      'never.example · nothing was removed at the source · the opening was never confirmed',
+    expect(about('trying.example')).toBe(
+      'trying.example · the source could not be reached, so it stays listed as not confirmed',
+    );
+    // Never "Access closed" or "could not be closed" for something that was never access.
+    const named = (domain: string) =>
+      screen.getByText(domain, { exact: false }).closest('tr')!.textContent;
+    for (const domain of ['undone.example', 'never.example', 'handed.example'])
+      expect(named(domain)).toContain('Settled an opening that was never confirmed');
+    expect(named('trying.example')).toContain(
+      'Could not settle an opening that was never confirmed',
     );
     expect(detail('Cut a guest off')).toBe('without access at the source · Asked to leave');
     // A headline reads as done only when the record says applied.

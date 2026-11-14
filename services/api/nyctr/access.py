@@ -191,10 +191,16 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
             sent = True
             result = await opener.allow_domain(integration.config, key, domain, allowed=True)
             execution, owned, added = "applied", bool(result["owned"] or shared), bool(result["owned"])
+            claim.added = added
             if not source_unchanged(db, integration, place):
                 await _take_back(opener, about, config, key, domain, owned=bool(result["owned"] and not shared),
                                  decided_by=decided_by, requester_id=requester_id, request_id=request_id,
                                  minutes=minutes, risk_score=risk_score)
+            # Given back in the transaction that stores the lease, so the next attempt counts it. If another
+            # attempt took the claim over meanwhile, what this one saw may no longer be true: it stores nothing.
+            if not _give_back(db, claim):
+                raise TakenOver(f"Nyctr took too long to open {domain} at {about[0]}, and another change to it "
+                                "went ahead. Nothing was opened.", category="configuration")
         except BaseException as error:  # Failed, refused or stopped: no lease, and the claim goes back now.
             if claim:
                 db.rollback()
@@ -212,7 +218,6 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
           execution=execution, owned=owned, minutes=minutes, decided_by=decided_by)
     if claim:
         db.execute(delete(Lease).where(Lease.id == claim.record))  # The stored lease replaces the record.
-        _give_back(db, claim)  # With the commit that stores the lease, so the next attempt counts it.
     return lease
 
 
@@ -227,8 +232,24 @@ async def _not_confirmed(db: Session, settings: Settings, claim: Claim, error: B
     is tried here once (not while Nyctr is being stopped); after that the upkeep tick goes on trying.
     """
     record = db.get(Lease, claim.record) if claim.record else None
-    if record is None or not sent or added is False or isinstance(error, SourceGone):
-        return release_entry(db, claim)
+    if record is not None and record.status != "unconfirmed":  # Settled by whoever took the claim over.
+        record = claim.record = None
+    # The add's own answer wins over what was read first. An add that failed says whether it was sent
+    # after its own read found the address absent: the entry may then be there, and if it is, it is Nyctr's.
+    sent_absent = added if added is not None else getattr(error, "add_sent", None)
+    ours = sent_absent or (sent_absent is None and claim.said is False)
+    if not sent or sent_absent is False or isinstance(error, SourceGone) or (claim.said is not None and not ours) \
+            or (record is None and not ours):
+        return release_entry(db, claim)  # Also when the add itself says it was never sent: nothing of Nyctr's is there.
+    if not _mine(db, claim):
+        # Whatever way the opening came out (returned, failed, cut off, stopped): its claim is no longer its
+        # own, so it stood still past the hold and others changed the address meanwhile. Its entry may have been
+        # removed, and one now there may be a person's. Not known, so Nyctr never acts on it: a person checks.
+        db.execute(delete(Lease).where(Lease.id == claim.record))
+        record = _record(db, claim, None)
+    elif ours and not (record and record.owned):  # First read as already there, and the add then added it.
+        db.execute(delete(Lease).where(Lease.id == claim.record))
+        record = _record(db, claim, False)
     claim.record = None  # Kept.
     audit(db, None, "access.open_unconfirmed", record.id, domain=record.domain, execution="failed",
           removes=record.owned)
@@ -304,11 +325,18 @@ class EntryBusy(IntegrationError):
     """An opening waited for another change to the same address at the same source and was refused."""
 
 
+class TakenOver(EntryBusy):
+    """An opening came back from the source to find its claim taken over: it stores nothing as its own."""
+
+
 class Claim(str):
     """The key of a claim on a source entry, with the mark of the one attempt that holds it and,
     for an opening, the id of its record."""
     mark: str
     record: str | None = None
+    about: tuple = ()  # Source id, address, scope and source name, for the record.
+    added: bool = False  # What the add itself answered, once it has: it added the entry.
+    said: bool | None = None  # What the source said before the add: already there, not there, or no such read.
 
 
 def _claim_entry(db: Session, lease: Lease) -> Claim | None:
@@ -320,7 +348,12 @@ def _claim_entry(db: Session, lease: Lease) -> Claim | None:
     at a time. A claim left by a copy that was killed can be taken over after ENDING_HOLD; the row
     carries the mark of the attempt that holds it, so only that attempt can give it back.
     """
-    key = Claim("ending:" + sha256(f"{lease.integration_id}\n{lease.domain}".encode()).hexdigest()[:40])
+    return _claim(db, "ending:" + sha256(f"{lease.integration_id}\n{lease.domain}".encode()).hexdigest()[:40])
+
+
+def _claim(db: Session, name: str) -> Claim | None:
+    """Take the claim of that name as `_claim_entry` describes, or None while another attempt holds it."""
+    key = Claim(name)
     key.mark, now = secrets.token_hex(8), utcnow()
     taken = db.execute(update(Setting).where(Setting.key == str(key), Setting.updated_at <= now - ENDING_HOLD)
                        .values(updated_at=now, updated_by=key.mark)
@@ -341,8 +374,25 @@ def _give_back(db: Session, claim: Claim) -> bool:
                       .execution_options(synchronize_session=False)).rowcount == 1
 
 
-def release_entry(db: Session, claim: Claim | None) -> None:
-    """Give a claim back at once, when what it was taken for will not happen, with its record. Commits."""
+def _mine(db: Session, claim: Claim) -> bool:
+    """Lock the claim's row until the caller commits, and say whether it is still this attempt's own.
+
+    The one check every way out of an opening goes through before it writes that an entry is Nyctr's.
+    """
+    return db.scalar(select(Setting.updated_by).where(Setting.key == str(claim)).with_for_update()) == claim.mark
+
+
+def release_entry(db: Session, claim: Claim | None, unstored: bool = False) -> None:
+    """Give a claim back at once, when what it was taken for will not happen, with its record. Commits.
+
+    `unstored`: the source accepted the opening and storing the exception then failed. What the add
+    itself answered decides: if it added the entry, the record is kept as Nyctr's own and made due, so
+    the tick removes it; if the address was already there, the record goes and nothing is removed.
+    """
+    if claim and unstored and claim.added:
+        db.execute(delete(Lease).where(Lease.id == claim.record))
+        record = _record(db, claim, False if _mine(db, claim) else None)  # Taken over meanwhile: not known.
+        record.expires_at, claim.record = utcnow() if record.owned else None, None
     if claim:
         db.execute(delete(Lease).where(Lease.id == claim.record))
         _give_back(db, claim)
@@ -355,9 +405,59 @@ OPEN = ("active", "unconfirmed")
 # What an administrator reads beside such a record: where Nyctr knows the entry would be its own, and
 # where the source could not say whether the address was there before.
 NOT_CONFIRMED = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. "
-                 "Unless the opening completes, Nyctr removes it.")
+                 "Unless the opening completes, Nyctr removes it. Until then Nyctr takes an entry for {domain} "
+                 "there to be its own: do not add it there by hand while it is listed here.")
 NOT_KNOWN = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. Nyctr cannot "
              "tell whether it put it there, so it removes nothing. Check at {name}, then end this here.")
+THERE = ("Nyctr tried to open {domain} at {name} and has not confirmed it. The address was already allowed there "
+         "before, so Nyctr removes nothing.")
+REVIEWING = "This request is being approved. If that does not finish, it can be decided again within five minutes."
+# What the person who asked reads after an approval that failed: nothing about the source or the reason.
+NOT_OPENED = "This was not opened. Whoever runs Nyctr has been told."
+
+
+def _record(db: Session, claim: Claim, said: bool | None) -> Lease:
+    """Put an opening attempt on record with what the source said before the add (see `hold_entry`)."""
+    (iid, domain, scope, name), now = claim.about, utcnow()
+    words = NOT_KNOWN if said is None else THERE if said else NOT_CONFIRMED
+    record = Lease(integration_id=iid, domain=domain, status="unconfirmed", owned=said is False, scope=scope,
+                   decided_by="", created_at=now, expires_at=None if said is None else now + ENDING_HOLD,
+                   last_error=words.format(domain=domain, name=name))
+    db.add(record)
+    db.flush()
+    claim.record = record.id
+    return record
+
+
+def hold_review(db: Session, request_id: str) -> Claim | None:
+    """Take the claim on one request that every decision on it holds, or None while another decision has it.
+
+    An approval holds it across its call to the source, with nothing unsaved, so a second decision is
+    answered at once (`REVIEWING`) and never waits on the request's row. Always taken before the
+    entry's claim. One left by a copy that was killed can be taken over after ENDING_HOLD.
+    """
+    return _claim(db, f"review:{request_id}")
+
+
+def end_review(db: Session, gate: Claim, note: str | None = None) -> None:
+    """Give a request's claim back when its decision was not stored, with a note on why it still waits. Commits."""
+    _give_back(db, gate)
+    if note:
+        db.execute(update(AccessRequest).where(AccessRequest.id == str(gate)[7:], AccessRequest.status == "pending")
+                   .values(decision_note=note))
+    db.commit()
+
+
+def clear_stale_reviews(db: Session) -> None:
+    """Clear claims on requests left by a copy killed mid-decision (a person's or the rule's), and say so."""
+    for gate in db.scalars(select(Setting).where(Setting.key.startswith("review:"),
+                                                 Setting.updated_at <= utcnow() - ENDING_HOLD)).all():
+        # By key and mark: a claim another copy took over in this instant is theirs and stays.
+        if db.execute(delete(Setting).where(Setting.key == gate.key, Setting.updated_by == gate.updated_by)
+                      .execution_options(synchronize_session=False)).rowcount:
+            db.execute(update(AccessRequest).where(AccessRequest.id == gate.key[7:], AccessRequest.status == "pending")
+                       .values(decision_note="Nyctr was stopped while this was being decided. Nothing was opened."))
+    db.commit()
 
 
 async def hold_entry(db: Session, settings: Settings, integration: Integration | None, domain: str) -> Claim | None:
@@ -369,13 +469,15 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
     Commits the session at each try, so the caller must hold nothing unsaved.
 
     With the claim held, and before any add, the source is asked whether the address is already
-    allowed there. If it is, Nyctr will add nothing and never removes it, and there is no record. If
-    it is not, the attempt goes on record first: a lease with status `unconfirmed`, `owned`, due when
-    the claim could be taken over, so that after a failure or a kill Nyctr knows there may be an
-    entry of its own to remove. A source that offers no such read gets a record that is not `owned`
-    and never due: Nyctr removes nothing there and a person checks. An earlier record for the same
-    address is settled before the claim is taken, or the opening is refused.
-    A source never collected from, or without its secret, is refused before any of this.
+    allowed there, and the attempt goes on record with the answer: a lease with status `unconfirmed`,
+    due when the claim could be taken over. If the address was not there the record is `owned`, so
+    that after a failure or a kill Nyctr knows there may be an entry of its own to remove. If it was
+    already there the record is not `owned` and Nyctr removes nothing, unless the add itself later
+    finds the address gone and adds it. A source that offers no such read gets a record that is not
+    `owned` and never due: Nyctr removes nothing there and a person checks. An earlier record for the
+    same address is settled before the claim is taken, or the opening is refused.
+    A source never collected from, or without its secret, is refused before any of this, and one
+    removed from Nyctr during the wait is refused as removed.
     """
     opener = _opener(integration)
     if not integration or not opener or settings.write_mode(integration.provider) != "enabled":
@@ -394,8 +496,12 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
             await asyncio.sleep(0.25)
             waited += 0.25
         # With the claim held, a record still there is no opening in flight: it is left over. Settle it first.
+        if db.get(Integration, entry.integration_id) is None:  # A wait reads the source again: it may be gone.
+            release_entry(db, claim)
+            raise SourceGone(f"{name} was removed from Nyctr while it was waiting to open {domain} there. "
+                             "Nothing was opened.", lambda db: None)
         earlier = db.scalars(select(Lease).where(
-            Lease.status == "unconfirmed", Lease.integration_id == integration.id, Lease.domain == domain,
+            Lease.status == "unconfirmed", Lease.integration_id == entry.integration_id, Lease.domain == domain,
             Lease.owned.is_(True))).first()
         if earlier is None:
             break
@@ -415,15 +521,9 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
         except BaseException:  # Nothing was sent, so nothing is kept.
             release_entry(db, claim)
             raise
-    if not there:
-        now, words = utcnow(), NOT_CONFIRMED if listed else NOT_KNOWN
-        record = Lease(integration_id=integration.id, domain=domain, status="unconfirmed", owned=bool(listed),
-                       scope=_scope(integration), decided_by="", created_at=now,
-                       expires_at=now + ENDING_HOLD if listed else None,
-                       last_error=words.format(domain=domain, name=name))
-        db.add(record)
-        db.commit()
-        claim.record = record.id
+    claim.about, claim.said = (integration.id, domain, _scope(integration), name), bool(there) if listed else None
+    _record(db, claim, claim.said)
+    db.commit()
     return claim
 
 
@@ -464,6 +564,7 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
     """
     from .integrations import IntegrationError
 
+    db.refresh(lease)  # What is stored now, not what the caller read: the duty to remove may have been passed on.
     if lease.status not in OPEN:
         return True
     unconfirmed = lease.status == "unconfirmed"
@@ -483,13 +584,30 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         db.refresh(lease)
         using = (Lease.status == "active", Lease.id != lease.id, Lease.domain == lease.domain,
                  Lease.integration_id == lease.integration_id, Lease.execution == "applied")
-        others = db.scalar(select(func.count()).select_from(Lease).where(*using))
-        if unconfirmed and others:
-            db.execute(update(Lease).where(*using).values(owned=True).execution_options(synchronize_session=False))
-        if lease.status in OPEN and not others:
-            integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
-            key = _secret(integration) if integration else None
-            opener = _opener(integration)
+        # Nyctr added this entry: whoever still uses it carries the duty to remove it from here on. Only an
+        # exception that is still open has a duty to pass on, and only once the source's own read says the
+        # entry is there: otherwise an exception backed by a person's entry would be marked Nyctr's on a guess.
+        # If the read fails, nothing is ended and it is tried again. The update is also the count, so an
+        # exception another copy is ending at this moment is either marked first or not counted.
+        others = lease.status in OPEN and db.scalar(select(func.count()).select_from(Lease).where(*using))
+        integration = db.get(Integration, lease.integration_id) if lease.integration_id else None
+        key = _secret(integration) if integration else None
+        opener = _opener(integration)
+        if others and key and getattr(opener, "domain_listed", None):
+            try:
+                there = await opener.domain_listed(integration.config, key, lease.domain)
+            except IntegrationError as error:
+                there, failure = False, str(error)
+            except BaseException:  # Stopped mid-call: give the claim back so the next start can end it.
+                release_entry(db, claim)
+                raise
+            if there:
+                others = db.execute(update(Lease).where(*using).values(owned=True)
+                                    .execution_options(synchronize_session=False)).rowcount
+            elif not failure:
+                removal = "already_gone"  # Nothing is there to keep for another, and nothing to remove.
+        if lease.status in OPEN and not others and not failure:
+            db.commit()  # Nothing was marked: end the transaction, so no write lock is held during the call.
             try:
                 if not integration or not key or not opener:
                     raise IntegrationError("The source's secret is not configured on the server.")
@@ -508,13 +626,20 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         raise BeingEnded
     if failure:
         lease.last_error = lease.last_error if unconfirmed else failure
-        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain)
+        audit(db, actor, "access.close_failed", lease.id, domain=lease.domain, **({"record": True} if unconfirmed else {}))
         return False
     if not still_open(db, lease.id):
         db.refresh(lease)
         return True
+    if claim is None:  # Its row is locked now. If the duty was passed to it meanwhile, end it as Nyctr's own.
+        db.refresh(lease)
+        if _ours(lease):
+            return await end_lease(db, settings, lease, reason, actor)
     reason, outcome = ("not_confirmed", "applied" if removed else "not_applied") if unconfirmed else \
         (reason, lease.execution)
+    if unconfirmed and removal != "kept_for_another":  # A record says only whether an entry was removed.
+        removal = "removed" if removed else "nothing_removed"
+    lease.execution = outcome  # For a record: what settling it did at the source, in its row as in the audit.
     lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", reason, utcnow(), None
     audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=outcome,
           **({"removal": removal} if removal else {}))
@@ -575,18 +700,47 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     elif db.scalar(select(AccessRequest.id).where(AccessRequest.domain == observation.domain,
                                                   AccessRequest.status == "denied").limit(1)):
         why = "An administrator said no to this address before, so a person decides."
-    elif _auto_opens_today(db, row.requester_id) >= rule.per_day:
-        why = f"You have reached today's limit of {rule.per_day} automatic openings, so a person decides."
+    limit = f"You have reached today's limit of {rule.per_day} automatic openings, so a person decides."
+    if why is None and _auto_opens_today(db, row.requester_id) >= rule.per_day:
+        why = limit
     if why is None:
-        minutes, name = min(row.duration_minutes, rule.max_minutes), integration.name
+        minutes, name, turn, waited = min(row.duration_minutes, rule.max_minutes), integration.name, None, 0.0
         db.commit()  # The assessment is stored now: the opening takes a claim, and may undo what is unsaved.
+        # The rule's decision holds the request's claim like any other, so a person's decision on a request
+        # that is already listed as waiting is never overwritten. If a person has it, the rule leaves it to them.
+        gate = hold_review(db, row.id)
+        db.refresh(row)
+        if gate is None or row.status != "pending":
+            return end_review(db, gate) if gate else None
         try:
-            await open_lease(db, settings, integration=integration, domain=row.domain,
-                             device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
-                             minutes=minutes, decided_by="rule", risk_score=assessment.score)
-            row.status, row.decided_by, row.duration_minutes = "auto_approved", "rule", minutes
-            row.decision_note = f"Opened for {minutes} minutes by the access rule."
-            return
+            # One automatic opening at a time for each person, so the day's count is right when it is read.
+            while (turn := _claim(db, "ending:auto:" + sha256(row.requester_id.encode()).hexdigest()[:40])) is None \
+                    and waited < OPENING_WAITS:
+                await asyncio.sleep(0.25)
+                waited += 0.25
+            integration = db.get(Integration, row.integration_id)
+            if turn is None:
+                why = "Nyctr was still opening your earlier requests, so a person decides this one."
+            elif integration is None:
+                why = f"{name} was removed from Nyctr while this request waited, so a person decides."
+            elif _auto_opens_today(db, row.requester_id) >= rule.per_day:
+                why = limit
+            else:
+                claim = await hold_entry(db, settings, integration, row.domain)
+                await open_lease(db, settings, integration=integration, domain=row.domain,
+                                 device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
+                                 minutes=minutes, decided_by="rule", risk_score=assessment.score, claim=claim)
+                # Compare and swap, as in the review route: a copy that does not know the request's claim may
+                # have decided meanwhile. Then nothing is stored, and what was added stays on record to be removed.
+                if db.execute(update(AccessRequest).where(AccessRequest.id == row.id, AccessRequest.status == "pending")
+                              .values(status="auto_approved", decided_by="rule", duration_minutes=minutes,
+                                      decision_note=f"Opened for {minutes} minutes by the access rule.")).rowcount != 1:
+                    db.rollback()
+                    return release_entry(db, claim, unstored=True)
+                _give_back(db, turn)  # With the commit that stores the lease, so the next one counts it.
+                _give_back(db, gate)
+                turn = gate = None
+                return db.refresh(row)
         except SourceGone as error:
             error.record(db)
             why = f"{error} A person decides."
@@ -594,6 +748,10 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             why = f"{error} A person decides."
         except IntegrationError:
             why = f"Nyctr could not change {name} just now, so a person decides."
+        finally:
+            release_entry(db, turn)
+            if gate:
+                end_review(db, gate)
     row.decision_note = why
 
 
@@ -645,7 +803,8 @@ async def leases(request: Request, auth=Depends(identity), db: Session = Depends
     query = select(Lease).order_by(Lease.created_at.desc()).limit(300)
     if auth[0].role != "admin":
         query = query.where(Lease.requester_id == auth[0].id)
-        return [lease_json(row) for row in db.scalars(query)]
+        # What went wrong at a source is written for an administrator: a member is given none of it.
+        return [{**lease_json(row), "last_error": None} for row in db.scalars(query)]
     names, known = _names(db), set(db.scalars(select(Integration.id)))
     rows = list(db.scalars(query))
     # What each ending did at the source is kept in its audit record, not on the exception.
@@ -695,7 +854,9 @@ async def end(lease_id: str, request: Request, body: EndInput | None = None, use
         raise HTTPException(409, "Nyctr is already ending this exception. Look again in a moment.") from None
     db.commit()
     if not done:
-        raise HTTPException(502, "Nyctr could not remove the entry at the source. It is still open and will be retried.")
+        raise HTTPException(502, "Nyctr could not reach the source to check for the entry. It stays listed as not "
+                                 "confirmed and Nyctr tries again." if lease.status == "unconfirmed" else
+                            "Nyctr could not remove the entry at the source. It is still open and will be retried.")
     return lease_json(lease, _names(db))
 
 
