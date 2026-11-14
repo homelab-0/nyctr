@@ -164,9 +164,11 @@ def test_nyctr_never_removes_an_entry_that_was_there_before_or_that_another_exce
         assert trail(app)[-1] == ("access.closed", "not_applied")
 
 
-def test_a_source_that_cannot_say_whether_the_address_was_there_gets_a_record_nyctr_never_acts_on(tmp_path,
-                                                                                                 monkeypatch):
-    """No read is declared: after a failed opening Nyctr removes nothing, says so, and a person ends the record."""
+@pytest.mark.parametrize("gone", [False, True])
+def test_a_source_that_cannot_say_whether_the_address_was_there_gets_a_record_nyctr_never_acts_on(
+        tmp_path, monkeypatch, gone):
+    """No read is declared: after a failed opening Nyctr removes nothing, says so, and a person ends the record,
+    also once the source itself has been removed from Nyctr."""
     class NoRead:
         removals = 0
 
@@ -192,11 +194,18 @@ def test_a_source_that_cannot_say_whether_the_address_was_there_gets_a_record_ny
                     ("unconfirmed", False, None)]
                 assert "cannot tell whether it put it there" in listed[0]["last_error"]
                 assert (await sam.get("/api/leases")).json() == []
-                assert (await owner.post(f"/api/leases/{listed[0]['id']}/end")).status_code == 200
+                end = f"/api/leases/{listed[0]['id']}/end"
+                if gone:
+                    removed = await owner.request("DELETE", "/api/integrations/dns", json={"name": "Home DNS"})
+                    assert removed.status_code == 200 and (await owner.get("/api/leases")).json()[0]["source_removed"]
+                    refused = await owner.post(end)
+                    assert refused.status_code == 409 and "Check at Home DNS" in refused.json()["detail"]
+                assert (await owner.post(end, json={"by_hand": gone})).status_code == 200
 
         asyncio.run(scenario())
-        assert NoRead.removals == 0 and rows(app) == [("ended", "not_confirmed", False)]
-        assert trail(app) == [("access.open_unconfirmed", "failed"), ("access.closed", "not_applied")]
+        how, outcome = ("removed_by_hand", "applied") if gone else ("not_confirmed", "not_applied")
+        assert NoRead.removals == 0 and rows(app) == [("ended", how, False)]
+        assert trail(app) == [("access.open_unconfirmed", "failed"), ("access.closed", outcome)]
 
 
 def test_a_refusal_before_anything_is_sent_leaves_no_record(tmp_path, monkeypatch):

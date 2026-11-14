@@ -674,7 +674,9 @@ async def end(lease_id: str, request: Request, body: EndInput | None = None, use
         raise HTTPException(404, "Lease not found")
     if lease.status not in OPEN:
         raise HTTPException(409, "This access has already ended")
-    gone, by_hand = _ours(lease) and source_removed(db, lease), bool(body and body.by_hand)
+    # A record at a source that could not say whether the entry is Nyctr's: once the source is gone, a person ends it.
+    mine = _ours(lease) or lease.status == "unconfirmed"
+    gone, by_hand = mine and source_removed(db, lease), bool(body and body.by_hand)
     if by_hand and not gone:
         raise HTTPException(409, "Nyctr can still reach this source, so end the exception here instead.")
     if gone and not by_hand:
