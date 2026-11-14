@@ -244,6 +244,29 @@ describe('how many exceptions Open now says are open', () => {
     ).toBeTruthy();
   });
 
+  it('never counts an opening it could not confirm, while checking, after, or once settled', async () => {
+    const record = {
+      status: 'unconfirmed',
+      execution: 'not_applied',
+      last_error: 'It may be open.',
+    };
+    const until = new Date(Date.now() + 4 * 60_000).toISOString();
+    for (const more of [{ checking_until: until }, {}] as Partial<Lease>[]) {
+      const lede = await show([lease('late', { ...record, ...more } as Partial<Lease>)]);
+      expect(lede).toMatch(
+        /^Nothing is open on Nyctr's record\. .*may still be open at the source/,
+      );
+      cleanup();
+    }
+    for (const execution of ['applied', 'not_applied'] as const) {
+      const lede = await show([
+        lease('late', { status: 'ended', ended_reason: 'not_confirmed', execution }),
+      ]);
+      expect(lede).toBe('Nothing is open. Temporary access appears here while it lasts.');
+      cleanup();
+    }
+  });
+
   it.each(['simulated', 'not_applied', 'failed'] as const)(
     'says nothing is open at a source when every decision was %s',
     async (execution) => {

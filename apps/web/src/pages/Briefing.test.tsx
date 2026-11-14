@@ -324,6 +324,37 @@ describe('what the Briefing lists as open right now', () => {
     },
   );
 
+  it('says until when Nyctr is still checking, and lists nothing once the record is settled', async () => {
+    const until = new Date(Date.now() + 4 * 60_000).toISOString();
+    const text = await panel([
+      { ...unconfirmed, domain: 'cdn.printshop.example', checking_until: until },
+    ]);
+    expect(text).toContain(MAY_BE_OPEN);
+    expect(text).toMatch(
+      /Not confirmed\. It may be open at the source\. Nyctr is still checking there, until \S.*\./,
+    );
+    // Its five minutes over and not yet settled: still listed as one that may be open, with no time.
+    cleanup();
+    const later = await panel([{ ...unconfirmed, domain: 'cdn.printshop.example' }]);
+    expect(later).toContain(MAY_BE_OPEN);
+    expect(later).not.toContain('still checking');
+    // Settled, as removed or as nothing found: a closed record, so nothing is listed.
+    for (const execution of ['applied', 'not_applied'] as const) {
+      cleanup();
+      mockApi({
+        'GET /overview': overview,
+        'GET /leases': [
+          { ...unconfirmed, status: 'ended', ended_reason: 'not_confirmed', execution },
+        ],
+        'GET /integrations': [],
+        'GET /collection': scheduleFixture(),
+      });
+      render(<Briefing attention={[]} loading={false} />);
+      expect(await screen.findByText('Nothing is open.')).toBeTruthy();
+      expect(document.body.textContent).not.toMatch(/slow\.example|may still be open/);
+    }
+  });
+
   it('puts what is open first and words the rest as unchanged', async () => {
     const text = await panel([
       lease({ id: 'l2', domain: 'docs.example', execution: 'not_applied' }),

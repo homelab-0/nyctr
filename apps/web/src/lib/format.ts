@@ -81,7 +81,9 @@ export const isOpen = (lease: Lease) => lease.status === 'active' && lease.execu
 
 /** What an exception's record says happened at its source, in the words Open now uses. */
 export function atSource(lease: Lease) {
-  if (lease.status === 'unconfirmed') return 'Not confirmed. It may be open at the source.';
+  // While Nyctr still reads the source for it (a source can apply an add late), that is said too.
+  if (lease.status === 'unconfirmed')
+    return `Not confirmed. It may be open at the source.${lease.checking_until ? ` Nyctr is still checking there, until ${clock(lease.checking_until)}.` : ''}`;
   return lease.execution === 'applied' && !lease.owned ? UNOWNED : executionText(lease.execution);
 }
 

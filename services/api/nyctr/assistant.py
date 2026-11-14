@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .access import suggestions
+from .access import checking_until, suggestions
 from .analysis import cut_title
 from .collection import last_gaps
 from .config import Settings
@@ -193,9 +193,15 @@ def evidence_pack(db: Session, settings: Settings, focus: Finding | None = None)
     # Open means applied at a source. A decision that changed nothing there is listed apart and never as open.
     pack["access_open_now"] = [x for x in decided if x["provider_result"] == "applied"]
     pack["decided_not_changed_at_source"] = [x for x in decided if x["provider_result"] != "applied"]
-    # An opening that could not be confirmed is neither: it may be open at the source.
-    pack["opening_not_confirmed_may_be_open"] = [exception(x) for x in db.scalars(
-        select(Lease).where(Lease.status == "unconfirmed").order_by(Lease.created_at.desc()).limit(10))]
+    # An opening that could not be confirmed is neither: it may be open at the source, for as long as it is
+    # listed. Nobody decided it and no result is known, so it carries neither; only what its record says,
+    # and until when Nyctr still reads the source for it (a source can apply an add late).
+    pack["opening_not_confirmed_may_be_open"] = [{
+        "ref": ref("l", "lease", x.id, x.domain), "kind": "lease", "domain": _clean(x.domain, 120),
+        "affects": _clean(x.scope, 120), "record_says": _clean(x.last_error) if x.last_error else None,
+        "nyctr_still_checking_until": (until := checking_until(x)) and until.isoformat(timespec="minutes")}
+        for x in db.scalars(select(Lease).where(Lease.status == "unconfirmed")
+                            .order_by(Lease.created_at.desc()).limit(10))]
     passes = list(db.scalars(select(GuestPass)))
     pack["guest_devices"] = []
     for device in guest_devices(db)[:20]:
@@ -300,7 +306,10 @@ def _sample_answer(question: str, pack: dict[str, Any]) -> str:
             "Nothing is open on Nyctr's record." if unsure else "Nothing is open at a source right now."]
         if unsure:
             said.append(f"{len(unsure)} opening{'s' if len(unsure) != 1 else ''} could not be confirmed and may be "
-                        "open at the source: " + ". ".join(f"{x['domain']} {cite(x)}" for x in unsure) + ".")
+                        "open at the source: " + ". ".join(
+                            f"{x['domain']}" + (" (Nyctr is still checking the source)"
+                                                if x["nyctr_still_checking_until"] else "") + f" {cite(x)}"
+                            for x in unsure) + ".")
         if unchanged:
             said.append(f"{len(unchanged)} decided here changed nothing at a source: " + ". ".join(
                 f"{x['domain']} ({_UNCHANGED.get(x['provider_result'], 'not changed')}) {cite(x)}"

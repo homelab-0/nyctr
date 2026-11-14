@@ -1,9 +1,9 @@
 """What a screen is told about a guest or an exception matches the record: only an applied change reads as done."""
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from nyctr import assistant
+from nyctr import access, assistant
 from nyctr.analysis import refresh_findings
 from nyctr.models import Audit, GuestAction, Lease, Resource, utcnow
 
@@ -160,20 +160,48 @@ def test_an_applied_exception_is_never_left_out_of_what_the_assistant_is_told_is
 
 
 def test_the_assistant_never_says_nothing_is_open_over_an_opening_that_was_not_confirmed(app, client, admin_headers):
-    """An unconfirmed opening has its own place in the pack, and the sample answer says it may be open."""
+    """For as long as an unconfirmed opening is listed it is told as one that may be open, and as nobody's decision.
+
+    Its whole life: read again for five minutes after the attempt, listed until it is settled, then
+    settled as removed or as nothing found. Only a settled record lets the answer say nothing is open.
+    """
     words = "Nyctr tried to open slow.example at 192.0.2.7 and has not confirmed it. It may be open there."
-    with app.state.session_factory() as db:
-        db.add(exception("slow", status="unconfirmed", execution="not_applied", last_error=words))
+
+    def told():
+        with app.state.session_factory() as db:
+            pack, _refs = assistant.evidence_pack(db, app.state.settings)
+        answer = client.post("/api/assistant/ask", headers=admin_headers,
+                             json={"question": "What is open right now?"}).json()["answer"]
+        return pack, answer
+
+    def change(**values):
+        with app.state.session_factory() as db:
+            db.execute(update(Lease).where(Lease.id == "slow").values(**values))
+            db.commit()
+
+    with app.state.session_factory() as db:  # The record as an attempt leaves it: nobody's decision, no result.
+        db.add(Lease(id="slow", integration_id="demo-nextdns", domain="slow.example", status="unconfirmed", owned=True,
+                     scope="Everyone using Office DNS", decided_by="", created_at=utcnow(), last_error=words))
         db.commit()
-        pack, _refs = assistant.evidence_pack(db, app.state.settings)
-    unsure = pack["opening_not_confirmed_may_be_open"]
-    assert [x["domain"] for x in unsure] == ["slow.example"]
-    assert not any(x["domain"] == "slow.example"
-                   for x in pack["access_open_now"] + pack["decided_not_changed_at_source"])
-    # Redacted like every other row: the address in the stored words does not reach a model.
-    assert "192.0.2.7" not in str(unsure) and "[removed]" in unsure[0]["close_error"]
-    answer = client.post("/api/assistant/ask", headers=admin_headers,
-                         json={"question": "What is open right now?"}).json()["answer"]
-    assert "Nothing is open at a source" not in answer
-    assert answer.startswith("Nothing is open on Nyctr's record. 1 opening could not be confirmed and may be open at "
-                             "the source: slow.example")
+    for still_checking in (True, False):
+        pack, answer = told()
+        unsure = pack["opening_not_confirmed_may_be_open"]
+        assert [x["domain"] for x in unsure] == ["slow.example"]
+        assert bool(unsure[0]["nyctr_still_checking_until"]) is still_checking
+        # Nothing says who decided it or what happened at the source: neither is known.
+        assert not {"decided_by", "provider_result", "ends", "type"} & set(unsure[0])
+        assert not any(x["domain"] == "slow.example"
+                       for x in pack["access_open_now"] + pack["decided_not_changed_at_source"])
+        # Redacted like every other row: the address in the stored words does not reach a model.
+        assert "192.0.2.7" not in str(unsure) and "[removed]" in unsure[0]["record_says"]
+        assert "Nothing is open at a source" not in answer
+        assert answer.startswith("Nothing is open on Nyctr's record. 1 opening could not be confirmed and may be "
+                                 "open at the source: slow.example")
+        assert ("(Nyctr is still checking the source)" in answer) is still_checking
+        change(created_at=utcnow() - access.STILL_CHECKING)  # Then: its five minutes are over, not yet settled.
+    for removed in ("applied", "not_applied"):  # Settled: the entry was removed, or nothing was found.
+        change(status="ended", ended_reason="not_confirmed", execution=removed, ended_at=utcnow(), last_error=None)
+        pack, answer = told()
+        assert pack["opening_not_confirmed_may_be_open"] == [] and pack["access_open_now"] == []
+        assert not any(x["domain"] == "slow.example" for x in pack["decided_not_changed_at_source"])
+        assert answer.startswith("Nothing is open at a source right now.")
