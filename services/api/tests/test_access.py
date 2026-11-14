@@ -191,9 +191,9 @@ def test_this_device_is_recognised_only_among_the_callers_devices(client, app, m
     """Recognition returns a device the member already holds; an address never grants a new one."""
     seen = client.get("/api/me/device").json()
     assert seen == {"device_id": "laptop-jamie", "name": "Jamie's MacBook", "simulated": True}
-    found = client.post("/api/blocks/find", headers=member_headers, json={"domain": "shootproof.com"}).json()
+    found = client.post("/api/blocks/find", headers=member_headers, json={"domain": "proofing-studio.example"}).json()
     assert [x["id"] for x in found] == ["block-gallery"]
-    hidden = client.post("/api/blocks/find", headers=member_headers, json={"domain": "downloads.example.net"})
+    hidden = client.post("/api/blocks/find", headers=member_headers, json={"domain": "downloads.filemirror.example"})
     assert hidden.json() == []
 
 
@@ -271,7 +271,7 @@ def test_enabled_writes_add_verify_and_remove_only_what_nyctr_created(tmp_path, 
     with TestClient(app) as client:
         seed_live_member(app)
         row, admin_headers = open_live(client, app)
-        assert row["status"] == "auto_approved" and allowlist == ["click.shootproof.com"]
+        assert row["status"] == "auto_approved" and allowlist == ["click.proofing-studio.example"]
         lease = client.get("/api/leases").json()[0]
         assert lease["execution"] == "applied" and lease["owned"] is True
         assert [c[0] for c in calls] == ["GET", "POST", "GET"]
@@ -283,7 +283,7 @@ def test_enabled_writes_add_verify_and_remove_only_what_nyctr_created(tmp_path, 
 
 def test_a_preexisting_entry_is_never_removed(tmp_path, monkeypatch):
     """If the domain was already allowed, the lease is not owned and expiry leaves the provider alone."""
-    allowlist = ["click.shootproof.com"]
+    allowlist = ["click.proofing-studio.example"]
     calls = nextdns_mock(monkeypatch, allowlist)
     app = live_app(tmp_path, provider_writes="nextdns")
     with TestClient(app) as client:
@@ -292,7 +292,7 @@ def test_a_preexisting_entry_is_never_removed(tmp_path, monkeypatch):
         lease = client.get("/api/leases").json()[0]
         assert lease["execution"] == "applied" and lease["owned"] is False
         assert client.post(f"/api/leases/{lease['id']}/end", headers=admin_headers).status_code == 200
-        assert allowlist == ["click.shootproof.com"] and all(method == "GET" for method, _ in calls)
+        assert allowlist == ["click.proofing-studio.example"] and all(method == "GET" for method, _ in calls)
 
 
 def test_a_failed_close_stays_open_visible_and_retried(tmp_path, monkeypatch):
@@ -307,7 +307,7 @@ def test_a_failed_close_stays_open_visible_and_retried(tmp_path, monkeypatch):
         assert client.post(f"/api/leases/{lease['id']}/end", headers=admin_headers).status_code == 502
         after = client.get("/api/leases").json()[0]
         assert after["status"] == "active" and "HTTP 500" in after["last_error"]
-        assert allowlist == ["click.shootproof.com"]
+        assert allowlist == ["click.proofing-studio.example"]
         assert any(x["kind"] == "lease" for x in client.get("/api/attention").json())
 
 

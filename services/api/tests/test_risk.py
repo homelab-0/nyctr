@@ -7,7 +7,7 @@ from nyctr import risk
 
 def test_privacy_list_block_scores_low_and_says_why():
     """A privacy-list reason is low risk and the factor names the kind of list, not a verdict of safety."""
-    result = risk.assess("click.shootproof.com", "HaGeZi Multi PRO++", ["blocklist:hagezi-multi-pro-plusplus"], "nextdns")
+    result = risk.assess("click.proofing-studio.example", "HaGeZi Multi PRO++", ["blocklist:hagezi-multi-pro-plusplus"], "nextdns")
     assert result.score == 16 and result.band == "low" and result.category == risk.PRIVACY
     assert "privacy" in result.factors[0]["label"].lower()
 

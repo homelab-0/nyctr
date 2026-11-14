@@ -295,9 +295,9 @@ def test_unifi_destination_boundaries(monkeypatch, url):
 
 def test_expected_private_gateway_requires_explicit_allowlist(monkeypatch):
     """Permit an intended private console only with explicit server-side host approval."""
-    monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "10.20.65.1")
-    config = validate_config("unifi_network", {"base_url": "https://10.20.65.1/proxy/network/integration/"})
-    assert config["base_url"] == "https://10.20.65.1/proxy/network/integration"
+    monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "192.0.2.1")
+    config = validate_config("unifi_network", {"base_url": "https://192.0.2.1/proxy/network/integration/"})
+    assert config["base_url"] == "https://192.0.2.1/proxy/network/integration"
 
 
 def test_nextdns_does_not_accept_credential_destinations_or_inline_secrets():
@@ -318,8 +318,8 @@ def test_unifi_models_real_uplink_and_policy_evidence_not_access_results(monkeyp
     pages = {
         "/v1/sites": [{"id": "site-one", "name": "Lab"}],
         "/v1/sites/site-one/devices": [{"id": "gw-one", "name": "Gateway", "features": ["gateway", "switching"]}],
-        "/v1/sites/site-one/networks": [{"id": "net-one", "name": "LAN", "vlanId": 66, "zoneId": "internal"}],
-        "/v1/sites/site-one/clients": [{"id": "client-one", "name": "Laptop", "uplinkDeviceId": "gw-one", "ipAddress": "10.20.66.10", "type": "WIRED"}],
+        "/v1/sites/site-one/networks": [{"id": "net-one", "name": "LAN", "vlanId": 20, "zoneId": "internal"}],
+        "/v1/sites/site-one/clients": [{"id": "client-one", "name": "Laptop", "uplinkDeviceId": "gw-one", "ipAddress": "198.51.100.10", "type": "WIRED"}],
         "/v1/sites/site-one/firewall/policies": [{"id": "rule-one", "name": "Block management", "action": {"type": "BLOCK"}, "source": {"zoneId": "internal"}, "destination": {"zoneId": "external"}, "index": 10}],
         "/v1/sites/site-one/hotspot/vouchers": [],
         "/v1/sites/site-one/wifi/broadcasts": [
