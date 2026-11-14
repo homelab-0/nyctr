@@ -77,10 +77,10 @@ def test_what_the_first_try_could_not_remove_is_listed_never_as_access_and_settl
                 assert [(row["status"], row["execution"], row["requester_id"]) for row in listed] == [
                     ("unconfirmed", "not_applied", None)]
                 assert all(part in listed[0]["last_error"] for part in (
-                    f"tried to open {DOMAIN} at Home DNS", "not confirmed", "may be open there", "Nyctr removes it"))
+                    f"tried to open {DOMAIN} at Office DNS", "not confirmed", "may be open there", "Nyctr removes it"))
                 assert made["status"] == "pending" and (await sam.get("/api/leases")).json() == []
                 assert (await owner.get("/api/suggestions")).json() == []
-                refused = await owner.request("DELETE", "/api/integrations/dns", json={"name": "Home DNS"})
+                refused = await owner.request("DELETE", "/api/integrations/dns", json={"name": "Office DNS"})
                 assert refused.status_code == 409 and "1 open exception" in refused.json()["detail"]
                 again = await owner.post(f"/api/requests/{made['id']}/review", json=REVIEW)
                 assert again.status_code == 409 and "still removing an earlier attempt" in again.json()["detail"]
@@ -196,10 +196,10 @@ def test_a_source_that_cannot_say_whether_the_address_was_there_gets_a_record_ny
                 assert (await sam.get("/api/leases")).json() == []
                 end = f"/api/leases/{listed[0]['id']}/end"
                 if gone:
-                    removed = await owner.request("DELETE", "/api/integrations/dns", json={"name": "Home DNS"})
+                    removed = await owner.request("DELETE", "/api/integrations/dns", json={"name": "Office DNS"})
                     assert removed.status_code == 200 and (await owner.get("/api/leases")).json()[0]["source_removed"]
                     refused = await owner.post(end)
-                    assert refused.status_code == 409 and "Check at Home DNS" in refused.json()["detail"]
+                    assert refused.status_code == 409 and "Check at Office DNS" in refused.json()["detail"]
                 assert (await owner.post(end, json={"by_hand": gone})).status_code == 200
 
         asyncio.run(scenario())
