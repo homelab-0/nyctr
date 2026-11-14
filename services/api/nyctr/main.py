@@ -757,9 +757,14 @@ def create_app(settings: Settings | None = None):
             access.release_entry(db, claim, unstored=opened)
             if isinstance(error, access.SourceGone):
                 error.record(db)  # the request stays waiting; what was done at the source is kept
-            # The person who asked reads this note: it says nothing of the source or the reason. The
-            # administrator is told those in the answer to their own click.
-            access.end_review(db, gate, access.NOT_OPENED if approving else None)
+            # The person who asked reads the note: it says nothing of the source or the reason. The reason is
+            # answered to the administrator's click and kept in the audit record, which only administrators read.
+            try:
+                if approving and not isinstance(error, HTTPException):
+                    audit(db, user.id, "access.approve_failed", request_id, domain=row.domain,
+                          why=str(error) if isinstance(error, IntegrationError) else "Nyctr met an error.")
+            finally:  # Whatever becomes of the record, the request's claim goes back.
+                access.end_review(db, gate, access.NOT_OPENED if approving else None)
             if not isinstance(error, IntegrationError):
                 raise
             refused = isinstance(error, (access.SourceGone, access.NotCollected, access.EntryBusy))

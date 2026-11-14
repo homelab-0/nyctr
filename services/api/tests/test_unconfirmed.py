@@ -87,7 +87,8 @@ def test_what_the_first_try_could_not_remove_is_listed_never_as_access_and_settl
                 assert source.listed == [DOMAIN] and "POST" not in source.calls[3:]  # Nothing new was sent.
                 tries = trail(app)  # The try before the answer, then one each time the list or an opening looked.
                 assert tries[0] == ("access.open_unconfirmed", "failed") and len(tries) > 2
-                assert set(tries[1:]) == {("access.close_failed", None)}
+                # The refused approval is on record too, with its reason, for administrators.
+                assert set(tries[1:]) == {("access.close_failed", None), ("access.approve_failed", None)}
                 source.fail.clear()
                 sent = len(source.calls)
                 assert (await owner.post(f"/api/requests/{made['id']}/review", json=REVIEW)).status_code == 200

@@ -18,6 +18,7 @@ const WORDS: Record<string, string> = {
   'access.closed': 'Access closed',
   'access.close_failed': 'Access could not be closed',
   'access.approved': 'Approved a request',
+  'access.approve_failed': 'Approved a request, and nothing was opened',
   'access.denied': 'Said no to a request',
   'access.reviewed': 'Reviewed a request',
   'rule.access_changed': 'Changed the access rule',
@@ -178,7 +179,8 @@ function summary(event: AuditEvent) {
         : 'now turned off',
     );
   if (typeof d.reason === 'string' && d.reason) parts.push(REASONS[d.reason] || d.reason);
-  // Why a collection failed, in the words the source's card uses, and when the next try is due.
+  // Why a collection failed, in the words the source's card uses, or why an approval opened nothing,
+  // in the sentence the administrator was answered with; and when the next try is due.
   if (typeof d.why === 'string' && d.why) parts.push(d.why);
   if (typeof d.retry_at === 'string') parts.push(`next try at ${clock(d.retry_at)}`);
   return parts.join(' · ');

@@ -138,8 +138,12 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   there when Nyctr asked, a person removes it in that second, Nyctr's add is
   sent and that copy is killed before it records the add's answer, the entry
   stays with nothing on record (a failure short of a kill is recorded and the
-  entry removed). After a copy is killed during an approval, that request can
-  be decided again only once its claim is five minutes old. The nudge and the
+  entry removed). An opening that stands still for more than five minutes
+  after its add cannot know what became of its entry: Nyctr removes nothing on
+  its word and asks an administrator to check at the source, so an entry of
+  Nyctr's can stay there until a person ends it. After a copy is killed during
+  an approval, that request can be decided again only once its claim is five
+  minutes old. The nudge and the
   assistant's limit are still per process.
 - Scheduled collection is on by default and only an administrator can change it
   (`PUT /api/collection`); every change is audited with the old and new
