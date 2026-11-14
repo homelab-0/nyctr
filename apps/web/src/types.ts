@@ -105,6 +105,28 @@ export interface CatalogProvider {
   reads: { id: string; label: string }[];
   changes: string[];
   write_mode: WriteMode | 'none';
+  /** Cautions about what a source of this kind tells Nyctr, in the integration's own words. */
+  limits?: { id: string; title: string; summary: string }[];
+  /** What a source of this kind never collects, each a few plain words. */
+  not_collected?: string[];
+}
+/** What the finding rules check with the sources connected, and what is collected but never checked. */
+export interface FindingChecks {
+  checks: { text: string; active: boolean }[];
+  not_checked: string[];
+}
+/**
+ * Why a list of blocked sites may be empty or short. Carries no source, count, address or device,
+ * and nothing in it changes because of a lookup assigned to a device.
+ */
+export interface BlockCoverage {
+  /**
+   * `none`: no connected source reports blocked lookups. `failed`: the latest collection of one
+   * failed. `no`: one has not been collected yet. `yes`: every one has a working collection.
+   */
+  collected: 'none' | 'no' | 'failed' | 'yes';
+  /** True when some stored lookup is assigned to no device, so no member can be shown it. */
+  unassigned: boolean;
 }
 export interface Catalog {
   capabilities: Capability[];

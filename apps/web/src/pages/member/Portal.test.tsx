@@ -19,7 +19,7 @@ const member: User = {
 const block = (id: string, domain: string, device: string, extra: Partial<Block> = {}): Block => ({
   id,
   device_id: device,
-  device_name: device === 'laptop' ? "Sam's laptop" : 'Family tablet',
+  device_name: device === 'laptop' ? "Sam's laptop" : 'Front desk tablet',
   domain,
   source: 'nextdns',
   reason: 'HaGeZi Multi PRO++',
@@ -69,7 +69,7 @@ const lease = (extra: Partial<Lease> = {}): Lease => ({
   ended_reason: null,
   execution: 'applied',
   owned: true,
-  scope: 'Everyone using Home DNS',
+  scope: 'Everyone using Office DNS',
   decided_by: 'rule',
   risk_score: 16,
   created_at: new Date().toISOString(),
@@ -87,6 +87,8 @@ function open(routes: Record<string, unknown>, hash = '/portal') {
     'GET /blocks': [],
     'GET /requests': [],
     'GET /leases': [],
+    'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
+    'GET /blocks/coverage': { collected: 'yes', unassigned: false },
     ...routes,
   });
   render(
@@ -105,6 +107,135 @@ afterEach(() => {
 });
 
 describe('member portal', () => {
+  it('tells a member with no devices that first, with who to ask', async () => {
+    open({
+      'GET /me/device': { device_id: null, name: null, simulated: false },
+      'GET /devices': [],
+    });
+    expect(await screen.findByText('No devices are assigned to you yet.')).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page).toContain('Ask whoever runs Nyctr to add your devices.');
+    expect(page).not.toContain('could not tell which of your devices');
+    expect(page).not.toContain('Nothing has been blocked');
+  });
+
+  it('says why it cannot show blocked sites instead of saying nothing was blocked', async () => {
+    const cases = [
+      [{ collected: 'no', unassigned: false }, 'Blocked sites have not been collected yet'],
+      [{ collected: 'failed', unassigned: false }, 'Blocked sites could not be collected'],
+      [{ __status: 500 }, 'Nyctr cannot tell right now whether anything was blocked'],
+    ] as const;
+    for (const [coverage, title] of cases) {
+      open({ 'GET /blocks/coverage': coverage });
+      expect(await screen.findByText(title)).toBeDefined();
+      expect(document.body.textContent).toContain('Ask whoever runs Nyctr');
+      expect(document.body.textContent).not.toContain('Nothing has been blocked');
+      cleanup();
+    }
+  });
+
+  it('claims only what is known when some blocked sites are tied to no device', async () => {
+    open({ 'GET /blocks/coverage': { collected: 'yes', unassigned: true } });
+    expect(
+      await screen.findByText(
+        'Nyctr has not seen anything blocked on your devices in the last day',
+      ),
+    ).toBeDefined();
+    expect(screen.getByText(/one of yours may be missing here/)).toBeDefined();
+    expect(document.body.textContent).not.toContain('Nothing has been blocked');
+    cleanup();
+    // The same caveat stands under a list that is not empty: a third site may be among the untied.
+    open({
+      'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+      'GET /blocks/coverage': { collected: 'yes', unassigned: true },
+    });
+    expect(await screen.findByText('photos.example')).toBeDefined();
+    expect(screen.getByText(/one of yours may be missing here/)).toBeDefined();
+    cleanup();
+    open({ 'GET /blocks': [block('b1', 'photos.example', 'laptop')] });
+    expect(await screen.findByText('photos.example')).toBeDefined();
+    expect(screen.queryByText(/may be missing/)).toBeNull();
+  });
+
+  it('says under a list that a newer block may be missing while collection is failing or unfinished', async () => {
+    const cases = [
+      [
+        'failed',
+        false,
+        'Nyctr could not read what was blocked just now, so a newer block may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+      [
+        'no',
+        false,
+        'Nyctr has not finished reading what was blocked, so a newer block may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+      [
+        'failed',
+        true,
+        'Nyctr could not read what was blocked just now, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+      [
+        'no',
+        true,
+        'Nyctr has not finished reading what was blocked, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. Ask whoever runs Nyctr if a page will not load.',
+      ],
+    ] as const;
+    for (const [collected, unassigned, line] of cases) {
+      open({
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /blocks/coverage': { collected, unassigned },
+      });
+      expect(await screen.findByText('photos.example')).toBeDefined();
+      expect(screen.getByText(line)).toBeDefined();
+      // One note, never two stacked.
+      expect(screen.getAllByText(/may be missing here/)).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it('never tells a member with a blocked site listed that there is nothing to ask about', async () => {
+    for (const collected of ['failed', 'no'] as const) {
+      const { user } = open({
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /blocks/coverage': { collected, unassigned: false },
+      });
+      expect(await screen.findByText('photos.example')).toBeDefined();
+      await user.click(screen.getByRole('link', { name: /My requests/ }));
+      expect(
+        await screen.findByText(
+          'When a page is blocked, find it under Blocked sites and ask to open it.',
+        ),
+      ).toBeDefined();
+      expect(document.body.textContent).not.toContain('nothing to ask about');
+      cleanup();
+      // With nothing listed the reason is still given.
+      const empty = open({ 'GET /blocks/coverage': { collected, unassigned: false } });
+      await empty.user.click(await screen.findByRole('link', { name: /My requests/ }));
+      expect(await screen.findByText(/so there is nothing to ask about yet/)).toBeDefined();
+      cleanup();
+    }
+  });
+
+  it('does not say nothing was blocked before it knows why the list is empty', async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    open({});
+    const answer = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, options?: RequestInit) =>
+      String(input).endsWith('/blocks/coverage')
+        ? gate.then(() => answer(input, options))
+        : answer(input, options),
+    );
+    expect(await screen.findByText('Looking for blocked sites…')).toBeDefined();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText('Looking for blocked sites…')).toBeDefined();
+    expect(document.body.textContent).not.toContain('Nothing has been blocked');
+    release();
+    expect(
+      await screen.findByText('Nothing has been blocked on your devices in the last day'),
+    ).toBeDefined();
+  });
+
   it('only tells a member to come back when a collection is scheduled', async () => {
     open({ 'GET /collection': memberSchedule(true) });
     expect(
@@ -148,7 +279,7 @@ describe('member portal', () => {
   it('lists blocks on the device in hand first and never shows the administrator console', async () => {
     open({
       'GET /blocks': [
-        block('b2', 'kids.example', 'tablet'),
+        block('b2', 'training.example', 'tablet'),
         block('b1', 'photos.example', 'laptop'),
         block('b3', 'photos.example', 'laptop'),
       ],
@@ -161,7 +292,7 @@ describe('member portal', () => {
     const other = screen
       .getByRole('heading', { name: 'On your other devices' })
       .closest('section')!;
-    expect(within(other).getByText('kids.example')).toBeDefined();
+    expect(within(other).getByText('training.example')).toBeDefined();
     expect(screen.getByText(/You're on/).textContent).toContain("Sam's laptop");
     expect(screen.queryByText('Briefing')).toBeNull();
     expect(screen.queryByRole('button', { name: /Ask Nyctr/ })).toBeNull();

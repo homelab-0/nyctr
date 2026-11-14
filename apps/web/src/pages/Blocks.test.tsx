@@ -33,6 +33,62 @@ afterEach(() => {
 });
 
 describe('Blocks', () => {
+  it('says once that a source names no device, and tells not collected from nothing blocked', async () => {
+    const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
+    const limits = [{ id: 'upstream_identity', title: 'T', summary: 'Declared by the source.' }];
+    mockApi({
+      'GET /blocks': [block('one', 5), block('two', 9)],
+      'GET /integrations': [dns],
+      'GET /integrations/catalog': { providers: [{ id: 'example_dns', limits }] },
+    });
+    render(<Blocks />);
+    const note = await screen.findByText('Home DNS does not say which device made a lookup.');
+    expect(note.closest('.note')!.textContent).toContain('None of its 2 stored lookups');
+    expect(await screen.findByText(/Declared by the source\./)).toBeDefined();
+    expect(screen.getAllByText('The source does not say')).toHaveLength(2);
+    expect(screen.queryByText('No device known')).toBeNull();
+    cleanup();
+    mockApi({
+      'GET /blocks': [],
+      'GET /integrations': [
+        { ...dns, last_sync: null, status: 'error', last_error: 'Key refused' },
+      ],
+    });
+    render(<Blocks />);
+    expect(await screen.findByText('Could not be collected')).toBeDefined();
+    expect(document.body.textContent).toContain('Home DNS could not be collected: Key refused');
+    expect(document.body.textContent).not.toContain('No blocked lookups are stored');
+  });
+
+  it('does not call the last collection empty when the source collected once and is failing now', async () => {
+    const dns = { ...source('Home DNS', 'connected'), provides: ['dns.blocks'] };
+    mockApi({
+      'GET /blocks': [],
+      'GET /integrations': [{ ...dns, last_sync: 'x', last_error: 'Key refused' }],
+    });
+    render(<Blocks />);
+    expect(await screen.findByText('Could not be collected')).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page).toContain('Blocked lookups could not be collected.');
+    expect(page).toContain('since its last collection that worked is missing here');
+    expect(page).not.toContain('No blocked lookups are stored');
+    expect(page).not.toContain('The last collection brought none back');
+    cleanup();
+    mockApi({ 'GET /blocks': [], 'GET /integrations': [{ ...dns, last_sync: 'x' }] });
+    render(<Blocks />);
+    expect(await screen.findByText('No blocked lookups are stored')).toBeDefined();
+  });
+
+  it('does not say a source names no device when one of its lookups names one', async () => {
+    const dns = { ...source('Home DNS', 'connected'), last_sync: 'x', provides: ['dns.blocks'] };
+    const named = { ...block('two', 9), device_id: 'd1', attribution: 'assigned' } as Block;
+    mockApi({ 'GET /blocks': [block('one', 5), named], 'GET /integrations': [dns] });
+    render(<Blocks />);
+    expect(await screen.findByText('one.example')).toBeDefined();
+    expect(screen.queryByText(/does not say which device/)).toBeNull();
+    expect(screen.queryByText('The source does not say')).toBeNull();
+  });
+
   it('says the span the stored lookups cover and which source was only partly read', async () => {
     mockApi({
       'GET /blocks': [block('new', 12), block('mid', 200), block('old', 565)],

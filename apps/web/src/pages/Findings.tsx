@@ -4,7 +4,7 @@ import { post, useApi } from '../api';
 import { everyText, useSchedule } from '../lib/schedule';
 import { Empty, ErrorState, InlineError, Loading, Panel, Seg, kindIcon } from '../components/ui';
 import { askNyctr } from '../lib/links';
-import type { Finding, Insight, Resource } from '../types';
+import type { Finding, FindingChecks, Insight, Resource } from '../types';
 
 const ORDER = ['high', 'medium', 'low', 'informational'];
 const TONE: Record<string, string> = { high: 'red', medium: 'yellow', low: '', informational: '' };
@@ -93,10 +93,45 @@ function Read({ finding }: { finding: Finding }) {
   );
 }
 
+/** What the rules look at and what they never do, so an empty list is not read as "all checked". */
+function Checked({ cover }: { cover: FindingChecks }) {
+  return (
+    <Panel title="What Nyctr checks" hint="Only these. Nothing else can produce a finding.">
+      <div className="stack">
+        <ul className="bullets">
+          {cover.checks.map((check) => (
+            <li key={check.text}>
+              {check.text}
+              {!check.active && (
+                <span className="muted">
+                  {' '}
+                  (no collected source reports this, so there is nothing to check)
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {cover.not_checked.length > 0 && (
+          <div className="note hatch">
+            <div>
+              <b>Collected but not checked</b>
+              <p>
+                {cover.not_checked.join(', ')}. Nyctr stores these, but no check reads them, so
+                nothing wrong with them would show up here.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 /** Findings from fixed rules over stored evidence, each with the evidence and what it does not prove. */
 export default function Findings({ params }: { params: URLSearchParams }) {
   const findings = useApi<Finding[]>('/findings');
   const resources = useApi<Resource[]>('/resources');
+  const cover = useApi<FindingChecks>('/findings/checks').data;
   const every = everyText(useSchedule().data);
   const [show, setShow] = useState<'open' | 'resolved'>('open');
   const [selected, setSelected] = useState<string | null>(params.get('id'));
@@ -113,6 +148,8 @@ export default function Findings({ params }: { params: URLSearchParams }) {
     show === 'open' ? item.status === 'open' : item.status !== 'open',
   );
   const finding = list.find((item) => item.id === selected) || list[0];
+  // Only a check with something to look at can speak for an empty list.
+  const active = cover?.checks.filter((check) => check.active).length;
   const byId = new Map((resources.data || []).map((item) => [item.id, item]));
   return (
     <div className="page">
@@ -147,12 +184,22 @@ export default function Findings({ params }: { params: URLSearchParams }) {
       </header>
       {!finding ? (
         <Empty
-          title={show === 'open' ? 'No open findings' : 'Nothing resolved yet'}
-          text={
+          title={
+            show !== 'open'
+              ? 'Nothing resolved yet'
+              : !cover
+                ? 'No open findings'
+                : !active
+                  ? 'Nothing was checked, so there are no findings'
+                  : active === cover.checks.length
+                    ? `No open findings from the ${active} checks listed below`
+                    : `No open findings from the ${active} of ${cover.checks.length} checks below that had something to check`
+          }
+          text={`${show === 'open' && cover && !active ? 'No collected source reports anything the checks below look at. ' : ''}${
             every
               ? `Findings are re-checked after every collection, ${every}.`
               : 'Findings are re-checked when a source is collected.'
-          }
+          }`}
         />
       ) : (
         <div className="split wide-side">
@@ -218,6 +265,7 @@ export default function Findings({ params }: { params: URLSearchParams }) {
           </div>
         </div>
       )}
+      {cover && <Checked cover={cover} />}
     </div>
   );
 }

@@ -199,6 +199,7 @@ PROVIDER = Provider(
         ("firewall_rules", "Firewall rules are not read yet",
          "Only the on/off switches at cluster, guest and card level are collected."),
     ),
+    not_collected=("Workload firewall rules (only the on/off switches are read)",),
     gap_notes={
         "proxmox_no_visible_nodes": (
             "No nodes were visible to the token",

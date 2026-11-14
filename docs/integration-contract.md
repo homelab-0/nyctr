@@ -26,7 +26,8 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `reads` | What collection reads, as `(id, label)`. Diagnostics report each one as verified, unavailable or unknown |
 | `provides` | The capabilities below |
 | `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell |
-| `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gap_notes` are also shown on the source's card after a collection that recorded their code |
+| `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gaps` also travel in the catalog as `limits`, and the Briefing lists them under "Keep in mind" for each connected source. A source whose blocked lookups arrive without a device declares that under the gap id `upstream_identity`; Blocks quotes it when every stored lookup from the source is unattributed. `gap_notes` are also shown on the source's card after a collection that recorded their code |
+| `not_collected` | Optional. What a source of this kind never collects, each a few plain words ("DNS lookups that were allowed"). It travels in the catalog, and the Briefing lists it under "Not collected" for each connected source. A caution about evidence that is collected belongs in `gaps` |
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
 | `allow_domain`, `disallow_domain`, `issue_pass`, `end_pass`, `guest_access` | Actions, present exactly for the write capabilities declared |
 

@@ -461,6 +461,7 @@ PROVIDER = Provider(
         ("user_attribution", "Device inventory does not establish user ownership",
          "Members still require explicit device assignment and reliable event-time attribution before observations can appear in their inbox."),
     ),
+    not_collected=("Firewall connection logs and port scans", "Devices that have left the network"),
     gap_notes={
         "unifi_vouchers_unavailable": (
             "Guest passes could not be read",

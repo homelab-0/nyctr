@@ -89,6 +89,62 @@ afterEach(() => {
 });
 
 describe('guests', () => {
+  it('leads with why it cannot tell who is a guest, and does not say nobody is on', async () => {
+    const base = overview('enabled');
+    const ungated = {
+      ...base,
+      devices: [],
+      portal: { ...base.portal, wifi: [base.portal.wifi[0]] },
+    };
+    open('enabled', { 'GET /guests': ungated });
+    expect(
+      await screen.findByText(
+        'No Wi-Fi name reported by Office network uses a sign-in page, and Nyctr has no guest devices from Office network.',
+      ),
+    ).toBeDefined();
+    const page = document.body.textContent!;
+    expect(page.indexOf('uses a sign-in page, and')).toBeLessThan(page.indexOf('Who is on'));
+    expect(page).not.toContain('tells guests apart');
+    expect(page).toContain('Nyctr cannot tell who is a guest here.');
+    expect(page).not.toContain('Nobody is on the guest Wi-Fi');
+    expect(page).not.toContain('No guest devices are connected');
+    cleanup();
+    open('disabled', {
+      'GET /guests': {
+        ...ungated,
+        sources: [],
+        portal: { ...base.portal, served_by: [], wifi: [] },
+      },
+    });
+    expect(
+      await screen.findByText('No connected source can tell guests from other devices.'),
+    ).toBeDefined();
+    expect(screen.queryByText(/read-only/)).toBeNull();
+  });
+
+  it('never says it cannot tell who is a guest above a list of guest devices', async () => {
+    const base = overview('enabled');
+    for (const wifi of [[base.portal.wifi[0]], []]) {
+      open('enabled', { 'GET /guests': { ...base, portal: { ...base.portal, wifi } } });
+      expect(await screen.findByText(/1 guest device seen/)).toBeDefined();
+      expect(screen.getAllByText('Visitor phone').length).toBeGreaterThan(0);
+      expect(document.querySelector('.note[role="status"]')).toBeNull();
+      expect(document.body.textContent).not.toContain('cannot tell who is a guest');
+      cleanup();
+    }
+  });
+
+  it('says what it has, not that Wi-Fi names are still to be collected', async () => {
+    const base = overview('enabled');
+    open('enabled', {
+      'GET /guests': { ...base, devices: [], portal: { ...base.portal, wifi: [] } },
+    });
+    expect(
+      await screen.findByText('Nyctr has no Wi-Fi names and no guest devices from Office network.'),
+    ).toBeDefined();
+    expect(document.body.textContent).not.toMatch(/collected yet/i);
+  });
+
   it('says how often the cut-off rule is applied, and promises nothing while the schedule is off', async () => {
     open('enabled', { 'GET /collection': scheduleFixture() });
     expect(
