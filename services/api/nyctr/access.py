@@ -18,7 +18,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -198,9 +198,12 @@ async def open_lease(db: Session, settings: Settings, *, integration: Integratio
         try:
             claim = claim or await hold_entry(db, settings, integration, domain)
             key = _secret(integration)
+            # An entry is Nyctr's too while an earlier attempt of Nyctr's own is still on record for it: the add
+            # that attempt sent may have landed since, and must not be taken for an entry that was there before.
             shared = db.scalar(select(Lease.id).where(
-                Lease.status == "active", Lease.domain == domain, Lease.integration_id == integration.id,
-                Lease.execution == "applied", Lease.owned.is_(True)).limit(1))
+                Lease.domain == domain, Lease.integration_id == integration.id, Lease.owned.is_(True),
+                Lease.id != claim.record, or_(and_(Lease.status == "active", Lease.execution == "applied"),
+                                              Lease.status == "unconfirmed")).limit(1))
             # Read before the call: if the source goes meanwhile, its row can no longer be loaded.
             config, place, about = dict(integration.config), where_it_reads(integration), \
                 (integration.name, integration.id, _scope(integration))
@@ -410,9 +413,22 @@ def release_entry(db: Session, claim: Claim | None, unstored: bool = False) -> N
 OPEN = ("active", "unconfirmed")
 # What an administrator reads beside such a record: where Nyctr knows the entry would be its own, and
 # where the source could not say whether the address was there before.
-NOT_CONFIRMED = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. "
-                 "Unless the opening completes, Nyctr removes it. Until then Nyctr takes an entry for {domain} "
-                 "there to be its own: do not add it there by hand while it is listed here.")
+NOT_CONFIRMED = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. If it "
+                 "is, Nyctr removes it: it reads {name} again for five minutes after the attempt, because a source "
+                 "can apply a change late. Until this row is gone Nyctr takes an entry for {domain} there to be "
+                 "its own: do not add it there by hand while it is listed here.")
+# How long after an attempt Nyctr goes on reading the source for an add it sent and could not confirm. A
+# source may apply a change after Nyctr stopped waiting (20 seconds a request, 60 a change). Five minutes is
+# five times the longest Nyctr itself waits, and the time after which a claim counts as abandoned.
+STILL_CHECKING = ENDING_HOLD
+
+
+def checking_until(lease: Lease):
+    """Until when Nyctr reads the source again for an opening it could not confirm, or None if that is over."""
+    if lease.status == "unconfirmed" and lease.owned and lease.created_at:
+        until = utc(lease.created_at) + STILL_CHECKING
+        return until if utcnow() < until else None
+    return None
 NOT_KNOWN = ("Nyctr tried to open {domain} at {name} and has not confirmed it. It may be open there. Nyctr cannot "
              "tell whether it put it there, so it removes nothing. Check at {name}, then end this here.")
 THERE = ("Nyctr tried to open {domain} at {name} and has not confirmed it. The address was already allowed there "
@@ -493,7 +509,7 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
     if not key:
         raise IntegrationError(f"The secret for {integration.name} is not configured on the server.",
                                category="secret")
-    entry, name, waited = Lease(integration_id=integration.id, domain=domain), integration.name, 0.0
+    entry, name, waited, checked = Lease(integration_id=integration.id, domain=domain), integration.name, 0.0, []
     while True:
         while (claim := _claim_entry(db, entry)) is None:
             if waited >= OPENING_WAITS:
@@ -508,7 +524,7 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
                              "Nothing was opened.", lambda db: None)
         earlier = db.scalars(select(Lease).where(
             Lease.status == "unconfirmed", Lease.integration_id == entry.integration_id, Lease.domain == domain,
-            Lease.owned.is_(True))).first()
+            Lease.owned.is_(True), Lease.id.not_in(checked))).first()
         if earlier is None:
             break
         release_entry(db, claim)
@@ -517,7 +533,11 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
             db.commit()
         except BeingEnded:
             settled = False
-        if not settled:
+        if not settled and getattr(earlier, "checking", False):
+            # The source was read and shows nothing yet, but that attempt's add may still land. The record
+            # stays, and this opening goes on: whatever is there for the address from now on is Nyctr's.
+            checked.append(earlier.id)
+        elif not settled:
             raise EntryBusy(f"Nyctr is still removing an earlier attempt to open {domain} at {name}. Nothing was "
                             "opened. Try again in a moment.", category="configuration")
     listed, there = getattr(opener, "domain_listed", None), None
@@ -645,6 +665,13 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         db.refresh(lease)
         if _ours(lease):
             return await end_lease(db, settings, lease, reason, actor)
+    # The add this record stands for may still land at the source after Nyctr stopped waiting for it. Until
+    # its time is up the record is settled only by removing the entry: one read that shows nothing, or an
+    # entry another exception uses for now, leaves it listed and it is read again at the next tick.
+    lease.checking = bool(unconfirmed and not removed and checking_until(lease))
+    if lease.checking:
+        return False
+    looked = {"looked": int((utcnow() - utc(lease.created_at)).total_seconds())} if unconfirmed and lease.owned else {}
     reason, outcome = ("not_confirmed", "applied" if removed else "not_applied") if unconfirmed else \
         (reason, lease.execution)
     if unconfirmed and removal != "kept_for_another":  # A record says only whether an entry was removed.
@@ -652,7 +679,7 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
     lease.execution = outcome  # For a record: what settling it did at the source, in its row as in the audit.
     lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", reason, utcnow(), None
     audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=outcome,
-          **({"removal": removal} if removal else {}))
+          **({"removal": removal} if removal else {}), **looked)
     return True
 
 
@@ -829,7 +856,7 @@ async def leases(request: Request, auth=Depends(identity), db: Session = Depends
     removal = {event.target_id: event.details.get("removal") for event in db.scalars(select(Audit).where(
         Audit.action == "access.closed", Audit.target_id.in_([row.id for row in rows if row.status == "ended"])))}
     return [{**lease_json(row, names), "source_removed": bool(row.integration_id) and row.integration_id not in known,
-             "removal": removal.get(row.id)} for row in rows]
+             "removal": removal.get(row.id), "checking_until": checking_until(row)} for row in rows]
 
 
 class EndInput(BaseModel):
@@ -871,6 +898,10 @@ async def end(lease_id: str, request: Request, body: EndInput | None = None, use
     except BeingEnded:
         raise HTTPException(409, "Nyctr is already ending this exception. Look again in a moment.") from None
     db.commit()
+    if not done and getattr(lease, "checking", False):
+        raise HTTPException(409, "Nyctr is still checking the source for this address, because a source can apply a "
+                                 "change late. If the entry appears Nyctr removes it. This leaves the list by itself "
+                                 "within five minutes of the attempt.")
     if not done:
         raise HTTPException(502, "Nyctr could not reach the source to check for the entry. It stays listed as not "
                                  "confirmed and Nyctr tries again." if lease.status == "unconfirmed" else

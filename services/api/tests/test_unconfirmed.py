@@ -121,6 +121,7 @@ def test_a_record_left_by_a_killed_copy_is_settled_on_the_tick_once_its_claim_ca
             with app.state.session_factory() as db:
                 db.execute(update(Setting).where(Setting.key.startswith("ending:")).values(
                     updated_at=utcnow() - access.ENDING_HOLD))
+                db.execute(update(Lease).values(created_at=utcnow() - access.ENDING_HOLD))  # The attempt is as old.
                 db.commit()
             up.tick()
             await up.ending["dns"]
@@ -152,7 +153,7 @@ def test_nyctr_never_removes_an_entry_that_was_there_before_or_that_another_exce
                 source.listed.clear()
                 await access.hold_entry(db, settings, dns, DOMAIN)
                 source.listed.append(DOMAIN)  # The add landed, and a real exception uses the address.
-                db.execute(update(Lease).values(expires_at=utcnow()))
+                db.execute(update(Lease).values(expires_at=utcnow(), created_at=utcnow() - access.ENDING_HOLD))
                 db.execute(update(Setting).values(updated_at=utcnow() - access.ENDING_HOLD))
                 db.add(Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=False,
                              created_at=utcnow() + timedelta(seconds=1)))
