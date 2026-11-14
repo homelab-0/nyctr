@@ -229,6 +229,7 @@ PROVIDER = Provider(
         ("list_kind", "Pi-hole does not say what kind of list blocked a name",
          "A subscribed list may hold adverts or threats. Nyctr leaves those blocks unscored instead of guessing."),
     ),
+    not_collected=("DNS lookups that were allowed",),
     gap_notes={
         "pihole_query_limit": (
             "More lookups than one collection reads",

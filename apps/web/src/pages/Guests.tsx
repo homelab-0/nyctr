@@ -96,7 +96,9 @@ function HowGuestsGetOn({
         <div>
           <h3>Wi-Fi names reported</h3>
           {portal.wifi.length === 0 ? (
-            <p className="aside">Not collected yet. Collect from your network source to check.</p>
+            <p className="aside">
+              Nyctr has none. It reads them when it collects from your network source.
+            </p>
           ) : (
             <ul className="wifi">
               {portal.wifi.map((item) => (
@@ -214,6 +216,27 @@ export default function Guests({
     );
   const live = data.passes.filter((pass) => pass.state !== 'ended');
   const source = data.sources.map((item) => item.name).join(' and ') || 'your network source';
+  // Why Nyctr cannot tell who is a guest here, when it cannot: said first, before passes or cut-offs,
+  // and only from what the source reported. A source that reports guest devices is never called blind.
+  const wifi = data.portal.wifi;
+  const blind = data.devices.length
+    ? null
+    : !data.sources.length
+      ? {
+          title: 'No connected source can tell guests from other devices.',
+          text: 'Nyctr does not know who is a guest here. Connect a network source that reports guest Wi-Fi to see them.',
+        }
+      : !wifi.length
+        ? {
+            title: `Nyctr has no Wi-Fi names and no guest devices from ${source}.`,
+            text: 'So it does not know whether anyone is on the guest Wi-Fi.',
+          }
+        : !wifi.some((item) => item.captive_portal)
+          ? {
+              title: `No Wi-Fi name reported by ${source} uses a sign-in page, and Nyctr has no guest devices from ${source}.`,
+              text: `So Nyctr cannot tell who is a guest here, and passes and the cut-off have nothing to act on. Turning on the guest sign-in page with passes at ${source} gives them something to act on.`,
+            }
+          : null;
   return (
     <div className="page">
       <header className="page-head">
@@ -222,13 +245,23 @@ export default function Guests({
           <p className="lede">
             {data.devices.length
               ? `${plural(data.devices.length, 'guest device')} seen, ${plural(live.length, 'pass', 'passes')} live.`
-              : 'No guest devices are connected.'}{' '}
+              : blind
+                ? 'Nyctr cannot tell who is a guest here.'
+                : 'No guest devices are connected.'}{' '}
             Guests sign in on the page your network shows. Nyctr stays out of their path and reads
             who is on from {source}.
           </p>
         </div>
       </header>
-      {readOnly && (
+      {blind && (
+        <div className="note yellow" role="status">
+          <div>
+            <b>{blind.title}</b>
+            <p>{blind.text}</p>
+          </div>
+        </div>
+      )}
+      {readOnly && !!data.sources.length && (
         <div className="note yellow">
           <div>
             <b>Nyctr is read-only for {source}.</b>
@@ -244,7 +277,11 @@ export default function Guests({
         <div className="stack">
           <Panel title="Who is on" flush>
             {data.devices.length === 0 ? (
-              <p className="pad muted">Nobody is on the guest Wi-Fi.</p>
+              <p className="pad muted">
+                {blind
+                  ? 'Not known. Nyctr cannot tell who is a guest here.'
+                  : 'Nobody is on the guest Wi-Fi.'}
+              </p>
             ) : (
               <div className="tblwrap">
                 <table className="tbl">
