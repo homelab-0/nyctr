@@ -130,7 +130,7 @@ _FAILURES = {
     ),
 }
 
-# A rate limit where every request in the count was this test's own. Trying again cannot help.
+# A rate limit this test reached by its own requests alone, with no wait for anything else. Trying again cannot help.
 _OWN_LIMIT = (
     "This test sent as many requests as the source allows in a minute and still needed more, so it stopped.",
     "Trying again will not help: the test would stop at the same place. "

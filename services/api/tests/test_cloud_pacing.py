@@ -199,6 +199,27 @@ def test_a_connection_test_that_used_the_whole_limit_itself_says_trying_again_ca
     assert [check.category for check in failed] == ["rate_limit"] and "Try again shortly" in failed[0].guidance
 
 
+def test_a_connection_test_that_ran_short_after_waiting_for_others_is_told_to_try_again(clock, monkeypatch):
+    """Every place left is its own, but only because it waited for others first: alone it gets through, so it says so."""
+    now, waits = clock
+
+    def slow(request):  # Each answer takes 0.45 s in all: 96 of them outlast the others' minute.
+        now[0] += 0.40
+
+    calls, _sent = serve(monkeypatch, LARGE, now, fault=slow)
+    core._turns[unifi.pace(CLOUD).key] = [[0.0] for _ in range(96)]  # Something else, 50 seconds ago.
+    now[0] = 50.0
+    probe = lambda: asyncio.run(diagnose_integration(  # noqa: E731
+        "unifi_network", "one", {"base_url": CLOUD, "site_id": "home"}, SECRET))
+    failed = [check for check in probe().checks if check.status == "failed"]
+    assert len(calls) == 96 and waits == [10.0] and [check.category for check in failed] == ["rate_limit"]
+    assert "Try again shortly" in failed[0].guidance and "will not help" not in failed[0].guidance
+    # And trying again does help: five minutes later, alone, the same test waits once and finishes.
+    now[0] += 300
+    assert [check.category for check in probe().checks if check.status == "failed"] == []
+    assert len(calls) == 96 + 98 and len(waits) == 2 and waits[1] < 20
+
+
 def test_the_backstop_is_longer_than_a_paced_collection_may_take_and_is_the_limit_in_force(monkeypatch, tmp_path):
     """Reading and waiting for a turn together must fit under the backstop, or a paced collection is cut off as failed."""
     assert integrations.READING_SECONDS + core.LONGEST_WAIT < collection.BACKSTOP_SECONDS < 300
