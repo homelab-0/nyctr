@@ -1,11 +1,9 @@
 import { Fragment, useState } from 'react';
 import { post, useApi } from '../api';
 import { Empty, ErrorState, InlineError, Loading, Panel, Score } from '../components/ui';
-import { REMOVAL, ago, clock, executionText, left, plural, useNow } from '../lib/format';
+import { REMOVAL, ago, atSource, clock, isOpen, left, plural, useNow } from '../lib/format';
 import type { Lease, Suggestion } from '../types';
 
-/** An entry that was at the source before Nyctr's exception: Nyctr added nothing and removes nothing. */
-const UNOWNED = 'Already allowed there before this exception. Nyctr left the entry as it was.';
 /** How a closed exception ended, as the server recorded it. */
 const ENDED: Record<string, string> = {
   expired: 'Ran out',
@@ -44,7 +42,8 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
   if (leases.loading) return <Loading text="Loading open access…" />;
   if (leases.error) return <ErrorState message={leases.error} retry={leases.reload} />;
   const all = leases.data || [];
-  const open = all.filter((lease) => lease.status === 'active');
+  // Open means applied at a source. What was simulated or changed nothing is listed, never counted as open.
+  const open = all.filter(isOpen);
   const active = all.filter((lease) => lease.status !== 'ended');
   const ended = all.filter((lease) => lease.status === 'ended').slice(0, 20);
   return (
@@ -55,9 +54,11 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
           <p className="lede">
             {open.length
               ? `${plural(open.length, 'exception')} open. Temporary ones close themselves when their time is up.`
-              : active.length
-                ? "Nothing is open on Nyctr's record. What is listed below was not confirmed and may still be open at the source, until Nyctr removes it or, where it cannot tell, a person checks there."
-                : 'Nothing is open. Temporary access appears here while it lasts.'}
+              : active.length && !active.some((lease) => lease.status === 'unconfirmed')
+                ? 'Nothing is open at a source. What is listed below was decided here and changed nothing there.'
+                : active.length
+                  ? "Nothing is open on Nyctr's record. What is listed below was not confirmed and may still be open at the source, until Nyctr removes it or, where it cannot tell, a person checks there."
+                  : 'Nothing is open. Temporary access appears here while it lasts.'}
           </p>
         </div>
       </header>
@@ -142,11 +143,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                               )}
                             </>
                           ) : (
-                            <span className="muted tiny">
-                              {lease.execution === 'applied' && !lease.owned
-                                ? UNOWNED
-                                : executionText(lease.execution)}
-                            </span>
+                            <span className="muted tiny">{atSource(lease)}</span>
                           )}
                         </td>
                         <td>

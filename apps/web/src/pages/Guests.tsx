@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Ban, Check, Copy, Lock, RotateCcw, Ticket } from 'lucide-react';
 import { post, put, useApi } from '../api';
 import { everyText, useSchedule } from '../lib/schedule';
@@ -14,17 +14,33 @@ import {
   Stepper,
   Switch,
 } from '../components/ui';
-import { ago, bytes, clock, left, plural, someNames, span, useNow } from '../lib/format';
+import {
+  ago,
+  bytes,
+  clock,
+  guestAttempt,
+  guestState,
+  left,
+  plural,
+  someNames,
+  span,
+  useNow,
+} from '../lib/format';
+import { bringIntoView } from '../lib/links';
 import { useAuth } from '../auth';
 import type { GuestDevice, GuestOverview, GuestPass, GuestRule } from '../types';
 
-const STATE: Record<GuestDevice['state'], { text: string; tone: string }> = {
-  online: { text: 'Online', tone: 'green' },
-  waiting: { text: 'On the sign-in page', tone: 'yellow' },
-  cut: { text: 'Cut off', tone: 'red' },
-  locked: { text: 'Locked out', tone: 'red' },
-  offline: { text: 'Gone', tone: '' },
-};
+/** A device's state as the record has it, with any change that did not take effect said under it. */
+function State({ device }: { device: GuestDevice }) {
+  const state = guestState(device);
+  const attempt = guestAttempt(device);
+  return (
+    <>
+      <span className={`tag ${state.tone}`}>{state.text}</span>
+      {attempt && <div className="muted tiny">{attempt}</div>}
+    </>
+  );
+}
 const LENGTHS = [60, 240, 480, 1440, 4320, 10080];
 
 /** Copies a pass code, falling back silently where the clipboard is unavailable. */
@@ -62,6 +78,8 @@ function HowGuestsGetOn({
 }) {
   const [copied, setCopied] = useState(false);
   const gated = portal.wifi.filter((item) => item.captive_portal);
+  // Names a collection could not read say nothing about whether a sign-in page is on there.
+  const unread = someNames(portal.unread || []);
   const net = portal.served_by.join(' and ') || 'Your network system';
   return (
     <Panel title="How guests get on" hint={`${net} shows the sign-in page. Nyctr never does.`}>
@@ -97,7 +115,9 @@ function HowGuestsGetOn({
           <h3>Wi-Fi names reported</h3>
           {portal.wifi.length === 0 ? (
             <p className="aside">
-              Nyctr has none. It reads them when it collects from your network source.
+              {unread
+                ? `Nyctr has none. It could not read them from ${unread} at its last collection.`
+                : 'Nyctr has none. It reads them when it collects from your network source.'}
             </p>
           ) : (
             <ul className="wifi">
@@ -114,7 +134,16 @@ function HowGuestsGetOn({
               ))}
             </ul>
           )}
-          {portal.wifi.length > 0 && gated.length === 0 && (
+          {/* Names that could not be read are said whatever else was read. Only the advice to turn the
+              sign-in page on waits for a complete read that found none. */}
+          {portal.wifi.length > 0 && unread && (
+            <p className="aside">
+              Nyctr could not read the Wi-Fi names from {unread} at its last collection, so it
+              cannot tell whether one there sits behind a sign-in page.
+              {gated.length === 0 && ' None of the names it did read does.'}
+            </p>
+          )}
+          {portal.wifi.length > 0 && gated.length === 0 && !unread && (
             <p className="aside">
               No Wi-Fi name sits behind a sign-in page, so passes and the cut-off have nothing to
               act on. Turn on the guest sign-in page with passes for your guest Wi-Fi at the source.
@@ -175,6 +204,12 @@ export default function Guests({
   useEffect(() => {
     if (params.get('id')) setSelected(params.get('id'));
   }, [params]);
+  // On a narrow screen the device's panel sits far below the list: bring it into view when one is chosen.
+  const panel = useRef<HTMLDivElement>(null);
+  const shown = data?.devices.some((item) => item.id === selected) ? selected : null;
+  useEffect(() => {
+    if (shown) bringIntoView(panel.current);
+  }, [shown]);
 
   /** Runs one change and then shows the server's view; errors are shown, never swallowed. */
   const run = async (action: () => Promise<unknown>) => {
@@ -236,10 +271,15 @@ export default function Guests({
             text: 'So it does not know whether anyone is on the guest Wi-Fi.',
           }
         : !wifi.some((item) => item.captive_portal)
-          ? {
-              title: `No Wi-Fi name reported by ${source} uses a sign-in page, and Nyctr has no guest devices from ${source}.`,
-              text: `So Nyctr cannot tell who is a guest here, and passes and the cut-off have nothing to act on. Turning on the guest sign-in page with passes at ${source} gives them something to act on.`,
-            }
+          ? data.portal.unread?.length
+            ? {
+                title: `Nyctr could not read the Wi-Fi names from ${someNames(data.portal.unread)}, and has no guest devices from ${source}.`,
+                text: 'So it cannot tell who is a guest here, or whether a sign-in page is on.',
+              }
+            : {
+                title: `No Wi-Fi name reported by ${source} uses a sign-in page, and Nyctr has no guest devices from ${source}.`,
+                text: `So Nyctr cannot tell who is a guest here, and passes and the cut-off have nothing to act on. Turning on the guest sign-in page with passes at ${source} gives them something to act on.`,
+              }
           : null;
   return (
     <div className="page">
@@ -323,9 +363,7 @@ export default function Guests({
                           </button>
                         </th>
                         <td>
-                          <span className={`tag ${STATE[item.state].tone}`}>
-                            {STATE[item.state].text}
-                          </span>
+                          <State device={item} />
                         </td>
                         <td>
                           <Score value={item.risk.score} />
@@ -466,13 +504,13 @@ export default function Guests({
             )}
           </Panel>
         </div>
-        <div className="stack">
+        <div className="stack into-view" ref={panel}>
           {device ? (
             <Panel
               title={device.name}
               action={
-                <span className={`tag ${STATE[device.state].tone}`}>
-                  {STATE[device.state].text}
+                <span>
+                  <State device={device} />
                 </span>
               }
             >

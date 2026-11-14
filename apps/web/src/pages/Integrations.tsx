@@ -595,10 +595,13 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     </span>
                   ))}
                 </div>
-                <div className="integration-meta">
-                  <span>Last collected</span>
-                  <strong>{relativeTime(integration.last_sync)}</strong>
-                </div>
+                {/* Sample data was never collected, so the demo gives it no collection time. */}
+                {!demo && (
+                  <div className="integration-meta">
+                    <span>Last collected</span>
+                    <strong>{relativeTime(integration.last_sync)}</strong>
+                  </div>
+                )}
                 {schedule.data && (
                   <div className="integration-meta">
                     <span>Next collection</span>

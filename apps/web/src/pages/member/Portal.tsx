@@ -25,7 +25,16 @@ import {
   Seg,
 } from '../../components/ui';
 import { counted } from '../../lib/counts';
-import { ago, detectOs, left, span, useNow, type DeviceOs } from '../../lib/format';
+import {
+  ago,
+  detectOs,
+  isOpen,
+  left,
+  span,
+  useNow,
+  writtenNote,
+  type DeviceOs,
+} from '../../lib/format';
 import type {
   AccessRequest,
   Block,
@@ -153,7 +162,39 @@ function latestPerDomain(blocks: Block[]) {
   });
 }
 
-function BlockRow({ block, request, now }: { block: Block; request?: AccessRequest; now: number }) {
+/**
+ * The tag for a request. A countdown reads as "it is open", so one shows only when the source was
+ * changed; a simulated opening says nothing was opened, and a decision alone is never called open.
+ */
+function Outcome({ row, lease, now }: { row: AccessRequest; lease?: Lease; now: number }) {
+  const decided = STATUS[row.status];
+  const [text, tone] = !lease
+    ? [row.status === 'auto_approved' ? 'Approved' : decided?.text, decided?.tone]
+    : lease.status === 'ended'
+      ? // "Closed" only when its ending left the address closed; an exception can end and the address stay open.
+        [lease.closed ? 'Closed again' : 'Ended', '']
+      : lease.status === 'unconfirmed'
+        ? // Not known either way, whatever its result says: never "not on".
+          ['Not confirmed yet', 'yellow']
+        : lease.execution === 'simulated'
+          ? ['Demonstration, nothing opened', '']
+          : isOpen(lease)
+            ? [left(lease.expires_at, now) || decided?.text, 'green']
+            : ['Approved, not on yet', 'yellow'];
+  return <span className={`tag ${tone || ''}`}>{text}</span>;
+}
+
+function BlockRow({
+  block,
+  request,
+  lease,
+  now,
+}: {
+  block: Block;
+  request?: AccessRequest;
+  lease?: Lease;
+  now: number;
+}) {
   return (
     <a
       className="m-row"
@@ -170,9 +211,7 @@ function BlockRow({ block, request, now }: { block: Block; request?: AccessReque
         </span>
       </span>
       {request ? (
-        <span className={`tag ${STATUS[request.status]?.tone || ''}`}>
-          {STATUS[request.status]?.text}
-        </span>
+        <Outcome row={request} lease={lease} now={now} />
       ) : (
         <span className="button secondary small">See why</span>
       )}
@@ -228,6 +267,10 @@ function Home({ data }: { data: Data }) {
   const requestFor = useMemo(
     () => new Map((data.requests.data || []).map((row) => [row.block_id, row])),
     [data.requests.data],
+  );
+  const leaseFor = useMemo(
+    () => new Map((data.leases.data || []).map((lease) => [lease.request_id, lease])),
+    [data.leases.data],
   );
   // What an empty list means depends on these, so "nothing was blocked" is never shown before them.
   if (data.blocks.loading || data.devices.loading || data.coverage.loading)
@@ -300,12 +343,28 @@ function Home({ data }: { data: Data }) {
         </button>
       </form>
       <InlineError message={error} />
+      {/* Without the list of requests, a site already asked about looks like one that was not. */}
+      {data.requests.error && (
+        <p className="aside" role="status">
+          Nyctr could not read your requests just now, so it cannot show which of these sites you
+          have already asked about.{' '}
+          <button className="linklike" onClick={data.requests.reload}>
+            Try again
+          </button>
+        </p>
+      )}
       {found !== null &&
         (found.length ? (
           <section className="m-card">
             <h2>Found</h2>
             {found.map((block) => (
-              <BlockRow key={block.id} block={block} request={requestFor.get(block.id)} now={now} />
+              <BlockRow
+                key={block.id}
+                block={block}
+                request={requestFor.get(block.id)}
+                lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
+                now={now}
+              />
             ))}
           </section>
         ) : (
@@ -321,7 +380,13 @@ function Home({ data }: { data: Data }) {
         <section className="m-card">
           <h2>Blocked on this device</h2>
           {mine.map((block) => (
-            <BlockRow key={block.id} block={block} request={requestFor.get(block.id)} now={now} />
+            <BlockRow
+              key={block.id}
+              block={block}
+              request={requestFor.get(block.id)}
+              lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
+              now={now}
+            />
           ))}
         </section>
       )}
@@ -329,7 +394,13 @@ function Home({ data }: { data: Data }) {
         <section className="m-card">
           <h2>{mine.length ? 'On your other devices' : 'Blocked on your devices'}</h2>
           {others.map((block) => (
-            <BlockRow key={block.id} block={block} request={requestFor.get(block.id)} now={now} />
+            <BlockRow
+              key={block.id}
+              block={block}
+              request={requestFor.get(block.id)}
+              lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
+              now={now}
+            />
           ))}
         </section>
       )}
@@ -498,7 +569,9 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
           {pending ? 'Checking…' : 'Ask to open it'}
         </button>
         <p className="aside">
-          Nyctr checks the address straight away. Safe ones open in a few seconds.
+          {risky || block.risk_band === 'unknown'
+            ? 'Nyctr checks the address straight away. This one waits for a person to decide.'
+            : 'Nyctr checks the address straight away. Safe ones open in a few seconds.'}
         </p>
       </form>
     </div>
@@ -510,6 +583,20 @@ function Result({ data, id }: { data: Data; id: string }) {
   const [os, setOs] = useState<DeviceOs>(detectOs());
   const now = useNow(5000);
   if (data.requests.loading || data.leases.loading) return <Loading />;
+  // Without both lists the outcome is not known, so none is shown.
+  const unread = data.requests.error || data.leases.error;
+  if (unread)
+    return (
+      <div className="m-col">
+        <ErrorState
+          message={unread}
+          retry={() => {
+            data.requests.reload();
+            data.leases.reload();
+          }}
+        />
+      </div>
+    );
   const row = (data.requests.data || []).find((item) => item.id === id);
   if (!row)
     return (
@@ -526,9 +613,11 @@ function Result({ data, id }: { data: Data; id: string }) {
       </div>
     );
   const lease = (data.leases.data || []).find((item) => item.request_id === row.id);
-  const open =
-    lease?.status === 'active' && lease.execution !== 'not_applied' && lease.execution !== 'failed';
+  // Open only when the source was changed. A simulated opening opened nothing, and says so.
+  const open = !!lease && isOpen(lease);
+  const simulated = lease?.execution === 'simulated' && lease.status !== 'unconfirmed';
   const remaining = lease ? left(lease.expires_at, now) : null;
+  const note = writtenNote(row.review_note);
   return (
     <div className="m-col">
       <a className="back" href="#/portal">
@@ -576,6 +665,30 @@ function Result({ data, id }: { data: Data; id: string }) {
             </ol>
           </section>
         </>
+      ) : simulated ? (
+        <header className="m-result wait">
+          <span className="m-badge">
+            <Hourglass size={24} />
+          </span>
+          <h1 className="display d1">This is a demonstration.</h1>
+          <p className="lede">
+            Nothing was opened: the demonstration never changes a real network.{' '}
+            {lease.status === 'active'
+              ? `With a real one, ${row.domain} would now work for ${remaining ? remaining.replace(' left', '') : 'a few minutes'} and then close by itself.`
+              : `With a real one, ${row.domain} would have opened for a while and closed again.`}
+          </p>
+        </header>
+      ) : lease?.status === 'unconfirmed' ? (
+        <header className="m-result wait">
+          <span className="m-badge">
+            <Hourglass size={24} />
+          </span>
+          <h1 className="display d1">Not confirmed yet.</h1>
+          <p className="lede">
+            Nyctr could not confirm whether {row.domain} was opened, so it may or may not work.
+            Check back in a little while.
+          </p>
+        </header>
       ) : row.status === 'pending' ? (
         <header className="m-result wait">
           <span className="m-badge">
@@ -594,9 +707,7 @@ function Result({ data, id }: { data: Data; id: string }) {
           </span>
           <h1 className="display d1">Not this time.</h1>
           <p className="lede">
-            {row.review_note
-              ? `The note says: “${row.review_note}”`
-              : 'The request was not approved.'}
+            {note ? `The note says: “${note}”` : 'The request was not approved.'}
           </p>
         </header>
       ) : lease?.status === 'ended' ? (
@@ -604,10 +715,19 @@ function Result({ data, id }: { data: Data; id: string }) {
           <span className="m-badge">
             <Clock size={24} />
           </span>
-          <h1 className="display d1">The time ran out.</h1>
+          <h1 className="display d1">
+            {lease.ended_reason !== 'revoked'
+              ? 'The time ran out.'
+              : lease.closed
+                ? 'An administrator closed it.'
+                : 'An administrator ended it.'}
+          </h1>
           <p className="lede">
-            Access to {row.domain} has closed again. If you still need it, open the page and ask
-            once more.
+            {/* Closed is said only when the ending left the address closed. */}
+            {lease.closed
+              ? `Access to ${row.domain} has closed again.`
+              : `The approval for ${row.domain} has ended.`}{' '}
+            If you still need it, open the page and ask once more.
           </p>
         </header>
       ) : row.status === 'reviewed' ? (
@@ -617,8 +737,8 @@ function Result({ data, id }: { data: Data; id: string }) {
           </span>
           <h1 className="display d1">Looked at, nothing changed.</h1>
           <p className="lede">
-            {row.review_note
-              ? `The note says: “${row.review_note}”`
+            {note
+              ? `The note says: “${note}”`
               : 'Someone looked at this request and did not open the address.'}
           </p>
         </header>
@@ -639,9 +759,12 @@ function Result({ data, id }: { data: Data; id: string }) {
           <div>
             <h2>What Nyctr found when it checked {row.domain}</h2>
             <p>
-              {row.status === 'auto_approved'
-                ? row.decision_note
-                : 'This is the score the administrator will see too.'}
+              {row.status !== 'auto_approved'
+                ? 'This is the score the administrator will see too.'
+                : // The rule's own note says "Opened": true only of an opening applied at the source.
+                  lease?.execution === 'applied'
+                  ? row.decision_note
+                  : 'The access rule said yes to this one.'}
             </p>
           </div>
         </div>
@@ -657,7 +780,22 @@ function MyRequests({ data }: { data: Data }) {
   // The reason stands only over an empty list of blocked sites. With one listed there is
   // something to ask about, whatever the collection is doing.
   const gap = data.blocks.data?.length === 0 ? notKnown(data) : null;
-  if (data.requests.loading) return <Loading />;
+  if (data.requests.loading || data.leases.loading) return <Loading />;
+  // A list that could not be read is not an empty one, and an outcome needs both lists.
+  const unread = data.requests.error || data.leases.error;
+  if (unread)
+    return (
+      <div className="m-col">
+        <h1 className="display d2">My requests</h1>
+        <ErrorState
+          message={unread}
+          retry={() => {
+            data.requests.reload();
+            data.leases.reload();
+          }}
+        />
+      </div>
+    );
   const rows = data.requests.data || [];
   const leaseFor = new Map((data.leases.data || []).map((lease) => [lease.request_id, lease]));
   return (
@@ -675,13 +813,6 @@ function MyRequests({ data }: { data: Data }) {
       ) : (
         <section className="m-card">
           {rows.map((row) => {
-            const lease = leaseFor.get(row.id);
-            // A countdown reads as "it is open", so show one only when the change really happened.
-            const active = lease?.status === 'active';
-            const switchedOn =
-              active && lease.execution !== 'not_applied' && lease.execution !== 'failed';
-            const remaining = switchedOn ? left(lease.expires_at, now) : null;
-            const waiting = active && !switchedOn;
             return (
               <a className="m-row" key={row.id} href={`#/portal?request=${row.id}`}>
                 <span>
@@ -690,16 +821,7 @@ function MyRequests({ data }: { data: Data }) {
                     Asked {ago(row.created_at, now)} from {row.device_name}
                   </span>
                 </span>
-                <span
-                  className={`tag ${remaining ? 'green' : waiting ? 'yellow' : lease?.status === 'ended' ? '' : STATUS[row.status]?.tone || ''}`}
-                >
-                  {remaining ||
-                    (waiting
-                      ? 'Approved, not on yet'
-                      : lease?.status === 'ended'
-                        ? 'Closed again'
-                        : STATUS[row.status]?.text)}
-                </span>
+                <Outcome row={row} lease={leaseFor.get(row.id)} now={now} />
               </a>
             );
           })}

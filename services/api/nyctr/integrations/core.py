@@ -135,8 +135,24 @@ def describe_gaps(notes: dict[str, tuple[str, str]], gaps: dict[str, Any]) -> li
     return entries
 
 
+# What is said for each way an exchange can fail before an answer is read. Only a certificate failure
+# points at the certificate: no answer in time, and a connection that failed or dropped, are told apart.
+TRANSPORT_FAILURES = {
+    "tls": "Could not securely connect to the source. Check its address, certificate, and availability.",
+    "timeout": "The source did not answer in time. Check that it is running and can be reached.",
+    "transport": "The connection to the source failed or was dropped before it answered. Check its address and "
+                 "that it can be reached.",
+}
+
+
 def _transport_category(error: Exception) -> str:
-    """Classify typed timeout and TLS causes without inspecting potentially secret-bearing messages."""
+    """Classify typed timeout and TLS causes without inspecting potentially secret-bearing messages.
+
+    A timeout is told first. On an HTTPS connection a read that got no answer, and a handshake that
+    never finished, end in `ssl.SSLWantReadError`, which is an `SSLError` and no certificate fault.
+    """
+    if isinstance(error, httpx.TimeoutException):
+        return "timeout"
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen and len(seen) < 12:
@@ -144,7 +160,7 @@ def _transport_category(error: Exception) -> str:
         if isinstance(current, ssl.SSLError):
             return "tls"
         current = current.__cause__ or current.__context__
-    return "timeout" if isinstance(error, httpx.TimeoutException) else "transport"
+    return "transport"
 
 
 @dataclass
@@ -534,8 +550,8 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
             raw = b"".join(chunks)
             payload = {} if method != "GET" and not raw.strip() else json.loads(raw)
     except (httpx.HTTPError, OSError) as exc:
-        raise IntegrationError("Could not securely connect to the source. Check its address, certificate, and availability.",
-                               category=_transport_category(exc)) from None
+        category = _transport_category(exc)
+        raise IntegrationError(TRANSPORT_FAILURES[category], category=category) from None
     except (ValueError, UnicodeError):
         raise IntegrationError("The source returned invalid JSON.") from None
     finally:

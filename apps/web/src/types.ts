@@ -34,6 +34,16 @@ export interface Resource {
   attributes: Record<string, unknown>;
   /** The source it was collected from. Only the Map's answer carries it. */
   integration_id?: string;
+  /** For a guest device, its state from the record of what was done. Only the Map's answer carries it. */
+  guest_state?: GuestStanding;
+}
+/** A guest's state as the record has it. */
+export interface GuestStanding {
+  state: 'online' | 'waiting' | 'cut' | 'locked' | 'offline';
+  /** True when the state follows from a change that was simulated: nothing changed at the source. */
+  simulated?: boolean;
+  /** The newest change when it did not take effect: decided while read-only, or not gone through. */
+  attempt?: { action: 'cut' | 'lock' | 'restore' | 'admit'; execution: Execution } | null;
 }
 export interface Relationship {
   id: string;
@@ -260,6 +270,8 @@ export interface Lease {
   source_removed?: boolean;
   /** What ending it did at the source, as a code in `REMOVAL`. Administrators only. */
   removal?: string | null;
+  /** For an ended exception: true when its ending left the address closed at the source. Members only. */
+  closed?: boolean;
   /** Until when Nyctr reads the source again for an opening it could not confirm. Administrators only. */
   checking_until?: string | null;
 }
@@ -340,7 +352,7 @@ export interface TimelineItem {
   detail?: string;
   evidence: string;
 }
-export interface GuestDevice {
+export interface GuestDevice extends GuestStanding {
   id: string;
   name: string;
   integration_id: string;
@@ -359,7 +371,6 @@ export interface GuestDevice {
     seconds: number | null;
     data_limit_mb: number | null;
   } | null;
-  state: 'online' | 'waiting' | 'cut' | 'locked' | 'offline';
   observed_at: string;
   pass: { id: string; name: string; evidence: string } | null;
   /** How the device got on: a pass typed into the network's sign-in page, or let on from the console. */
@@ -374,6 +385,8 @@ export interface GuestPortal {
   served_by: string[];
   nyctr_in_guest_path: false;
   wifi: { name: string; enabled: boolean; captive_portal: boolean; network: string | null }[];
+  /** Guest sources whose Wi-Fi names the last collection could not read: nothing is known of those. */
+  unread?: string[];
   notice: string;
   nudge: boolean;
 }

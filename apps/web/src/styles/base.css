@@ -609,6 +609,10 @@ h3 {
   gap: 18px;
   align-items: start;
 }
+/* A panel scrolled to by choosing its item stops below the bar that stays at the top. */
+.into-view {
+  scroll-margin-top: 66px;
+}
 .stack {
   display: grid;
   gap: 14px;

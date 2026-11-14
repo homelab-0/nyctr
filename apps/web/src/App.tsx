@@ -38,14 +38,15 @@ import Requests from './pages/Requests';
 import Setup from './pages/Setup';
 import SignIn from './pages/SignIn';
 import Portal from './pages/member/Portal';
-import { isAssistantKey, rememberShortcut, shortcutEnabled } from './lib/shortcut';
+import { isAssistantKey, rememberShortcut, shortcutEnabled, touchOnly } from './lib/shortcut';
 import { mayChange } from './lib/format';
 
 interface NavItem {
   id: string;
   name: string;
   icon: IconComponent;
-  count?: number;
+  /** A number, or "?" when the list behind it could not be read. */
+  count?: number | string;
 }
 interface NavGroup {
   title: string;
@@ -90,11 +91,23 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
   const [navOpen, setNavOpen] = useState(false);
   const [assistant, setAssistant] = useState(false);
   const [shortcut, setShortcut] = useState(shortcutEnabled);
+  // A screen worked by touch alone has no A key to press, so the key is not offered there.
+  const [keys] = useState(() => !touchOnly());
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const sidebar = useRef<HTMLElement>(null);
-  const items = attention.data || [];
-  const count = (kind: string) => items.filter((item) => item.kind === kind).length || undefined;
+  // A list that could not be read is not an empty one: nothing is shown from it and each count says so.
+  // After a failed read the list stays not known until a read succeeds: while a retry is on its way the
+  // answer from before the failure is still held, and it is not shown as the answer.
+  const unread = useRef<{ held: AttentionItem[] | null } | null>(null);
+  if (attention.error) unread.current = { held: attention.data };
+  else if (unread.current && unread.current.held !== attention.data) unread.current = null;
+  const retrying = !attention.error && unread.current !== null;
+  const items = attention.error || retrying ? [] : attention.data || [];
+  const count = (kind: string) =>
+    attention.error || retrying
+      ? '?'
+      : items.filter((item) => item.kind === kind).length || undefined;
   const navigation: NavGroup[] = [
     {
       title: 'Network',
@@ -142,7 +155,8 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
      */
     const onAsk = () => setAssistant(true);
     const onKey = (event: KeyboardEvent) => {
-      if (isAssistantKey(event, shortcut)) setAssistant((value) => !value);
+      // Where the key is not offered there is no control to turn it off, so it does nothing there.
+      if (isAssistantKey(event, shortcut && keys)) setAssistant((value) => !value);
       if (event.key === 'Escape') setNavOpen(false);
     };
     window.addEventListener('nyctr:ask', onAsk);
@@ -151,7 +165,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
       window.removeEventListener('nyctr:ask', onAsk);
       document.removeEventListener('keydown', onKey);
     };
-  }, [shortcut]);
+  }, [shortcut, keys]);
 
   /** Displays genuine revocation failures while AuthProvider handles success or session expiry. */
   const signOut = async () => {
@@ -212,7 +226,14 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
                 >
                   <item.icon size={16} strokeWidth={1.8} />
                   <span>{item.name}</span>
-                  {item.count !== undefined && <span className="count">{item.count}</span>}
+                  {item.count !== undefined && (
+                    <span
+                      className="count"
+                      title={item.count === '?' ? 'Could not be counted' : undefined}
+                    >
+                      {item.count}
+                    </span>
+                  )}
                 </a>
               ))}
             </section>
@@ -260,7 +281,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             onClick={() => setAssistant((value) => !value)}
             aria-pressed={assistant}
           >
-            <Sparkles size={15} /> Ask Nyctr {shortcut && <kbd>A</kbd>}
+            <Sparkles size={15} /> Ask Nyctr {shortcut && keys && <kbd>A</kbd>}
           </button>
         </header>
         <main id="main-content" className="content" tabIndex={-1}>
@@ -268,7 +289,8 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
             page={page}
             params={params}
             attention={items}
-            loading={attention.loading}
+            loading={attention.loading || retrying}
+            error={attention.error}
             refresh={refresh}
             sources={rules.data?.sources}
           />
@@ -279,10 +301,14 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
         onClose={() => setAssistant(false)}
         attention={items}
         shortcut={shortcut}
-        onShortcut={(value) => {
-          rememberShortcut(value);
-          setShortcut(value);
-        }}
+        onShortcut={
+          keys
+            ? (value) => {
+                rememberShortcut(value);
+                setShortcut(value);
+              }
+            : undefined
+        }
       />
     </div>
   );
@@ -294,6 +320,7 @@ function Screen({
   params,
   attention,
   loading,
+  error,
   refresh,
   sources,
 }: {
@@ -301,12 +328,13 @@ function Screen({
   params: URLSearchParams;
   attention: AttentionItem[];
   loading: boolean;
+  error: string | null;
   refresh: () => void;
   sources?: Rules['sources'];
 }) {
   switch (page) {
     case 'briefing':
-      return <Briefing attention={attention} loading={loading} />;
+      return <Briefing attention={attention} loading={loading} error={error} retry={refresh} />;
     case 'map':
       return <MapPage params={params} sources={sources} />;
     case 'inventory':

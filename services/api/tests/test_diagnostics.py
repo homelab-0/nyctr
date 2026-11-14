@@ -231,7 +231,7 @@ def test_malformed_payload_preserves_transport_evidence_without_reflection(saved
     assert checks(report)["provider_contract"]["category"] == "provider_contract"
 
 
-@pytest.mark.parametrize("failure", ["connection", "tls", "timeout"])
+@pytest.mark.parametrize("failure", ["connection", "tls", "timeout", "timeout on https"])
 def test_typed_transport_failures_keep_unproven_stages_unknown(saved, monkeypatch, failure):
     """Classify typed transport failures without parsing secret-bearing exception strings."""
     def fail(request):
@@ -243,6 +243,11 @@ def test_typed_transport_failures_keep_unproven_stages_unknown(saved, monkeypatc
                 raise httpx.ConnectError(SOURCE_TEXT, request=request) from exc
         if failure == "timeout":
             raise httpx.ConnectTimeout(KEY, request=request)
+        if failure == "timeout on https":  # The chain a read with no answer leaves on an HTTPS connection.
+            try:
+                raise ssl.SSLWantReadError(KEY)
+            except ssl.SSLError as exc:
+                raise httpx.ReadTimeout(SOURCE_TEXT, request=request) from exc
         raise httpx.ConnectError(KEY, request=request)
 
     provider_transport(monkeypatch, fail)
@@ -254,7 +259,7 @@ def test_typed_transport_failures_keep_unproven_stages_unknown(saved, monkeypatc
         assert rows["connectivity"]["status"] == "unknown"
     else:
         assert rows["connectivity"]["status"] == "failed"
-        assert rows["connectivity"]["category"] == ("timeout" if failure == "timeout" else "transport")
+        assert rows["connectivity"]["category"] == ("timeout" if failure.startswith("timeout") else "transport")
         assert rows["tls"]["status"] == "unknown"
     assert report["snapshot_counts"] is None
 

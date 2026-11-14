@@ -223,3 +223,57 @@ describe('ending an exception', () => {
     expect(document.body.textContent).not.toMatch(/is not access|Nothing is open\. /);
   });
 });
+
+describe('how many exceptions Open now says are open', () => {
+  const show = async (leases: Lease[]) => {
+    mockApi({ 'GET /leases': leases, 'GET /suggestions': [] });
+    render(<OpenNow onChange={() => {}} />);
+    await screen.findByText(`${leases[0].id}.example`);
+    return document.querySelector('.lede')!.textContent!;
+  };
+
+  it('counts only what was applied at a source', async () => {
+    const lede = await show([
+      lease('real', {}),
+      lease('demo', { execution: 'simulated' }),
+      lease('readonly', { execution: 'not_applied' }),
+    ]);
+    expect(lede).toMatch(/^1 exception open\./);
+    expect(
+      row('demo.example').getByText('Simulated. Demo mode never contacts a source.'),
+    ).toBeTruthy();
+  });
+
+  it('never counts an opening it could not confirm, while checking, after, or once settled', async () => {
+    const record = {
+      status: 'unconfirmed',
+      execution: 'not_applied',
+      last_error: 'It may be open.',
+    };
+    const until = new Date(Date.now() + 4 * 60_000).toISOString();
+    for (const more of [{ checking_until: until }, {}] as Partial<Lease>[]) {
+      const lede = await show([lease('late', { ...record, ...more } as Partial<Lease>)]);
+      expect(lede).toMatch(
+        /^Nothing is open on Nyctr's record\. .*may still be open at the source/,
+      );
+      cleanup();
+    }
+    for (const execution of ['applied', 'not_applied'] as const) {
+      const lede = await show([
+        lease('late', { status: 'ended', ended_reason: 'not_confirmed', execution }),
+      ]);
+      expect(lede).toBe('Nothing is open. Temporary access appears here while it lasts.');
+      cleanup();
+    }
+  });
+
+  it.each(['simulated', 'not_applied', 'failed'] as const)(
+    'says nothing is open at a source when every decision was %s',
+    async (execution) => {
+      const lede = await show([lease('only', { execution })]);
+      expect(lede).toBe(
+        'Nothing is open at a source. What is listed below was decided here and changed nothing there.',
+      );
+    },
+  );
+});

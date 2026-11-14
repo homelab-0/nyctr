@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
-import type { AttentionItem, CollectionSchedule, Integration, Overview } from '../types';
+import type { AttentionItem, CollectionSchedule, Integration, Lease, Overview } from '../types';
 import Briefing from './Briefing';
 
 const overview: Overview = {
@@ -243,5 +243,135 @@ describe('Briefing counts', () => {
     );
     // No mixed total and no fixed window.
     expect(lede.textContent).not.toMatch(/1,?294|items|last day/);
+  });
+});
+
+describe('what the Briefing lists as open right now', () => {
+  const lease = (more: Partial<Lease>) =>
+    ({
+      id: 'l1',
+      domain: 'cdn.printshop.example',
+      kind: 'temporary',
+      status: 'active',
+      execution: 'applied',
+      owned: true,
+      risk_score: 20,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 58 * 60_000).toISOString(),
+      last_error: null,
+      ...more,
+    }) as Lease;
+  const panel = async (leases: Lease[]) => {
+    mockApi({
+      'GET /overview': overview,
+      'GET /leases': leases,
+      'GET /integrations': [],
+      'GET /collection': scheduleFixture(),
+    });
+    render(<Briefing attention={[]} loading={false} />);
+    await screen.findByText('cdn.printshop.example');
+    return screen.getByRole('heading', { name: 'Open right now' }).closest('section')!.textContent!;
+  };
+
+  it('lists an exception applied at a source as open, with its time left', async () => {
+    const text = await panel([lease({})]);
+    expect(text).toContain('58 min left');
+    expect(text).not.toContain('Nothing is open');
+  });
+
+  it.each([
+    [{ execution: 'simulated' }, 'Simulated. Demo mode never contacts a source.'],
+    [{ execution: 'not_applied' }, 'Not changed. Nyctr is read-only for this source.'],
+    [{ execution: 'failed' }, 'The source refused the change.'],
+  ] as [Partial<Lease>, string][])('never lists %o as open', async (more, words) => {
+    const text = await panel([lease(more)]);
+    expect(text).toContain('Nothing is open at a source.');
+    expect(text).toContain(words);
+    expect(text).not.toMatch(/min left|Closing|Permanent/);
+  });
+
+  const unconfirmed = lease({
+    id: 'l3',
+    domain: 'slow.example',
+    status: 'unconfirmed',
+    execution: 'not_applied',
+  });
+  const MAY_BE_OPEN =
+    "Nothing is open on Nyctr's record. What was not confirmed below may still be open at the source.";
+
+  it.each([
+    ['alone', [unconfirmed]],
+    ['among decisions that changed nothing', [lease({ execution: 'simulated' }), unconfirmed]],
+  ] as [string, Lease[]][])(
+    'never says nothing changed at the source over an opening that was not confirmed, %s',
+    async (_name, leases) => {
+      mockApi({
+        'GET /overview': overview,
+        'GET /leases': leases,
+        'GET /integrations': [],
+        'GET /collection': scheduleFixture(),
+      });
+      render(<Briefing attention={[]} loading={false} />);
+      const row = (await screen.findByText('slow.example')).closest('a')!;
+      const text = row.closest('section')!.textContent!;
+      expect(row.textContent).toContain('Not confirmed. It may be open at the source.');
+      expect(text).toContain(MAY_BE_OPEN);
+      expect(text).not.toMatch(/Nothing is open at a source|nothing changed there|min left/);
+      // What may be open is listed before what changed nothing.
+      expect(text.indexOf('slow.example')).toBeLessThan(
+        leases.length > 1 ? text.indexOf('cdn.printshop.example') : Infinity,
+      );
+    },
+  );
+
+  it('says until when Nyctr is still checking, and lists nothing once the record is settled', async () => {
+    const until = new Date(Date.now() + 4 * 60_000).toISOString();
+    const text = await panel([
+      { ...unconfirmed, domain: 'cdn.printshop.example', checking_until: until },
+    ]);
+    expect(text).toContain(MAY_BE_OPEN);
+    expect(text).toMatch(
+      /Not confirmed\. It may be open at the source\. Nyctr is still checking there, until \S.*\./,
+    );
+    // Its five minutes over and not yet settled: still listed as one that may be open, with no time.
+    cleanup();
+    const later = await panel([{ ...unconfirmed, domain: 'cdn.printshop.example' }]);
+    expect(later).toContain(MAY_BE_OPEN);
+    expect(later).not.toContain('still checking');
+    // Settled, as removed or as nothing found: a closed record, so nothing is listed.
+    for (const execution of ['applied', 'not_applied'] as const) {
+      cleanup();
+      mockApi({
+        'GET /overview': overview,
+        'GET /leases': [
+          { ...unconfirmed, status: 'ended', ended_reason: 'not_confirmed', execution },
+        ],
+        'GET /integrations': [],
+        'GET /collection': scheduleFixture(),
+      });
+      render(<Briefing attention={[]} loading={false} />);
+      expect(await screen.findByText('Nothing is open.')).toBeTruthy();
+      expect(document.body.textContent).not.toMatch(/slow\.example|may still be open/);
+    }
+  });
+
+  it('puts what is open first and words the rest as unchanged', async () => {
+    const text = await panel([
+      lease({ id: 'l2', domain: 'docs.example', execution: 'not_applied' }),
+      lease({}),
+    ]);
+    expect(text.indexOf('cdn.printshop.example')).toBeLessThan(text.indexOf('docs.example'));
+    expect(text).not.toContain('Nothing is open');
+  });
+});
+
+describe('a source in the demonstration', () => {
+  it('is sample data, never collected a moment ago', async () => {
+    const rows = await open([source('fine', 'connected')], scheduleFixture({ source: 'demo' }));
+    expect(rows.get('fine')!.textContent).toContain('Sample data is not collected');
+    expect(rows.get('fine')!.textContent).not.toMatch(/Collected|just now|ago/);
+    cleanup();
+    const live = await open([source('real', 'connected')]);
+    expect(live.get('real')!.textContent).toContain('Collected 5 min ago');
   });
 });

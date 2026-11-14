@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Execution, WriteMode } from '../types';
+import type { Execution, GuestStanding, Lease, WriteMode } from '../types';
 
 /** Re-renders a component on an interval so countdowns and ages stay current. */
 export function useNow(everyMs = 15000) {
@@ -71,6 +71,53 @@ export function executionText(execution: Execution) {
     failed: 'The source refused the change.',
   }[execution];
 }
+
+/** An entry that was at the source before Nyctr's exception: Nyctr added nothing and removes nothing. */
+export const UNOWNED =
+  'Already allowed there before this exception. Nyctr left the entry as it was.';
+
+/** True for an exception that is open at its source: decided, applied there and not yet ended. */
+export const isOpen = (lease: Lease) => lease.status === 'active' && lease.execution === 'applied';
+
+/** What an exception's record says happened at its source, in the words Open now uses. */
+export function atSource(lease: Lease) {
+  // While Nyctr still reads the source for it (a source can apply an add late), that is said too.
+  if (lease.status === 'unconfirmed')
+    return `Not confirmed. It may be open at the source.${lease.checking_until ? ` Nyctr is still checking there, until ${clock(lease.checking_until)}.` : ''}`;
+  return lease.execution === 'applied' && !lease.owned ? UNOWNED : executionText(lease.execution);
+}
+
+/** A note a person wrote. Older versions stored the decision itself when none was typed. */
+export const writtenNote = (note: string | null | undefined) =>
+  note && note !== 'Approved' && note !== 'Not approved' ? note : '';
+
+const GUEST: Record<GuestStanding['state'], { text: string; tone: string }> = {
+  online: { text: 'Online', tone: 'green' },
+  waiting: { text: 'On the sign-in page', tone: 'yellow' },
+  cut: { text: 'Cut off', tone: 'red' },
+  locked: { text: 'Locked out', tone: 'red' },
+  offline: { text: 'Gone', tone: '' },
+};
+const SIMULATED: Partial<Record<GuestStanding['state'], string>> = {
+  online: 'Simulated: let on',
+  cut: 'Simulated: cut off',
+  locked: 'Simulated: locked out',
+};
+const TRIED = { cut: 'cut off', lock: 'lock out', restore: 'let back on', admit: 'let on' };
+
+/** A guest's state in words. It reads as cut off, locked out or let on only when that was applied. */
+export function guestState(guest: GuestStanding) {
+  const simulated = guest.simulated ? SIMULATED[guest.state] : undefined;
+  return simulated ? { text: simulated, tone: '' } : GUEST[guest.state];
+}
+
+/** A change to a guest that did not take effect, worded as Activity words it; null when there is none. */
+export const guestAttempt = (guest: GuestStanding) =>
+  guest.attempt
+    ? guest.attempt.execution === 'not_applied'
+      ? `Decided to ${TRIED[guest.attempt.action]}, not changed at the source`
+      : `Tried to ${TRIED[guest.attempt.action]}, it did not go through`
+    : null;
 
 /** What ending an exception did at the source, by the code its record keeps. */
 export const REMOVAL: Record<string, string> = {

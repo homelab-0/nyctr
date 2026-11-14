@@ -4,7 +4,7 @@ import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { counted, lookupSpan, namedCounts } from '../lib/counts';
 import { failing, uncollected, waitingText, whyEmpty } from '../lib/coverage';
-import { ago, left, useNow, word } from '../lib/format';
+import { ago, atSource, isOpen, left, useNow, word } from '../lib/format';
 import { askNyctr, hrefFor } from '../lib/links';
 import { nextCollection, useSchedule } from '../lib/schedule';
 import type { AttentionItem, Catalog, FindingChecks, Integration, Lease, Overview } from '../types';
@@ -93,9 +93,14 @@ function briefingCounts(overview: Overview, now: number, connected: Integration[
 export default function Briefing({
   attention,
   loading,
+  error = null,
+  retry,
 }: {
   attention: AttentionItem[];
   loading: boolean;
+  /** Why the list could not be read. With it set, nothing here says the list is empty. */
+  error?: string | null;
+  retry?: () => void;
 }) {
   const overview = useApi<Overview>('/overview');
   const leases = useApi<Lease[]>('/leases');
@@ -115,7 +120,14 @@ export default function Briefing({
     if (reads > 1) rereadSources();
   }, [reads, rereadSources]);
   const urgent = attention.filter((item) => item.severity !== 'low');
-  const open = (leases.data || []).filter((lease) => lease.status === 'active');
+  // Open means applied at a source. A decision that changed nothing there is listed after, in the
+  // words Open now uses, and never as open.
+  const open = (leases.data || []).filter(isOpen);
+  // An opening that was not confirmed is not known either way: it may be open at the source. It is
+  // listed before the decisions that changed nothing, and nothing is said to be closed over it.
+  const rest = (leases.data || []).filter((lease) => lease.status !== 'ended' && !isOpen(lease));
+  const unconfirmed = rest.filter((lease) => lease.status === 'unconfirmed');
+  const unchanged = [...unconfirmed, ...rest.filter((lease) => lease.status !== 'unconfirmed')];
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (question.trim()) askNyctr(question);
@@ -123,9 +135,11 @@ export default function Briefing({
   };
   const headline = loading
     ? 'Checking what needs you.'
-    : urgent.length
-      ? `${word(urgent.length)} thing${urgent.length === 1 ? '' : 's'} need${urgent.length === 1 ? 's' : ''} you.`
-      : 'Nothing needs you right now.';
+    : error
+      ? 'Nyctr could not find out what needs you.'
+      : urgent.length
+        ? `${word(urgent.length)} thing${urgent.length === 1 ? '' : 's'} need${urgent.length === 1 ? 's' : ''} you.`
+        : 'Nothing needs you right now.';
   return (
     <div className="page">
       <header className="page-head">
@@ -155,6 +169,8 @@ export default function Briefing({
         <Panel title="Needs you" hint="Most urgent first" flush>
           {loading ? (
             <Loading text="Ranking…" />
+          ) : error ? (
+            <ErrorState message={error} retry={retry} />
           ) : attention.length === 0 ? (
             <p className="pad muted">
               No cut-off guests, waiting requests, open findings, or sources that failed or could
@@ -194,21 +210,30 @@ export default function Briefing({
           >
             {leases.error ? (
               <ErrorState message={leases.error} retry={leases.reload} />
-            ) : open.length === 0 ? (
+            ) : open.length + unchanged.length === 0 ? (
               <p className="pad muted">Nothing is open.</p>
             ) : (
               <div className="rows">
-                {open.slice(0, 5).map((lease) => (
+                {open.length === 0 && (
+                  <p className="pad muted">
+                    {unconfirmed.length
+                      ? "Nothing is open on Nyctr's record. What was not confirmed below may still be open at the source."
+                      : 'Nothing is open at a source. Decided here, with nothing changed there:'}
+                  </p>
+                )}
+                {[...open, ...unchanged].slice(0, 5).map((lease) => (
                   <a className="row" key={lease.id} href="#/access">
                     <Score value={lease.risk_score} />
                     <span>
                       <span className="t dom">{lease.domain}</span>
                       <span className="d">
-                        {lease.kind === 'permanent'
-                          ? 'Permanent'
-                          : lease.last_error
-                            ? 'Could not be closed'
-                            : left(lease.expires_at, now) || 'Closing'}
+                        {!isOpen(lease)
+                          ? atSource(lease)
+                          : lease.kind === 'permanent'
+                            ? 'Permanent'
+                            : lease.last_error
+                              ? 'Could not be closed'
+                              : left(lease.expires_at, now) || 'Closing'}
                         {lease.requester_name ? ` · ${lease.requester_name}` : ''}
                       </span>
                     </span>
@@ -226,15 +251,17 @@ export default function Briefing({
                   <span>
                     <span className="t">{source.name}</span>
                     <span className="d">
-                      {failing(source)
-                        ? source.last_error || 'Last collection failed'
-                        : !source.last_sync
-                          ? 'Not collected yet'
-                          : source.status === 'partial'
-                            ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
-                            : source.gaps?.length
-                              ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
-                              : `Collected ${ago(source.last_sync, now)}`}
+                      {schedule.data?.source === 'demo'
+                        ? ''
+                        : failing(source)
+                          ? source.last_error || 'Last collection failed'
+                          : !source.last_sync
+                            ? 'Not collected yet'
+                            : source.status === 'partial'
+                              ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
+                              : source.gaps?.length
+                                ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
+                                : `Collected ${ago(source.last_sync, now)}`}
                     </span>
                     {schedule.data && (
                       <span className="d">
