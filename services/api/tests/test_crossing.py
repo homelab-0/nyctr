@@ -128,7 +128,7 @@ def test_two_openings_of_one_address_at_once_share_one_entry_that_goes_with_the_
 @pytest.mark.parametrize("first", ["removal", "opening"])
 def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypatch, first):
     """Whichever is in flight first, the other sends nothing until it is done, and the open exception has its entry."""
-    source = Source(monkeypatch, hold=(1, "before") if first == "removal" else (0, "after"))
+    source = Source(monkeypatch, hold=(1, "before") if first == "removal" else (1, "after"))
     now = [utcnow()]
 
     async def scenario(app, member):
@@ -150,7 +150,7 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 await asyncio.wait_for(source.reached.wait(), 5)
                 up.tick()
                 await up.ending["dns"]
-                assert source.calls == ["GET"] and stored(app, Lease, old) == "active"  # Refused; tried next tick.
+                assert source.calls == ["GET", "GET"] and stored(app, Lease, old) == "active"  # Refused; tried next tick.
                 source.go.set()
                 assert (await asking).json()["status"] == "auto_approved"
                 up.tick()

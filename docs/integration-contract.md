@@ -31,7 +31,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
 | `allow_domain`, `disallow_domain`, `issue_pass`, `end_pass`, `guest_access` | Actions, present exactly for the write capabilities declared |
 | `domain_listed` | Optional read for a source that declares `dns.exceptions`: whether an address is already allowed there, switched on or off. With it, Nyctr removes by itself what a failed or interrupted opening left behind. Without it, Nyctr removes nothing after such an opening and asks an administrator to check |
-| `add_sent` on a raised error | Optional. `allow_domain` sets it on the error it raises after its own read found the address absent: `True` if its add was sent (whatever the source then answered, and also when it was cut off or stopped while the add was going, where it cannot tell), `False` if the add never left (no connection was opened, or it was refused before sending). With `True`, Nyctr treats the entry as possibly there and, if it is, its own |
+| `add_sent` on a raised error | Optional. `allow_domain` sets it on the error it raises after its own read found the address absent: `True` if its add was sent (whatever the source then answered, and also when it was cut off or stopped while the add was going, where it cannot tell), `False` if nothing was sent (it failed before its add, no connection was opened, or it was refused before sending): Nyctr then keeps no record of an entry of its own. With `True`, Nyctr treats the entry as possibly there and, if it is, its own |
 
 The registry refuses to start if a provider declares a write capability without
 its actions, or actions without the capability.

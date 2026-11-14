@@ -14,7 +14,7 @@ from test_crossing import DOMAIN, Source, ask, claims, console, started
 from test_unconfirmed import Failing, rows, trail
 from test_upkeep import Sources, opened, upkeep
 
-from nyctr import access
+from nyctr import access, removal
 from nyctr.integrations import IntegrationError, actions, core
 from nyctr.models import AccessRequest, Integration, Lease, Observation, Setting, utcnow
 
@@ -733,3 +733,69 @@ def test_a_store_that_fails_after_the_claim_was_taken_over_leaves_the_entry_to_a
         asyncio.run(scenario())
         assert rows(app) == [("unconfirmed", None, False)] and source.calls == ["GET", "GET", "POST", "GET"]
         assert source.listed == [DOMAIN] and claims(app) == [] and gates(app) == []
+
+
+@pytest.mark.parametrize("add", ["never sent", "sent"])
+def test_no_record_is_kept_when_the_add_itself_says_nothing_was_sent(tmp_path, monkeypatch, add):
+    """The add's own read fails, so no add is sent: nothing is on record, and an entry a person then writes by
+    hand is not touched, however long the source goes on failing. An add that was sent and not confirmed is on
+    record, removed, and its row says what settling it did."""
+    with started(tmp_path, rule=True) as (app, _client, member, admin):
+        source = Failing(monkeypatch, fail={1, 2} if add == "never sent" else {3})
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                made = (await sam.post("/api/requests", json=ask("one"))).json()
+                assert made["status"] == "pending" and ("POST" in source.calls) == (add == "sent")
+                if add == "never sent":
+                    assert rows(app) == [] and source.calls == ["GET", "GET"] and trail(app) == []
+                    source.fail = set(range(99))
+                    source.listed.append(DOMAIN)  # A person adds it at the source by hand.
+                listed = (await owner.get("/api/leases")).json()
+                return [(row["status"], row["execution"]) for row in listed]
+
+        listed = asyncio.run(scenario())
+        if add == "never sent":
+            assert listed == [] and source.listed == [DOMAIN] and "DELETE" not in source.calls
+        else:
+            assert listed == [("ended", "applied")] and source.listed == []
+        assert claims(app) == []
+
+
+@pytest.mark.parametrize("source_says", ["there", "not there", "the read fails"])
+def test_an_entry_is_passed_on_only_when_the_source_says_it_is_there(tmp_path, monkeypatch, source_says):
+    """A record is settled beside an open exception recorded as not Nyctr's. There: that exception carries the
+    entry from now on. Not there: nothing is marked, and a person's entry written later is never removed. The
+    read fails: the record stays unsettled and nothing is marked."""
+    with started(tmp_path) as (app, _client, _member, admin):
+        source = Failing(monkeypatch)
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                db.add(Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=False,
+                             created_at=utcnow() - timedelta(minutes=5)))
+                db.commit()
+                await access.hold_entry(db, app.state.settings, db.get(Integration, "dns"), DOMAIN)  # Then killed.
+                age(app, "ending:")
+                db.execute(update(Lease).where(Lease.status == "unconfirmed").values(expires_at=utcnow()))
+                db.commit()
+                source.listed.extend([DOMAIN] * (source_says == "there"))
+                source.fail = set(range(99)) if source_says == "the read fails" else set()
+                assert await access.reconcile(db, app.state.settings) == (source_says != "the read fails")
+                kept = removal.plan(db, db.get(Integration, "dns"), [])["keep"]["exceptions"]
+            if source_says == "not there":
+                source.listed.append(DOMAIN)  # A person writes it by hand afterwards.
+            async with console(app, admin) as owner:
+                old = next(row for row in (await owner.get("/api/leases")).json() if row["status"] == "active")
+                assert old["owned"] == (source_says == "there") and kept == 1  # The record is not an exception kept.
+                if source_says == "the read fails":
+                    record = next(row for row in (await owner.get("/api/leases")).json() if row["status"] != "active")
+                    refused = await owner.post(f"/api/leases/{record['id']}/end")
+                    assert refused.status_code == 502 and "stays listed as not confirmed" in refused.json()["detail"]
+                    source.fail = set()
+                assert (await owner.post(f"/api/leases/{old['id']}/end")).status_code == 200
+
+        asyncio.run(scenario())
+        assert ("DELETE" in source.calls) == (source_says == "there")
+        assert source.listed == ([DOMAIN] if source_says == "not there" else [])
+        assert [row[0] for row in rows(app)].count("unconfirmed") == (source_says == "the read fails")
