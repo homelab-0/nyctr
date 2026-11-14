@@ -298,3 +298,24 @@ def test_who_is_refused_is_unchanged_and_a_denial_needs_no_fresh_evidence(tmp_pa
         asyncio.run(scenario())
         with app.state.session_factory() as db:
             assert db.scalar(select(AccessRequest.status)) == "denied"
+
+
+def test_a_persons_decision_while_the_rule_is_opening_is_refused_and_never_overwritten(tmp_path, monkeypatch):
+    """The request is listed as waiting while the rule's opening is at the source: a denial then is told it is
+    being approved, and the rule's decision stands alone, with one exception."""
+    with started(tmp_path, rule=True) as (app, _client, member, admin):
+        source = Source(monkeypatch, hold=(2, "after"))
+
+        async def scenario():
+            async with console(app, member) as sam, console(app, admin) as owner:
+                asking = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
+                await asyncio.wait_for(source.reached.wait(), 5)
+                made = (await owner.get("/api/requests")).json()[0]
+                refused = await review(owner, made["id"], "denied")
+                assert made["status"] == "pending" and refused.status_code == 409
+                assert refused.json()["detail"] == access.REVIEWING
+                source.go.set()
+                assert (await asking).json()["status"] == "auto_approved"
+
+        asyncio.run(scenario())
+        assert rows(app) == [("active", None, True)] and gates(app) == [] and claims(app) == []
