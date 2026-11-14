@@ -12,6 +12,7 @@ const ENDED: Record<string, string> = {
   revoked: 'Ended early',
   removed_by_hand: 'Marked as removed by hand',
   source_removed: 'Closed when its source was removed',
+  not_confirmed: 'Not opened',
 };
 
 /**

@@ -139,6 +139,7 @@ describe('ending an exception', () => {
           decided_by: '',
           last_error: words,
         }),
+        lease('settled', { status: 'ended', ended_reason: 'not_confirmed' }),
       ],
       'GET /suggestions': [],
     });
@@ -149,5 +150,6 @@ describe('ending an exception', () => {
     expect(text).toContain('Not confirmed');
     expect(text).toContain(words);
     expect(text).not.toMatch(/left|Closing|An administrator/);
+    expect(row('settled.example').getByText(/^Not opened/)).toBeTruthy();
   });
 });
