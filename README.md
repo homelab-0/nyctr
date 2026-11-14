@@ -67,16 +67,18 @@ person's browsing activity do not become a member's inbox entries.
 
 The briefing ranks what needs a person, using fixed rules rather than a model:
 
-![Nyctr briefing listing a cut-off guest, a waiting request and two findings](docs/assets/console-briefing.png)
+![Nyctr briefing listing a simulated guest cut-off, a waiting request and two findings](docs/assets/console-briefing.png)
 
 The map puts each network in a column and each layer in a row. Line style shows
 whether a link was observed, configured or inferred by Nyctr:
 
 ![Nyctr network map following a UniFi device into its Proxmox host](docs/assets/network-map.png)
 
-A member sees the score, what it is based on, and how to reconnect once it opens:
+A member sees the score and what it is based on, and how to reconnect once an
+address opens. The demonstration changes no real network, so its page says that
+nothing was opened:
 
-![Nyctr member portal showing an opened address and reconnect steps](docs/assets/member-portal.png)
+![Nyctr member portal saying that the demonstration opened nothing, with the score and what it is based on](docs/assets/member-portal.png)
 
 These screenshots show the running application with synthetic demonstration data.
 
