@@ -324,7 +324,8 @@ def test_an_ending_records_what_it_did_at_the_source(tmp_path, monkeypatch, befo
 
 
 def test_an_ending_leaves_the_entry_another_open_exception_still_needs_and_says_so(tmp_path, monkeypatch):
-    """Two exceptions share one entry: the first ending sends nothing and records why, the last one removes it."""
+    """Two exceptions share one entry: the first ending changes nothing and records why, the last one removes it.
+    Before it leaves the entry to the other, the first ending asks the source that the entry is there."""
     allowlist: list[str] = []
     calls = nextdns_mock(monkeypatch, allowlist)
     app = live_app(tmp_path, provider_writes="nextdns")
@@ -345,7 +346,7 @@ def test_an_ending_leaves_the_entry_another_open_exception_still_needs_and_says_
         sent = len(calls)
         assert client.post(f"/api/leases/{first}/end", headers=admin_headers).status_code == 200
         assert said() == {first: "kept_for_another", second: None}
-        assert allowlist == [row["domain"]] and len(calls) == sent
+        assert allowlist == [row["domain"]] and [method for method, _ in calls[sent:]] == ["GET"]
         assert client.post(f"/api/leases/{second}/end", headers=admin_headers).status_code == 200
         assert said() == {first: "kept_for_another", second: "removed"} and allowlist == []
 

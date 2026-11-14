@@ -16,7 +16,7 @@ from test_upkeep import Sources, opened, upkeep
 
 from nyctr import access, removal
 from nyctr.integrations import IntegrationError, actions, core
-from nyctr.models import AccessRequest, Integration, Lease, Observation, Setting, utcnow
+from nyctr.models import AccessRequest, Audit, Integration, Lease, Observation, Setting, utcnow
 
 GONE = {"name": "Office DNS"}
 
@@ -31,6 +31,13 @@ def note(app, request_id):
     with app.state.session_factory() as db:
         row = db.get(AccessRequest, request_id)
         return row.status, row.decision_note or ""
+
+
+def words(app):
+    """What each recorded ending says it did at the source, oldest first."""
+    with app.state.session_factory() as db:
+        return [row.details.get("removal") for row in db.scalars(
+            select(Audit).where(Audit.action == "access.closed").order_by(Audit.created_at))]
 
 
 def age(app, prefix):
@@ -281,6 +288,8 @@ def test_the_duty_to_remove_an_entry_nyctr_added_passes_on_and_a_persons_entry_i
         asyncio.run(scenario())
         assert source.calls.count("DELETE") == (0 if first == "theirs" else 1) and claims(app) == []
         assert source.listed == ([DOMAIN] if first == "theirs" else [])
+        assert words(app) == {"own": ["kept_for_another", "removed"], "other": ["not_owned", "removed"],
+                              "theirs": ["not_owned", "not_owned"]}[first]
 
 
 def test_the_daily_limit_holds_for_requests_sent_at_the_same_moment(tmp_path, monkeypatch):
@@ -495,8 +504,8 @@ def test_an_ending_acts_on_what_is_stored_when_another_copy_changes_it_in_the_mi
                 db.commit()
 
         asyncio.run(scenario())
-        if moment == "passed on while ending":
-            assert source.calls == ["GET", "DELETE", "GET"] and source.listed == []
+        if moment == "passed on while ending":  # It went round as Nyctr's own: the record says removed.
+            assert source.calls == ["GET", "DELETE", "GET"] and source.listed == [] and words(app) == ["removed"]
         else:
             assert source.calls == [] and source.listed == [DOMAIN] and rows(app)[-1] == ("active", None, False)
         assert claims(app) == []
@@ -626,7 +635,7 @@ def test_why_an_approval_opened_nothing_is_kept_for_administrators_and_no_member
     """The reason is in the audit record. The member reads their own sentence and nothing else, by any route."""
     with started(tmp_path) as (app, _client, member, admin):
         Failing(monkeypatch, fail=set(range(99)))
-        why = "Provider returned HTTP 500."
+        why = "The source returned HTTP 500."
 
         async def scenario():
             async with console(app, member) as sam, console(app, admin) as owner:
@@ -640,7 +649,7 @@ def test_why_an_approval_opened_nothing_is_kept_for_administrators_and_no_member
                 read = [await sam.get(path) for path in ("/api/requests", "/api/leases", "/api/blocks", "/api/me")]
                 read.append(await sam.post("/api/requests", json=ask("one")))  # The same request, asked again.
                 assert read[0].json()[0]["decision_note"] == access.NOT_OPENED
-                assert all(why not in answer.text and "Provider" not in answer.text for answer in read)
+                assert all(why not in answer.text and "HTTP 500" not in answer.text for answer in read)
                 assert (await sam.post("/api/graph/query", json={"query": "{ leases { id } }"})).status_code == 403
 
         asyncio.run(scenario())
@@ -758,7 +767,7 @@ def test_no_record_is_kept_when_the_add_itself_says_nothing_was_sent(tmp_path, m
         if add == "never sent":
             assert listed == [] and source.listed == [DOMAIN] and "DELETE" not in source.calls
         else:
-            assert listed == [("ended", "applied")] and source.listed == []
+            assert listed == [("ended", "applied")] and source.listed == [] and words(app) == ["removed"]
         assert claims(app) == []
 
 
@@ -799,6 +808,9 @@ def test_an_entry_is_passed_on_only_when_the_source_says_it_is_there(tmp_path, m
         assert ("DELETE" in source.calls) == (source_says == "there")
         assert source.listed == ([DOMAIN] if source_says == "not there" else [])
         assert [row[0] for row in rows(app)].count("unconfirmed") == (source_says == "the read fails")
+        # The record's own ending, then the exception's: passed on and then removed; nothing there and not Nyctr's.
+        assert words(app) == {"there": ["kept_for_another", "removed"], "not there": ["nothing_removed", "not_owned"],
+                              "the read fails": ["not_owned"]}[source_says]
 
 
 @pytest.mark.parametrize("says", [False, None])
@@ -823,3 +835,30 @@ def test_a_source_without_the_first_read_leaves_no_record_when_its_add_says_noth
 
         assert asyncio.run(scenario()) == "pending" and claims(app) == []
         assert rows(app) == ([] if says is False else [("unconfirmed", None, False)])
+
+
+def test_an_ending_that_finds_the_shared_entry_gone_says_so_and_a_settled_record_says_what_it_did(tmp_path,
+                                                                                               monkeypatch):
+    """Two exceptions of Nyctr's own share an entry a person has since taken out: neither ending says it left the
+    entry for the other. A record with nothing at the source says nothing was removed, and the list of exceptions
+    gives the administrator the same word."""
+    with started(tmp_path) as (app, _client, _member, admin):
+        Source(monkeypatch)
+
+        async def scenario():
+            with app.state.session_factory() as db:
+                for _ in range(2):
+                    db.add(Lease(integration_id="dns", domain=DOMAIN, execution="applied", owned=True,
+                                 expires_at=utcnow() - timedelta(seconds=1)))
+                    db.commit()
+                assert await access.reconcile(db, app.state.settings) == 2
+                await access.hold_entry(db, app.state.settings, db.get(Integration, "dns"), DOMAIN)  # Then killed.
+                age(app, "ending:")
+                db.execute(update(Lease).where(Lease.status == "unconfirmed").values(expires_at=utcnow()))
+                db.commit()
+                assert await access.reconcile(db, app.state.settings) == 1
+            async with console(app, admin) as owner:
+                return [row["removal"] for row in (await owner.get("/api/leases")).json()]
+
+        assert sorted(asyncio.run(scenario())) == ["already_gone", "already_gone", "nothing_removed"]
+        assert words(app) == ["already_gone", "already_gone", "nothing_removed"] and claims(app) == []

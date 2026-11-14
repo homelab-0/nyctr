@@ -604,6 +604,8 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             if there:
                 others = db.execute(update(Lease).where(*using).values(owned=True)
                                     .execution_options(synchronize_session=False)).rowcount
+            elif not failure:
+                removal = "already_gone"  # Nothing is there to keep for another, and nothing to remove.
         if lease.status in OPEN and not others and not failure:
             db.commit()  # Nothing was marked: end the transaction, so no write lock is held during the call.
             try:
@@ -635,6 +637,8 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
             return await end_lease(db, settings, lease, reason, actor)
     reason, outcome = ("not_confirmed", "applied" if removed else "not_applied") if unconfirmed else \
         (reason, lease.execution)
+    if unconfirmed and removal != "kept_for_another":  # A record says only whether an entry was removed.
+        removal = "removed" if removed else "nothing_removed"
     lease.execution = outcome  # For a record: what settling it did at the source, in its row as in the audit.
     lease.status, lease.ended_reason, lease.ended_at, lease.last_error = "ended", reason, utcnow(), None
     audit(db, actor, "access.closed", lease.id, domain=lease.domain, reason=reason, execution=outcome,
