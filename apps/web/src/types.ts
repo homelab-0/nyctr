@@ -72,6 +72,8 @@ export interface Integration {
   maturity?: string;
   /** Feature capabilities this source adds to Nyctr, by id. */
   provides?: string[];
+  /** What the last stored collection could not read, in the integration's own words. */
+  gaps?: { id: string; title: string; summary: string }[];
 }
 /** One thing Nyctr can do once a source that offers it is connected. */
 export interface Capability {
@@ -340,6 +342,8 @@ export interface GuestOverview {
 export interface AttentionItem {
   kind: 'guest' | 'lease' | 'request' | 'finding' | 'source' | 'suggestion';
   id: string;
+  /** For a source that stored only part: open its Edit form, or go to its card. */
+  action?: 'edit' | 'card';
   severity: 'high' | 'medium' | 'low';
   title: string;
   detail: string;

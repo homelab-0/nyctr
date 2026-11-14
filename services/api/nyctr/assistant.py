@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .access import suggestions
+from .collection import last_gaps
 from .config import Settings
 from .deps import admin, get_db
 from .guests import guest_devices, guest_json
@@ -122,6 +123,18 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
             items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
                           "title": f"{integration.name} is not collecting",
                           "detail": integration.last_error or "The last collection failed."})
+            continue
+        # Stored, but not all of it. `action` says where the console sends the administrator:
+        # the source's Edit form for a read cut short, its card for what could not be read.
+        if integration.status == "partial":
+            items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
+                          "action": "edit", "title": f"{integration.name} was only partly collected",
+                          "detail": "Only the most recent blocked lookups were read. "
+                                    "Give it a shorter time window to read all of it."})
+        if gaps := last_gaps(db, integration):
+            items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
+                          "action": "card", "title": f"{integration.name} could not read everything",
+                          "detail": ". ".join(gap["title"] for gap in gaps) + "."})
     for item in suggestions(db):
         items.append({"kind": "suggestion", "id": item["domain"], "severity": "low",
                       "at": item["last_at"].isoformat(),

@@ -57,6 +57,10 @@ class ProbeEvidence:
     verified_capabilities: set[str] = field(default_factory=set)
     unavailable_capabilities: set[str] = field(default_factory=set)
     gaps: set[str] = field(default_factory=set)
+    # Why a gap happened, where the source's last answer said so: code -> causes from GAP_CAUSES.
+    gap_causes: dict[str, set[str]] = field(default_factory=dict)
+    # How the latest request was turned away, until the next request or the gap that records it.
+    last_fault: str | None = None
 
 
 _probe_evidence: ContextVar[ProbeEvidence | None] = ContextVar("nyctr_probe_evidence", default=None)
@@ -64,7 +68,10 @@ _probe_evidence: ContextVar[ProbeEvidence | None] = ContextVar("nyctr_probe_evid
 
 @contextmanager
 def capture_probe():
-    """Isolate diagnostic evidence to the current async context and reset it even after failure."""
+    """Isolate one task's evidence to the current async context and reset it even after failure.
+
+    Opened by the connection test and by every collection, so both record the same gaps.
+    """
     evidence = ProbeEvidence()
     token = _probe_evidence.set(evidence)
     try:
@@ -81,9 +88,41 @@ def record_capability(capability: str, *, unavailable: bool = False):
 
 
 def record_gap(gap: str):
-    """Record a fixed code for source coverage that the diagnostic cannot verify."""
+    """Record a fixed code for something this collection or connection test could not read.
+
+    A gap recorded straight after the source refused a read or answered with an error
+    of its own keeps that cause, so the two are never told as one.
+    """
     if (evidence := _probe_evidence.get()) is not None:
         evidence.gaps.add(gap)
+        if evidence.last_fault:
+            evidence.gap_causes.setdefault(gap, set()).add(evidence.last_fault)
+            evidence.last_fault = None
+
+
+def _fault(cause: str | None):
+    """Note how the request in hand was turned away; None at the start of each request."""
+    if (evidence := _probe_evidence.get()) is not None:
+        evidence.last_fault = cause
+
+
+# Plain words for why a read was not made. Fixed text: nothing from a response is repeated.
+GAP_CAUSES = {
+    "refused": "This time the source refused the read: this key may not read it.",
+    "source_error": "This time the source had an error of its own, so the next collection may read it.",
+}
+UNDESCRIBED_GAP = ("Part of this source could not be read",
+                   "This release has no description for what was missed.")
+
+
+def describe_gaps(notes: dict[str, tuple[str, str]], gaps: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Turn recorded gap codes, each with its causes, into (code, title, text) in the integration's words."""
+    entries = []
+    for code in sorted(gaps):
+        title, text = notes.get(code, UNDESCRIBED_GAP)
+        causes = [GAP_CAUSES[cause] for cause in sorted(GAP_CAUSES) if cause in (gaps[code] or ())]
+        entries.append((code, title, " ".join([text, *causes])))
+    return entries
 
 
 def _transport_category(error: Exception) -> str:
@@ -361,6 +400,7 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
     self.requests += 1
     if self.requests > MAX_REQUESTS:
         raise BudgetExceeded("Collection exceeded its request budget; narrow the site scope.")
+    _fault(None)
     try:
         async with self.client.stream(method, self.base_url + path, params=params, json=body) as response:
             if (evidence := _probe_evidence.get()) is not None:
@@ -368,12 +408,14 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
             if response.is_redirect:
                 raise IntegrationError("Provider redirected the request; redirects are never followed.")
             if response.status_code in {401, 403}:
+                _fault("refused")
                 raise IntegrationError("Provider denied access. Check the configured key and its read permissions.",
                                        category="authentication")
             if response.status_code == 429:
                 raise IntegrationError("Provider rate limit reached. Try syncing later.", category="rate_limit",
                                        retry_after=_retry_after(response.headers.get("retry-after")))
             if response.status_code >= 400:
+                _fault("source_error" if response.status_code >= 500 else None)
                 raise IntegrationError(f"Provider returned HTTP {response.status_code}.",
                                        transient=response.status_code >= 500)
             chunks: list[bytes] = []

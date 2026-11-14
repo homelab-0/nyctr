@@ -407,6 +407,7 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   const kind = (id: string) => providers.find((item) => item.id === id);
   const allowed = sources.filter((item) => item.write_mode === 'enabled').map((item) => item.name);
   const connected = new Set((result.data || []).map((item) => item.provider));
+  const { user } = useAuth();
   const [add, setAdd] = useState<string | null>(null);
   const [edit, setEdit] = useState<Integration | null>(null);
   const [removing, setRemoving] = useState<Integration | null>(null);
@@ -431,10 +432,30 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
   useEffect(() => {
     if (!edit) editButton.current?.focus();
   }, [edit]);
+  // A link from the Briefing names one source: `edit` opens its Edit form, `source` goes to its
+  // card. Each link is followed once, so closing the form does not open it again. The form is
+  // built from the catalogue, so an edit link waits for it, and then opens only where the Edit
+  // button would: for an administrator, outside the demo, for a source whose integration this
+  // release has, and not while a change to it is still being saved.
+  const followed = useRef('');
+  const mayEdit = user?.role === 'admin' && user.mode !== 'demo';
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!result.data || followed.current === hash) return;
+    const wanted = new URLSearchParams(hash.split('?')[1] || '');
+    const editing = wanted.get('edit');
+    if (editing && !catalog) return;
+    followed.current = hash;
+    const target = result.data.find((item) => item.id === (editing || wanted.get('source')));
+    if (!target) return;
+    document.getElementById(`source-${target.id}`)?.focus();
+    const known = catalog?.providers.some((item) => item.id === target.provider);
+    const settling = saving[target.id] === 'pending' || saving[target.id] === result.data;
+    if (editing && mayEdit && known && !settling) setEdit(target);
+  }, [result.data, catalog, mayEdit, saving]);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const { user } = useAuth();
   const admin = user?.role === 'admin';
   const demo = user?.mode === 'demo';
   const diagnostics = useIntegrationDiagnostics(admin && !demo);
@@ -452,10 +473,14 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
         resource_count: number;
         observation_count: number;
         partial?: boolean;
+        gaps?: number;
       }>(`/integrations/${encodeURIComponent(integration.id)}/sync`);
       setSuccess(
         `Snapshot collected: ${response.resource_count} resources and ${response.observation_count} observations.` +
-          (response.partial ? ` ${PARTIAL_NOTE}` : ''),
+          (response.partial ? ` ${PARTIAL_NOTE}` : '') +
+          (response.gaps
+            ? ` ${response.gaps === 1 ? 'One thing' : `${response.gaps} things`} could not be read; the source's card says what.`
+            : ''),
       );
       result.reload();
     } catch (e) {
@@ -530,9 +555,15 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">
                   <SourceTag provider={integration.provider} big />
-                  <Status value={integration.status} />
+                  {integration.status === 'connected' && integration.gaps?.length ? (
+                    <Badge tone="amber">Connected, with gaps</Badge>
+                  ) : (
+                    <Status value={integration.status} />
+                  )}
                 </div>
-                <h3>{integration.name}</h3>
+                <h3 id={`source-${integration.id}`} tabIndex={-1}>
+                  {integration.name}
+                </h3>
                 <p>
                   {item?.name || integration.provider_name || label(integration.provider)}
                   {item?.status === 'experimental' ? ' · experimental' : ''}
@@ -568,6 +599,18 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                   </div>
                 )}
                 {integration.status === 'partial' && <Notice tone="amber">{PARTIAL_NOTE}</Notice>}
+                {integration.gaps?.length ? (
+                  <Notice tone="amber">
+                    <strong>The last collection could not read everything</strong>
+                    <ul className="plain">
+                      {integration.gaps.map((gap) => (
+                        <li key={gap.id}>
+                          <strong>{gap.title}.</strong> {gap.summary}
+                        </li>
+                      ))}
+                    </ul>
+                  </Notice>
+                ) : null}
                 {integration.last_error && (
                   <div className="inline-error small-text">{integration.last_error}</div>
                 )}

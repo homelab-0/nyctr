@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
-import type { CollectionSchedule, Integration, Overview } from '../types';
+import type { AttentionItem, CollectionSchedule, Integration, Overview } from '../types';
 import Briefing from './Briefing';
 
 const overview: Overview = {
@@ -33,14 +33,18 @@ const source = (id: string, status: string, last_error: string | null = null): I
 });
 
 /** Renders the landing screen over fabricated sources and returns each source's row. */
-async function open(sources: Integration[], schedule: CollectionSchedule = scheduleFixture()) {
+async function open(
+  sources: Integration[],
+  schedule: CollectionSchedule = scheduleFixture(),
+  attention: AttentionItem[] = [],
+) {
   mockApi({
     'GET /overview': overview,
     'GET /leases': [],
     'GET /integrations': sources,
     'GET /collection': schedule,
   });
-  render(<Briefing attention={[]} loading={false} />);
+  render(<Briefing attention={attention} loading={false} />);
   const rows = new Map<string, HTMLElement>();
   for (const item of sources) {
     rows.set(item.id, (await screen.findByText(item.name)).closest('a') as HTMLElement);
@@ -81,6 +85,69 @@ async function openOnClock(schedule: () => CollectionSchedule) {
   };
   return { count, pass, view };
 }
+
+const gaps = [
+  { id: 'example_passes', title: 'Guest passes could not be read', summary: 'Fabricated.' },
+  { id: 'example_ranges', title: 'Some address ranges could not be read', summary: 'Fabricated.' },
+];
+
+/** A row of the server's attention list about a source that stored only part of what it holds. */
+const need = (
+  id: string,
+  action: 'edit' | 'card',
+  title: string,
+  detail: string,
+): AttentionItem => ({
+  kind: 'source',
+  id,
+  action,
+  severity: 'medium',
+  title: `${id} source ${title}`,
+  detail,
+  at: null,
+});
+
+describe('briefing: sources that need a look', () => {
+  it('links a partly collected source to its Edit form and one with gaps to its card', async () => {
+    const rows = await open(
+      [
+        source('complete', 'connected'),
+        source('partial', 'partial'),
+        { ...source('gappy', 'connected'), gaps },
+      ],
+      scheduleFixture(),
+      [
+        need('partial', 'edit', 'was only partly collected', 'Give it a shorter time window.'),
+        need('gappy', 'card', 'could not read everything', 'Guest passes could not be read.'),
+        // A failed source carries no action and keeps the plain link to Sources.
+        { ...need('failed', 'card', 'is not collecting', 'Denied.'), action: undefined },
+      ],
+    );
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Three things need you.');
+    const row = (text: string) => screen.getByText(text).closest('a')!;
+    expect(row('partial source was only partly collected').getAttribute('href')).toBe(
+      '#/sources?edit=partial',
+    );
+    const gappy = row('gappy source could not read everything');
+    expect(gappy.getAttribute('href')).toBe('#/sources?source=gappy');
+    expect(gappy.textContent).toContain('Guest passes could not be read.');
+    expect(row('failed source is not collecting').getAttribute('href')).toBe('#/sources');
+    // The Sources panel does not show it as a clean collection either.
+    expect(rows.get('gappy')!.textContent).toContain(
+      'Collected 5 min ago. 2 things could not be read.',
+    );
+    expect(rows.get('gappy')!.querySelector('.dot')!.className).toBe('dot yellow');
+    expect(rows.get('complete')!.querySelector('.dot')!.className).toBe('dot green');
+  });
+
+  it('says nothing needs you only when the list is empty', async () => {
+    await open([source('complete', 'connected')]);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'Nothing needs you right now.',
+    );
+    expect(screen.getByText(/or sources that failed or could\s+not read everything/)).toBeDefined();
+  });
+});
 
 describe('briefing sources', () => {
   it('does not show a partly read source as a clean one', async () => {

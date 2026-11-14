@@ -25,6 +25,14 @@ const NOT_COLLECTED = [
   'Workload firewall rules (only the on/off switches are read)',
 ];
 
+/** Where a "Needs you" row leads. A source that stored only part names its Edit form or its card. */
+function needHref(item: AttentionItem) {
+  const id = encodeURIComponent(item.id);
+  if (item.kind === 'source' && item.action === 'edit') return `#/sources?edit=${id}`;
+  if (item.kind === 'source' && item.action === 'card') return `#/sources?source=${id}`;
+  return hrefFor(item.kind, item.id);
+}
+
 /** What the sources reported, each kind named with its own count, then the span of stored lookups. */
 function briefingCounts(overview: Overview, now: number) {
   const named = namedCounts(overview.kind_counts || {});
@@ -104,27 +112,27 @@ export default function Briefing({
             <Loading text="Ranking…" />
           ) : attention.length === 0 ? (
             <p className="pad muted">
-              No cut-off guests, waiting requests, open findings or failing sources.
+              No cut-off guests, waiting requests, open findings, or sources that failed or could
+              not read everything.
             </p>
           ) : (
             <div className="rows">
-              {attention.map((item) => (
-                <a
-                  className="row"
-                  key={`${item.kind}:${item.id}`}
-                  href={hrefFor(item.kind, item.id)}
-                >
-                  <i className={`dot ${item.severity}`} />
-                  <span>
-                    <span className="t">{item.title}</span>
-                    <span className="d">{item.detail}</span>
-                  </span>
-                  <span className="meta">
-                    <span className="tag">{KIND[item.kind]}</span>
-                    <ArrowRight size={15} />
-                  </span>
-                </a>
-              ))}
+              {attention.map((item) => {
+                const href = needHref(item);
+                return (
+                  <a className="row" key={`${item.kind}:${href}:${item.id}`} href={href}>
+                    <i className={`dot ${item.severity}`} />
+                    <span>
+                      <span className="t">{item.title}</span>
+                      <span className="d">{item.detail}</span>
+                    </span>
+                    <span className="meta">
+                      <span className="tag">{KIND[item.kind]}</span>
+                      <ArrowRight size={15} />
+                    </span>
+                  </a>
+                );
+              })}
             </div>
           )}
         </Panel>
@@ -177,7 +185,9 @@ export default function Briefing({
                         ? source.last_error || 'Last collection failed'
                         : source.status === 'partial'
                           ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
-                          : `Collected ${ago(source.last_sync, now)}`}
+                          : source.gaps?.length
+                            ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
+                            : `Collected ${ago(source.last_sync, now)}`}
                     </span>
                     {schedule.data && (
                       <span className="d">
@@ -186,8 +196,14 @@ export default function Briefing({
                     )}
                   </span>
                   <i
-                    className={`dot ${source.status === 'error' ? 'red' : source.status === 'partial' ? 'yellow' : source.last_sync ? 'green' : ''}`}
-                    title={source.status === 'partial' ? 'Partly collected' : undefined}
+                    className={`dot ${source.status === 'error' ? 'red' : source.status === 'partial' || source.gaps?.length ? 'yellow' : source.last_sync ? 'green' : ''}`}
+                    title={
+                      source.status === 'partial'
+                        ? 'Partly collected'
+                        : source.gaps?.length && source.status !== 'error'
+                          ? 'Collected with gaps'
+                          : undefined
+                    }
                   />
                 </a>
               ))}

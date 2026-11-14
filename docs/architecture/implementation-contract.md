@@ -25,9 +25,11 @@ specified. Errors use FastAPI's `detail` string. Version: `0.1.0-alpha.1`.
 - `GET /api/graph?focus=<optional-id>&depth=1` -> `{nodes:Resource[],edges:Relationship[]}`.
   Without focus, all data is returned; depth is bounded to 1–3.
 - `GET /api/findings` -> Finding[].
-- `GET /api/integrations` -> Integration[].
+- `GET /api/integrations` -> Integration[], each with `gaps`: `{id,title,summary}`[] for
+  what its last stored collection could not read (empty when it read everything).
 - `POST /api/integrations` with `{provider,name,config,secret_ref}` -> Integration.
-- `POST /api/integrations/{id}/sync` -> `{ok,resource_count,observation_count,partial}`.
+- `POST /api/integrations/{id}/sync` -> `{ok,resource_count,observation_count,partial,gaps}`;
+  `gaps` is how many things that collection could not read.
 - `GET /api/audit` -> `{id,created_at,actor_id,action,target_id,details}`[].
 
 Resource: `{id,name,kind,provider,source_id,site_id,observed_at,evidence_kind,
@@ -125,6 +127,7 @@ network}],notice,nudge}`. Nyctr has no guest-facing route.
 - `POST /api/graph/query` with `{query,variables?}` (admin) -> GraphQL `{data,errors}`.
   Queries only; at most 6000 characters, 10 levels and 20000 returned objects.
 - `GET /api/attention` (admin) -> ranked `{kind,id,severity,title,detail,at}`[]. No model.
+  A source that stored only part of a collection also carries `action`: `edit` or `card`.
 - `GET /api/assistant` -> `{provider:"model"|"sample"|"off",model}`.
 - `POST /api/assistant/ask` with `{question,finding_id?}` ->
   `{answer,references:[{ref,kind,id,label}],provider,model}`. `[[ref]]` tokens in
