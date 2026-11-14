@@ -32,7 +32,8 @@ given run. A source whose scheduled collection fails for a reason that may pass
 (a broken connection, a timeout, a rate limit, a server error at the source) is
 tried again after about 1, 2 and 4 minutes, never at or after the next run, and
 keeps its previous status until the last retry fails. A refused key or a rejected
-setting is shown at once. Each pending retry is a row in the settings table that
+setting is shown at once, and so is a source whose retries end without a
+collection (the schedule switched off, its secret gone); the audit says why. Each pending retry is a row in the settings table that
 one copy claims the same way as a run. A Collect pressed by a person and a
 connection test are not retried. Moving scheduled collection and background
 analysis to a separate worker process is future work.

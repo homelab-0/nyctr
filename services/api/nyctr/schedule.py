@@ -19,7 +19,7 @@ from hashlib import sha256
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -133,22 +133,25 @@ def _stage(db: Session, schedule: dict, integration_id: str, attempt: int, due: 
            now: datetime) -> datetime | None:
     """Record retry `attempt` as due at `due`, or remove it when it would not come before the next run."""
     upcoming = next_run(db, schedule, now)
-    row = db.get(Setting, _retry_key(integration_id))
+    # Statements, not a row read and then changed: a copy claiming the next run may
+    # delete the row in between, and a changed row that is gone fails the write.
+    drop_retry(db, integration_id)
     if due is None or upcoming is None or due >= upcoming:
-        if row is not None:
-            db.delete(row)
         return None
-    value = {"integration_id": integration_id, "attempt": attempt}
-    if row is None:
-        db.add(Setting(key=_retry_key(integration_id), value=value, updated_at=due))
-    else:
-        row.value, row.updated_at = value, due
+    db.execute(insert(Setting).values(key=_retry_key(integration_id), updated_at=due,
+                                      value={"integration_id": integration_id, "attempt": attempt}))
     return due
 
 
 def drop_retry(db: Session, integration_id: str) -> None:
     """Forget a source's pending retry. The caller commits."""
     db.execute(delete(Setting).where(Setting.key == _retry_key(integration_id)))
+
+
+def pending_retries(db: Session) -> list[str]:
+    """Return the sources that have a retry pending, claimed or not."""
+    rows = db.scalars(select(Setting.value).where(Setting.key.startswith(RETRY_PREFIX)))
+    return [value["integration_id"] for value in rows]
 
 
 def claim_retries(db: Session, schedule: dict, now: datetime | None = None) -> list[tuple[str, int]]:

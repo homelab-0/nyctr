@@ -272,7 +272,13 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             integration = db.get(Integration, integration_id)
             integration.last_error = (str(exc) if isinstance(exc, IntegrationError)
                                       else "Collection failed. Check provider reachability and configuration.")
-            retry_at = hold(db, classify(exc, integration.last_error)) if hold else None
+            failure = classify(exc, integration.last_error)
+            try:
+                retry_at = hold(db, failure) if hold else None
+            except Exception:  # noqa: BLE001 - e.g. a copy claimed the next run meanwhile; that run covers it
+                db.rollback()
+                integration = db.get(Integration, integration_id)
+                integration.last_error, retry_at = failure.message, None
             integration.status = previous if retry_at and previous != "syncing" else "error"
             integration.sync_started_at = None
             details = {} if attempt is None else {"attempt": attempt}

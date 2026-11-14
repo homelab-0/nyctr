@@ -183,3 +183,103 @@ def test_a_retry_waits_while_the_source_is_being_collected_and_never_runs_in_dem
         db.commit()
         assert schedule.claim_retries(db, schedule.in_force(db, app.state.settings), start + timedelta(hours=1)) == []
         assert utc(db.get(Setting, schedule.RETRY_PREFIX + "demo").updated_at) == start
+
+
+def stopped(app):
+    """Read why the DNS source's retries stopped, from the audit."""
+    with app.state.session_factory() as db:
+        return [a.details["reason"] for a in db.scalars(
+            select(Audit).where(Audit.action == "integration.retries_stopped", Audit.target_id == "dns"))]
+
+
+def pending(app):
+    """List the sources with a retry pending."""
+    with app.state.session_factory() as db:
+        return schedule.pending_retries(db)
+
+
+def test_switching_the_schedule_off_ends_pending_retries_and_shows_the_source_failed(tmp_path, monkeypatch):
+    """With nothing left to retry the source, it is not left looking healthy; the audit says why."""
+    fail_dns(monkeypatch, [PASSING["server error"]])
+    app, start = live_app(tmp_path), utcnow()
+    with TestClient(app) as client:
+        seed_live_member(app)
+        tick(app, start)
+        assert dns(app)[0] == "connected" and pending(app) == ["dns"]
+        client.put("/api/collection", headers=live_signin(client), json={"enabled": False, "minutes": 15})
+        tick(app, start + timedelta(seconds=30))
+        assert dns(app)[:2] == ("error", "Provider returned HTTP 503.")
+        assert stopped(app) == ["schedule_off"] and pending(app) == []
+        tick(app, start + timedelta(seconds=60))
+        assert stopped(app) == ["schedule_off"]
+
+
+def test_a_retry_whose_secret_is_gone_or_source_is_missing_ends_and_shows_the_source_failed(tmp_path, monkeypatch):
+    """The retry is not left pending, and a source kept at its old status is shown failed with why."""
+    asked = fail_dns(monkeypatch, [PASSING["broken connection"]])
+    app, start = live_app(tmp_path), utcnow()
+    with TestClient(app):
+        seed_live_member(app)
+        tick(app, start)
+        with app.state.session_factory() as db:
+            schedule.plan_retry(db, schedule.in_force(db, app.state.settings), "gone", 0, start)
+            db.commit()
+        monkeypatch.delenv("NYCTR_CONNECTOR_SECRET_DNS")
+        tick(app, start + timedelta(minutes=1))
+        assert len(asked) == 1 and dns(app)[:2] == ("error", "Could not connect.")
+        assert stopped(app) == ["secret"] and pending(app) == []
+
+
+@pytest.mark.parametrize("error, wait", [(PASSING["broken connection"], 60),
+                                         (lambda: IntegrationError("Rate limit.", category="rate_limit",
+                                                                   retry_after=61), 61)])
+def test_the_wait_is_counted_from_when_the_attempt_failed(tmp_path, monkeypatch, error, wait):
+    """A collection that fails 50 seconds into the pass still waits its full minute or the source's own wait."""
+    clock = [utcnow()]
+    start = clock[0]
+
+    async def slow(provider, integration_id, config, api_key):
+        if integration_id == "dns":
+            clock[0] += timedelta(seconds=50)
+            raise error()
+        return Snapshot()
+
+    fail_dns(monkeypatch, [])
+    monkeypatch.setattr("nyctr.integrations.collect", slow)
+    app = live_app(tmp_path)
+    with TestClient(app):
+        seed_live_member(app)
+        asyncio.run(worker.tick(app.state.session_factory, app.state.settings, clock=lambda: clock[0]))
+        with app.state.session_factory() as db:
+            failed = db.scalar(select(Audit).where(Audit.action == "integration.collection_failed"))
+            assert utc(datetime.fromisoformat(failed.details["retry_at"])) == start + timedelta(seconds=50 + wait)
+
+
+def test_a_failed_attempt_whose_retry_cannot_be_staged_releases_the_source(tmp_path, monkeypatch):
+    """If staging the retry fails (a copy claimed the next run meanwhile), the source is not left syncing."""
+    from sqlalchemy.orm.exc import StaleDataError
+
+    def stale(*args, **kwargs):
+        raise StaleDataError("expected to update 1 row(s); 0 were matched")
+
+    fail_dns(monkeypatch, [PASSING["broken connection"]])
+    monkeypatch.setattr(schedule, "plan_retry", stale)
+    app, start = live_app(tmp_path), utcnow()
+    with TestClient(app):
+        seed_live_member(app)
+        tick(app, start)
+        assert dns(app) == ("error", "Could not connect.", [("collection_failed", 0)])
+        with app.state.session_factory() as db:
+            assert db.get(Integration, "dns").sync_started_at is None
+
+
+def test_a_scheduled_run_that_finds_the_secret_gone_ends_the_retries_it_replaced(tmp_path, monkeypatch):
+    """The new run clears the old retries; if it cannot contact the source, the source is shown failed."""
+    fail_dns(monkeypatch, [PASSING["timeout"]])
+    app, start = live_app(tmp_path), utcnow()
+    with TestClient(app):
+        seed_live_member(app)
+        tick(app, start)
+        monkeypatch.delenv("NYCTR_CONNECTOR_SECRET_DNS")
+        assert tick(app, start + timedelta(minutes=15)) is True
+        assert dns(app)[:2] == ("error", "Collection timed out.") and stopped(app) == ["secret"]
