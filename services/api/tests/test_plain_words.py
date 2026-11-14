@@ -3,13 +3,15 @@
 import ast
 import ipaddress
 import re
+import ssl
 from pathlib import Path
 
+import httpx
 import pytest
 from test_collection import live_client
 
 from nyctr import diagnostics, worker
-from nyctr.integrations import IntegrationError, registry, validate_config
+from nyctr.integrations import IntegrationError, core, registry, validate_config
 from nyctr.integrations.core import GAP_CAUSES, describe_gaps
 
 API = Path(__file__).resolve().parents[1] / "nyctr"
@@ -167,7 +169,22 @@ def _answers():
                              for text in _texts(part)]
             elif checks and isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
                 said += _texts(node.value)
-    return said
+    # Picked by what went wrong, so no call names them: no answer in time, a failed connection, a certificate.
+    return said + list(core.TRANSPORT_FAILURES.values())
+
+
+def test_only_a_certificate_failure_points_at_the_certificate():
+    """No answer in time and a connection that failed or dropped have sentences of their own."""
+    slow, dropped = httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("dropped")
+    refused, untrusted = httpx.ConnectError("down"), httpx.ConnectError("tls")
+    untrusted.__cause__ = ssl.SSLCertVerificationError("fabricated")
+    said = {name: core.TRANSPORT_FAILURES[core._transport_category(error)]
+            for name, error in {"slow": slow, "dropped": dropped, "refused": refused, "untrusted": untrusted}.items()}
+    assert said["slow"] == "The source did not answer in time. Check that it is running and can be reached."
+    assert said["dropped"] == said["refused"] == ("The connection to the source failed or was dropped before it "
+                                                  "answered. Check its address and that it can be reached.")
+    assert "certificate" in said["untrusted"] and said["untrusted"].startswith("Could not securely connect")
+    assert not any("certificate" in said[name] or "securely" in said[name] for name in ("slow", "dropped", "refused"))
 
 
 def test_no_sentence_the_server_answers_with_says_provider_or_sync():

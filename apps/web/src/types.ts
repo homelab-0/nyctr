@@ -383,6 +383,8 @@ export interface GuestPortal {
   served_by: string[];
   nyctr_in_guest_path: false;
   wifi: { name: string; enabled: boolean; captive_portal: boolean; network: string | null }[];
+  /** Guest sources whose Wi-Fi names the last collection could not read: nothing is known of those. */
+  unread?: string[];
   notice: string;
   nudge: boolean;
 }

@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import risk
-from .collection import SECRET_REF, parsed_date
+from .collection import SECRET_REF, last_gaps, parsed_date
 from .config import Settings
 from .deps import admin, columns, get_db
 from .integrations import registry
@@ -469,7 +469,12 @@ def portal(db: Session, settings: Settings) -> dict:
                              "captive_portal": bool(row.get("captive_portal")),
                              "network": networks.get(row.get("network_id") or "")})
     served = sorted({registry.name_of(row.provider) for row in _sources(db)})
-    return {"served_by": served, "nyctr_in_guest_path": False, "wifi": wifi, "notice": NOTICE,
+    # A guest source with a site that carries no Wi-Fi names, after a collection that recorded something it
+    # could not read: the names were not read there, which is not the same as no sign-in page being on.
+    bare = {site.integration_id for site in db.scalars(select(Resource).where(Resource.kind == "site"))
+            if "wifi" not in site.attributes}
+    unread = [row.name for row in _sources(db) if row.id in bare and last_gaps(db, row)]
+    return {"served_by": served, "nyctr_in_guest_path": False, "wifi": wifi, "unread": unread, "notice": NOTICE,
             "nudge": bool(settings.nudge_token) and settings.mode == "live"}
 
 

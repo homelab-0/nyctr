@@ -78,6 +78,8 @@ function HowGuestsGetOn({
 }) {
   const [copied, setCopied] = useState(false);
   const gated = portal.wifi.filter((item) => item.captive_portal);
+  // Names a collection could not read say nothing about whether a sign-in page is on there.
+  const unread = someNames(portal.unread || []);
   const net = portal.served_by.join(' and ') || 'Your network system';
   return (
     <Panel title="How guests get on" hint={`${net} shows the sign-in page. Nyctr never does.`}>
@@ -113,7 +115,9 @@ function HowGuestsGetOn({
           <h3>Wi-Fi names reported</h3>
           {portal.wifi.length === 0 ? (
             <p className="aside">
-              Nyctr has none. It reads them when it collects from your network source.
+              {unread
+                ? `Nyctr has none. It could not read them from ${unread} at its last collection.`
+                : 'Nyctr has none. It reads them when it collects from your network source.'}
             </p>
           ) : (
             <ul className="wifi">
@@ -132,8 +136,9 @@ function HowGuestsGetOn({
           )}
           {portal.wifi.length > 0 && gated.length === 0 && (
             <p className="aside">
-              No Wi-Fi name sits behind a sign-in page, so passes and the cut-off have nothing to
-              act on. Turn on the guest sign-in page with passes for your guest Wi-Fi at the source.
+              {unread
+                ? `Nyctr could not read the Wi-Fi names from ${unread} at its last collection, so it cannot tell whether one there sits behind a sign-in page. None of the names it did read does.`
+                : 'No Wi-Fi name sits behind a sign-in page, so passes and the cut-off have nothing to act on. Turn on the guest sign-in page with passes for your guest Wi-Fi at the source.'}
             </p>
           )}
         </div>
@@ -258,10 +263,15 @@ export default function Guests({
             text: 'So it does not know whether anyone is on the guest Wi-Fi.',
           }
         : !wifi.some((item) => item.captive_portal)
-          ? {
-              title: `No Wi-Fi name reported by ${source} uses a sign-in page, and Nyctr has no guest devices from ${source}.`,
-              text: `So Nyctr cannot tell who is a guest here, and passes and the cut-off have nothing to act on. Turning on the guest sign-in page with passes at ${source} gives them something to act on.`,
-            }
+          ? data.portal.unread?.length
+            ? {
+                title: `Nyctr could not read the Wi-Fi names from ${someNames(data.portal.unread)}, and has no guest devices from ${source}.`,
+                text: 'So it cannot tell who is a guest here, or whether a sign-in page is on.',
+              }
+            : {
+                title: `No Wi-Fi name reported by ${source} uses a sign-in page, and Nyctr has no guest devices from ${source}.`,
+                text: `So Nyctr cannot tell who is a guest here, and passes and the cut-off have nothing to act on. Turning on the guest sign-in page with passes at ${source} gives them something to act on.`,
+              }
           : null;
   return (
     <div className="page">

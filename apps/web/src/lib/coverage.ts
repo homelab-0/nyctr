@@ -19,7 +19,8 @@ export function uncollected(sources: Integration[] | null | undefined, capabilit
 /** Why such a source has nothing current to show: not collected yet, or the failure it gave. */
 export const whyEmpty = (source: Integration) =>
   failing(source)
-    ? `${source.name} could not be collected: ${source.last_error || 'its last collection failed'}`
+    ? // The reason is put inside other sentences, so its own full stop is left off.
+      `${source.name} could not be collected: ${(source.last_error || 'its last collection failed').replace(/[.\s]+$/, '')}`
     : `${source.name} has not been collected yet`;
 
 /** How many of the connected sources are waiting and how many are failing, as short sentences. */

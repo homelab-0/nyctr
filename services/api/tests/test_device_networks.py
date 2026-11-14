@@ -199,6 +199,9 @@ def test_a_rate_limit_timeout_or_broken_connection_on_a_detail_read_fails_the_co
     with pytest.raises(IntegrationError) as caught:
         run(monkeypatch, home(), lambda path: fault() if path.startswith(f"{BASE}/{kind}/") else None)
     assert caught.value.category == category
+    # A read that timed out or broke is told as that, never in the words for a wrong certificate.
+    if category != "rate_limit":
+        assert str(caught.value) == core.TRANSPORT_FAILURES[category] and "certificate" not in str(caught.value)
 
 
 def big(networks, devices, clients, guests=0):

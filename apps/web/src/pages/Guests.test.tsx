@@ -329,3 +329,40 @@ describe('choosing a guest on a narrow screen', () => {
     expect(await choose(120)).not.toHaveBeenCalled();
   });
 });
+
+describe('Wi-Fi names a collection could not read', () => {
+  const page = async (unread: string[], devices: boolean) => {
+    const base = overview('enabled');
+    open('enabled', {
+      'GET /guests': {
+        ...base,
+        devices: devices ? base.devices : [],
+        portal: { ...base.portal, wifi: [base.portal.wifi[0]], unread },
+      },
+    });
+    await screen.findByText('Wi-Fi names reported');
+    return document.body.textContent!;
+  };
+
+  it.each([true, false])(
+    'says the names could not be read and tells nobody to turn anything on (guests seen: %s)',
+    async (devices) => {
+      const text = await page(['Office network'], devices);
+      expect(text).toContain(
+        'Nyctr could not read the Wi-Fi names from Office network at its last collection, so it cannot tell whether one there sits behind a sign-in page.',
+      );
+      expect(text).not.toMatch(/Turn on|Turning on|No Wi-Fi name sits behind|uses a sign-in page/);
+      if (!devices)
+        expect(text).toContain(
+          'Nyctr could not read the Wi-Fi names from Office network, and has no guest devices from Office network.',
+        );
+    },
+  );
+
+  it('still says to turn the sign-in page on when every name was read and none has one', async () => {
+    const text = await page([], true);
+    expect(text).toContain('No Wi-Fi name sits behind a sign-in page');
+    expect(text).toContain('Turn on the guest sign-in page');
+    expect(text).not.toContain('could not read the Wi-Fi names');
+  });
+});

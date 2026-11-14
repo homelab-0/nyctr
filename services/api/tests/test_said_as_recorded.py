@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from nyctr import assistant
 from nyctr.analysis import refresh_findings
-from nyctr.models import GuestAction, Lease, utcnow
+from nyctr.models import Audit, GuestAction, Lease, Resource, utcnow
 
 
 def record(app, device, action, execution, actor="rule"):
@@ -120,3 +120,19 @@ def test_a_decision_with_no_note_keeps_the_note_empty(client, admin_headers):
     """No note typed means no note stored: the member is not shown the decision repeated as a note."""
     done = client.post("/api/requests/request-stream/review", headers=admin_headers, json={"decision": "denied"})
     assert done.status_code == 200 and done.json()["status"] == "denied" and done.json()["review_note"] == ""
+
+
+@pytest.mark.parametrize("names_read,gap,unread", [(False, True, ["Northgate UniFi Network"]), (False, False, []),
+                                                   (True, True, [])])
+def test_wifi_names_that_could_not_be_read_are_told_apart_from_no_sign_in_page(client, app, admin_headers,
+                                                                             names_read, gap, unread):
+    """A site with no Wi-Fi names after a collection that recorded a gap: the names were not read there."""
+    with app.state.session_factory() as db:
+        site = db.get(Resource, "site-home")
+        if not names_read:
+            site.attributes = {key: value for key, value in site.attributes.items() if key != "wifi"}
+        if gap:
+            db.add(Audit(action="integration.collected", target_id="demo-unifi", details={"gaps": ["fabricated_gap"]}))
+        db.commit()
+    portal = client.get("/api/guests").json()["portal"]
+    assert portal["unread"] == unread and bool(portal["wifi"]) is names_read

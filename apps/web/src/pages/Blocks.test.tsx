@@ -218,12 +218,14 @@ describe('Blocks', () => {
     mockApi({
       'GET /blocks': blockList([]),
       'GET /integrations': [
-        { ...dns, last_sync: null, status: 'error', last_error: 'Key refused' },
+        { ...dns, last_sync: null, status: 'error', last_error: 'Key refused.' },
       ],
     });
     render(<Blocks />);
     expect(await screen.findByText('Could not be collected')).toBeDefined();
     expect(document.body.textContent).toContain('Home DNS could not be collected: Key refused');
+    // A reason that ends in a full stop is put inside a sentence with one full stop, not two.
+    expect(document.body.textContent).not.toMatch(/Key refused\.[.,]/);
     expect(document.body.textContent).not.toContain('No blocked lookups are stored');
   });
 
