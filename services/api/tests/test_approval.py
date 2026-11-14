@@ -640,7 +640,7 @@ def test_why_an_approval_opened_nothing_is_kept_for_administrators_and_no_member
                 read = [await sam.get(path) for path in ("/api/requests", "/api/leases", "/api/blocks", "/api/me")]
                 read.append(await sam.post("/api/requests", json=ask("one")))  # The same request, asked again.
                 assert read[0].json()[0]["decision_note"] == access.NOT_OPENED
-                assert all("500" not in answer.text and "Provider" not in answer.text for answer in read)
+                assert all(why not in answer.text and "Provider" not in answer.text for answer in read)
                 assert (await sam.post("/api/graph/query", json={"query": "{ leases { id } }"})).status_code == 403
 
         asyncio.run(scenario())
