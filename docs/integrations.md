@@ -177,9 +177,13 @@ above, succeeded against a real console on 2026-11-13: one installation, read
 only. Everything else here, including the pacing, the error answers and the
 sharing between sites, is tested with fabricated answers only.
 
-- A collection whose lists each fit one page makes at most 96 requests and does
-  not wait. One that needs more (a guest pass or Wi-Fi list long enough to page)
-  finishes about a minute later.
+- A collection whose lists each fit one page makes one request, six for each
+  site and one for each guest that is on, up to 40 guests. With up to nine
+  sites that is at most 96 and it never waits. With sixteen sites, the most one
+  source may read, it always needs more. From ten to fifteen it depends on how
+  many guests are on: ten sites wait from 36 guests, fifteen from 6. A list long
+  enough to page (guest passes, Wi-Fi names) also adds requests. A collection
+  that needs more than 96 waits once and finishes about a minute later.
 - Reading is limited to 60 seconds for every source; time spent waiting for a
   turn is not counted in it. A collection waits at most 120 seconds in total,
   which is two full minutes of the limit and happens only when something else
@@ -188,7 +192,11 @@ sharing between sites, is tested with fabricated answers only.
   ends within 180 seconds, a backstop stops it at 210, and its lease on the
   source lasts 300.
 - A connection test waits at most 20 seconds in total for a turn. Past that it
-  reports that the request limit is in use and to try again shortly.
+  reports that the request limit is in use and to try again shortly. A test
+  that sent all 96 requests itself, waited for nothing else, and still needed
+  more says that instead:
+  trying again cannot help, because it would stop at the same place. A
+  collection of the same source may wait longer, as above.
 - While a scheduled collection waits, the console and the API are served as
   usual. The collection pass it belongs to does not move on: the other sources
   in that pass, and a run or retry that comes due meanwhile, wait for it. Any

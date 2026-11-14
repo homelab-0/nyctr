@@ -205,6 +205,24 @@ def test_the_recorder_keeps_why_an_optional_read_was_not_made(status, cause):
     assert evidence.gap_causes == ({"optional_unavailable": cause} if cause else {})
 
 
+def test_a_cause_left_by_one_read_is_not_given_to_a_gap_after_the_next():
+    """Each request starts with no cause, so an error nobody recorded as a gap cannot explain a later one."""
+    async def read():
+        answers = iter([503, 200])
+        transport = httpx.MockTransport(lambda request: httpx.Response(next(answers), json={}))
+        async with httpx.AsyncClient(transport=transport) as client:
+            reader = core.ReadClient(client, "https://source.example")
+            with core.capture_probe() as evidence:
+                with pytest.raises(IntegrationError):
+                    await reader.get("/first")  # let pass, with no gap recorded for it
+                assert evidence.last_fault == "source_error"
+                await reader.get("/second")
+                core.record_gap("detail_limit")
+                return evidence
+    evidence = asyncio.run(read())
+    assert evidence.gaps == {"detail_limit"} and evidence.gap_causes == {}
+
+
 def test_a_rate_limit_still_fails_the_collection():
     """A rate limit on an optional read is not a gap."""
     with pytest.raises(IntegrationError) as raised:

@@ -115,7 +115,7 @@ def run(verify_persistence):
     safe = next(block for block in blocks if block["risk_band"] == "low")
     payload = {
         "block_id": risky["id"],
-        "reason": "Container integration test: request family photo access.",
+        "reason": "Container integration test: request access to a picture gallery.",
         "duration_minutes": 30,
     }
     member.request("/api/requests", payload, expected=403, csrf=False)

@@ -28,6 +28,10 @@ from .schedule import drop_retry
 from .security import audit
 
 SECRET_REF = re.compile(r"NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}")
+# The longest a collection may run before it is stopped as failed. A backstop only: reading ends
+# at 60 seconds and waiting for a turn at a paced source at 120, so it is never reached in order.
+# It must stay above those two together and inside the five-minute lease on the source.
+BACKSTOP_SECONDS = 210
 
 
 def parsed_date(value):
@@ -276,11 +280,11 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 return None, "secret"
         try:
             # The same recorder the connection test opens, so a collection keeps the gaps it hit.
-            # The time limit is a backstop only: reading ends at 60 seconds and waiting for a turn at a
-            # paced source at 120, so 210 is never reached in order and stays inside the five-minute lease.
+            # The time limit is a backstop only; see BACKSTOP_SECONDS.
             with capture_probe() as evidence:
                 snapshot = await asyncio.wait_for(
-                    collect(integration.provider, integration.id, integration.config, api_key), timeout=210)
+                    collect(integration.provider, integration.id, integration.config, api_key),
+                    timeout=BACKSTOP_SECONDS)
             # Lock the source row before any other row, and store only while this lease is still ours.
             # A lease older than five minutes can be taken over, and an edit can then move the source;
             # either clears or replaces the stamp, so a read that outlived its lease stores nothing.

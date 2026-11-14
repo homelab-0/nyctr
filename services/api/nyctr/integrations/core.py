@@ -40,17 +40,20 @@ class IntegrationError(Exception):
     """A safe error with a fixed diagnostic category and no provider response content."""
 
     def __init__(self, message: str, *, category: str = "provider_contract", transient: bool = False,
-                 retry_after: int | None = None):
+                 retry_after: int | None = None, limit_spent_here: bool = False):
         """Retain a sanitized collector message and classify failure without parsing its text.
 
         `transient` marks a server error or a request timeout (408) at the source, which may pass by waiting; its
         category is unchanged, so optional reads and diagnostics treat it as before.
         `retry_after` is the wait in seconds a rate-limited source asked for, if it said.
+        `limit_spent_here` marks a rate limit the work in hand used up by itself, so that starting it
+        again alone would stop at the same place.
         """
         super().__init__(message)
         self.category = category
         self.transient = transient
         self.retry_after = retry_after
+        self.limit_spent_here = limit_spent_here
 
 
 @dataclass
@@ -382,6 +385,13 @@ class _Patience:
     """How long the work in this context may still wait for a turn, and who to tell when it waits."""
     left: float
     waited: Callable[[float], None] | None = None
+    # The places this work has claimed, to tell a limit it used up itself from one others are using.
+    turns: list[list[float]] = field(default_factory=list)
+    # How long it could wait when it started, before any wait was spent.
+    whole: float = field(init=False)
+
+    def __post_init__(self):
+        self.whole = self.left
 
 
 # When each paced request was answered, by pace key. A request still in flight holds infinity.
@@ -418,17 +428,24 @@ async def _take_turn(pace: Pace) -> list[float]:
     while True:
         now = monotonic()
         turns[:] = [turn for turn in turns if now - turn[0] < pace.seconds]
+        allowed = _patience.get() or _Patience(LONGEST_WAIT)
         if len(turns) < pace.requests:
             turn = [math.inf]
             turns.append(turn)
+            allowed.turns.append(turn)
             return turn
         # Only a limit smaller than the requests in flight leaves nothing answered to wait for.
         # The floor keeps a wait that rounding made too short from being repeated without end.
         wait = max(min(min(turn[0] for turn in turns) + pace.seconds - now, pace.seconds), 0.001)
-        allowed = _patience.get() or _Patience(LONGEST_WAIT)
         if wait > allowed.left:
+            # Spent here only if every place is this work's own and the wait is longer than all it
+            # could ever have waited. If it only ran short because it waited for others first, the
+            # same work started alone would get through, so that is not said to be its own doing.
+            mine = {id(turn) for turn in allowed.turns}
             raise IntegrationError("The source's request limit is in use. Try again shortly.",
-                                   category="rate_limit", retry_after=math.ceil(wait))
+                                   category="rate_limit", retry_after=math.ceil(wait),
+                                   limit_spent_here=wait > allowed.whole
+                                   and all(id(turn) in mine for turn in turns))
         allowed.left -= wait
         if allowed.waited:
             allowed.waited(wait)

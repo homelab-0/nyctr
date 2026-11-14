@@ -109,7 +109,7 @@ def test_expired_observations_are_removed(client, app, admin_headers):
 
 def test_request_checks_csrf_ownership_freshness_and_duration(client, member_headers):
     """Request creation must enforce CSRF, event visibility, freshness, and duration limits."""
-    body = {"block_id": "block-gallery", "reason": "Need to open a family gallery", "duration_minutes": 60}
+    body = {"block_id": "block-gallery", "reason": "Need to open a picture gallery", "duration_minutes": 60}
     assert client.post("/api/requests", json=body).status_code == 403
     for block_id in ["block-washer", "block-admin", "block-unattributed", "block-old-owner"]:
         assert client.post("/api/requests", headers=member_headers, json={**body, "block_id": block_id}).status_code == 404
@@ -119,7 +119,7 @@ def test_request_checks_csrf_ownership_freshness_and_duration(client, member_hea
 
 def test_request_idempotence_and_review_never_grant_access(client, app, member_headers):
     """Duplicate submissions share one request and a `reviewed` decision never becomes a grant."""
-    body = {"block_id": "block-tablet", "reason": "Need to open a family gallery", "duration_minutes": 60}
+    body = {"block_id": "block-tablet", "reason": "Need to open a picture gallery", "duration_minutes": 60}
     first = client.post("/api/requests", headers=member_headers, json=body)
     assert first.status_code == 201
     request_id = first.json()["id"]

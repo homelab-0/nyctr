@@ -536,7 +536,7 @@ def create_app(settings: Settings | None = None):
 
     @app.post("/api/integrations/{integration_id}/sync")
     async def sync_integration(integration_id: str, user=Depends(admin), db: Session = Depends(get_db)):
-        """Collect a live connector under a database lease and a 90-second deadline.
+        """Collect a live connector under a database lease and a 210-second backstop.
 
         Requires administrator CSRF authorization and a configured server secret.
         Success atomically stores the snapshot and audit event. Failure rolls back

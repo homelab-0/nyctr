@@ -497,14 +497,23 @@ const SOURCES = new Map<string, SourceKind>([
 export function registerSources(
   kinds: { id: string; name: string; letter: string; tone: string; logo?: string }[],
 ) {
-  for (const kind of kinds)
-    SOURCES.set(kind.id, {
+  for (const kind of kinds) {
+    const next = {
       letter: kind.letter.slice(0, 1) || '?',
       tone: `t-${TONES.has(kind.tone) ? kind.tone : 'grey'}`,
       name: kind.name,
       logo: kind.logo && LOGO.test(kind.logo) ? kind.logo : undefined,
-    });
+    };
+    if (JSON.stringify(SOURCES.get(kind.id)) !== JSON.stringify(next)) learned += 1;
+    SOURCES.set(kind.id, next);
+  }
 }
+let learned = 0;
+/**
+ * Goes up whenever a kind of source is learned or changes. A part that is drawn once and kept
+ * takes it as a property, so it is drawn again when a name, colour or logo arrives later.
+ */
+export const sourcesLearned = () => learned;
 /** Describes a kind of source for chips, colours and plain names; unknown kinds stay readable. */
 export const sourceOf = (provider: string): SourceKind =>
   SOURCES.get(provider) || {
