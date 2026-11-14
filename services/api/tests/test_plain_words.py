@@ -91,11 +91,35 @@ def test_a_gap_text_never_states_a_cause_the_sentence_beside_it_may_contradict()
                 assert describe_gaps(provider.gap_notes, {code: [cause]})[0][2] == f"{text} {sentence}"
 
 
+HOUSEHOLD = re.compile(
+    r"\b(home|house(hold)?|famil(y|ies)|kids?|child(ren)?|parents?|mum|dad|movie|laundry|kitchen|bedroom|basement"
+    r"|upstairs|downstairs|garage|garden|weekend|part(y|ies)|front door|recipes?|photos?|media)\b|milkyway", re.I)
+# The DNS product's own name for one of its categories, kept as the product writes it.
+PRODUCT_WORDS = ("Parental Control: streaming",)
+SHOWN = ("/api/integrations", "/api/resources", "/api/blocks", "/api/requests", "/api/leases", "/api/suggestions",
+         "/api/guests", "/api/findings", "/api/users", "/api/devices", "/api/attention", "/api/overview")
+
+
+def _words(value, key=""):
+    """Every text a page could show from a response: values only, and never an id or a reference to one."""
+    if isinstance(value, dict):
+        for name, item in value.items():
+            yield from _words(item, name)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _words(item, key)
+    elif isinstance(value, str) and not re.search(r"(^|_)ids?$|^(uplink|source|target|email|href|link)$", key):
+        yield value
+
+
 def test_the_demo_names_no_real_installation_and_uses_no_home_wording(client, admin_headers):
-    """Demo sources, sites and Wi-Fi names are fabricated and business-neutral."""
+    """Nothing the demo shows reads as a household: names, reasons, passes, findings and what needs attention."""
     names = {row["name"] for row in client.get("/api/integrations").json()}
     assert {"Northgate UniFi Network", "Office DNS on NextDNS"} <= names
-    resources = client.get("/api/resources").json()
-    site = next(row for row in resources if row["kind"] == "site")
-    shown = [*names, *(row["name"] for row in resources), str(site["attributes"])]
-    assert not [text for text in shown if re.search(r"\bhome\b|milkyway", text, re.I)]
+    shown = [text for path in SHOWN for text in _words(client.get(path).json())]
+    assert len(shown) > 400
+    for word in PRODUCT_WORDS:
+        shown = [text.replace(word, "") for text in shown]
+    assert sorted({text for text in shown if HOUSEHOLD.search(text)}) == []
+    surnames = [row["name"].split()[-1] for row in client.get("/api/users").json()]
+    assert len(set(surnames)) == len(surnames), "people who share a surname read as one family"

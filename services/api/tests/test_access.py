@@ -175,13 +175,13 @@ def test_suggestions_come_from_rule_openings_and_need_an_administrator(client, a
     """Repeated automatic openings are suggested; nothing becomes permanent until an administrator says so."""
     items = client.get("/api/suggestions").json()
     news = next(x for x in items if x["domain"] == "img.newsletter-cdn.example")
-    assert news["times"] == 2 and news["people"] == ["Jamie Morgan"]
+    assert news["times"] == 2 and news["people"] == ["Jamie Rivera"]
     made = client.post("/api/suggestions", headers=admin_headers,
                        json={"domain": news["domain"], "action": "make_permanent"}).json()
     assert made["kind"] == "permanent" and made["expires_at"] is None and made["decided_by"] == "user-admin"
     assert news["domain"] not in {x["domain"] for x in client.get("/api/suggestions").json()}
     assert client.post("/api/suggestions", headers=admin_headers,
-                       json={"domain": "assets.recipe-site.example", "action": "dismiss"}).json() == {"ok": True}
+                       json={"domain": "assets.supplier-catalogue.example", "action": "dismiss"}).json() == {"ok": True}
     assert client.get("/api/suggestions").json() == []
     assert client.post("/api/suggestions", headers=admin_headers,
                        json={"domain": "never-seen.example", "action": "dismiss"}).status_code == 404
