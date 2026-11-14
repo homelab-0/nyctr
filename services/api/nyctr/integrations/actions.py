@@ -79,7 +79,7 @@ def _domain(value: str) -> str:
 def _path_id(value: str) -> str:
     """Validate an identifier before it becomes a URL path segment."""
     if not isinstance(value, str) or not _ID.fullmatch(value):
-        raise IntegrationError("Invalid provider identifier.")
+        raise IntegrationError("Invalid identifier for the source.")
     return value
 
 

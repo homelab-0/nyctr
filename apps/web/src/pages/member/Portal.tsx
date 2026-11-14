@@ -129,6 +129,11 @@ function notKnown(data: Data): { title: string; text: string } | null {
       title: 'Blocked sites could not be collected',
       text: `Nyctr tried to read what was blocked and could not, so it does not know whether a site was blocked for you. ${ASK} to look into it.`,
     };
+  if (cover?.collected === 'none')
+    return {
+      title: 'Blocked sites are not collected on this network',
+      text: `Nothing connected to Nyctr reports blocked sites, so it cannot show any. ${ASK} if a page will not load.`,
+    };
   if (cover && cover.collected !== 'yes')
     return {
       title: 'Blocked sites have not been collected yet',
@@ -196,20 +201,25 @@ function Home({ data }: { data: Data }) {
   const noDevices = data.devices.data?.length === 0;
   // Some stored lookups are tied to nobody's device, so a block of theirs may be among those and
   // missing here. That is said whether or not this person's list is empty.
-  const partly = data.coverage.data?.unassigned
-    ? `Some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
-    : '';
+  // When this device is not recognised either, the sentence at the top says both, once.
+  const said = !here?.name && !gap && !!data.coverage.data?.unassigned;
+  const partly =
+    data.coverage.data?.unassigned && !said
+      ? `Some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
+      : '';
   // Under a list, a failing or unfinished collection means a newer block may be missing. One
   // sentence carries that and the lookups tied to no device, so two notes never stack.
   const cover = data.coverage.data;
   const unread =
     cover?.collected === 'failed'
       ? 'Nyctr could not read what was blocked just now'
-      : cover && cover.collected !== 'yes'
-        ? 'Nyctr has not finished reading what was blocked'
-        : '';
+      : cover?.collected === 'none'
+        ? 'Nyctr is not collecting what is blocked on this network'
+        : cover && cover.collected !== 'yes'
+          ? 'Nyctr has not finished reading what was blocked'
+          : '';
   const missing = unread
-    ? cover?.unassigned
+    ? cover?.unassigned && !said
       ? `${unread}, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
       : `${unread}, so a newer block may be missing here. ${ASK} if a page will not load.`
     : gap
@@ -260,7 +270,10 @@ function Home({ data }: { data: Data }) {
           </p>
         ) : (
           <p className="lede">
-            Nyctr could not tell which of your devices this is, so it is showing all of them.
+            {/* One sentence when lookups tied to no device are also missing, so two notes never stack. */}
+            {cover?.unassigned && !gap
+              ? `Nyctr could not tell which of your devices this is, so it is showing all of them, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
+              : 'Nyctr could not tell which of your devices this is, so it is showing all of them.'}
           </p>
         )}
       </header>
@@ -330,9 +343,10 @@ function Home({ data }: { data: Data }) {
       )}
       {blocks.length === 0 && found === null && !noDevices && (
         <Empty
+          // The heading hedges whenever lookups tied to no device exist, wherever the caveat is said.
           title={
             gap?.title ||
-            (partly
+            (cover?.unassigned
               ? 'Nyctr has not seen anything blocked on your devices in the last day'
               : 'Nothing has been blocked on your devices in the last day')
           }

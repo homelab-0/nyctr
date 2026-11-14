@@ -11,9 +11,11 @@ import type {
   IntegrationDiagnosticsReport,
   Mode,
   Role,
+  Rules,
   User,
 } from '../types';
 import Integrations from './Integrations';
+import { writeLine } from '../App';
 
 const originalShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal');
 const originalClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close');
@@ -233,7 +235,7 @@ const partialReport: IntegrationDiagnosticsReport = {
 };
 
 /** Models the app's session boundary so a real API 401 removes the integration view. */
-function SessionGate() {
+function SessionGate({ sources }: { sources?: Rules['sources'] }) {
   const { user, loading, error } = useAuth();
   if (loading) return <p>Loading session</p>;
   if (!user)
@@ -243,7 +245,7 @@ function SessionGate() {
         {error && <p role="alert">{error}</p>}
       </>
     );
-  return <Integrations />;
+  return <Integrations sources={sources} />;
 }
 
 /** Creates synthetic transport responses while preserving production API and auth behavior. */
@@ -279,6 +281,7 @@ async function openIntegrations({
   removal = async (method: string) => jsonResponse(method === 'GET' ? plan : {}),
   catalogue = async () => jsonResponse(catalog),
   collect,
+  sources,
 }: {
   mode?: Mode;
   role?: Role;
@@ -291,6 +294,7 @@ async function openIntegrations({
   removal?: (method: string) => Promise<Response>;
   catalogue?: () => Promise<Response>;
   collect?: () => Promise<Response>;
+  sources?: Rules['sources'];
 } = {}) {
   const user: User = {
     id: 'test-user',
@@ -321,7 +325,7 @@ async function openIntegrations({
   vi.stubGlobal('fetch', fetchMock);
   render(
     <AuthProvider>
-      <SessionGate />
+      <SessionGate sources={sources} />
     </AuthProvider>,
   );
   await screen.findByRole('heading', { name: connection.name });
@@ -789,6 +793,56 @@ describe('a source that could not read everything', () => {
     const whole = screen.getByRole('heading', { name: 'Whole' }).closest('section')!;
     expect(within(whole).getByText('Connected')).toBeDefined();
     expect(within(whole).queryByText(/could not read everything/)).toBeNull();
+  });
+
+  it('says in the headline what the footer says of a source that was never read', async () => {
+    const rule = (name: string, write_mode: string, collected: boolean, id = name) =>
+      ({ id, name, write_mode, collected }) as unknown as Rules['sources'][number];
+    const cases: [Rules['sources'], string, string][] = [
+      [
+        [rule('Read gateway', 'enabled', true), rule('Never read gateway', 'enabled', false)],
+        'Nyctr may change Read gateway',
+        'May change Read gateway',
+      ],
+      [
+        [rule(connection.name, 'enabled', false, connection.id)],
+        'Nyctr may change sources once they are collected',
+        'May change sources once they are collected',
+      ],
+      [
+        [rule('Read gateway', 'disabled', true)],
+        'Read-only for every source',
+        'Read-only for every source',
+      ],
+    ];
+    for (const [sources, headline, footer] of cases) {
+      await openIntegrations({ sources });
+      expect(document.querySelector('.collection-banner strong')!.textContent).toBe(headline);
+      expect(writeLine({ sources } as Rules, false)).toBe(footer);
+      cleanup();
+    }
+    // The card of a source never read does not say it may be changed now.
+    await openIntegrations({ sources: cases[1][0] });
+    const card = screen.getByRole('heading', { name: connection.name }).closest('section')!;
+    expect(within(card).getByText('Nyctr may change it once it is collected')).toBeDefined();
+  });
+
+  it('says the last collection failed and why, and dates the gaps to the one that worked', async () => {
+    const failed = { ...gappy, last_error: 'The source returned HTTP 500.' };
+    await openIntegrations({ source: failed });
+    const card = screen.getByRole('heading', { name: failed.name }).closest('section')!;
+    const failure = within(card).getByText('The last collection failed.');
+    expect(failure.parentElement!.textContent).toBe(
+      'The last collection failed. The source returned HTTP 500.',
+    );
+    expect(within(card).queryByText('The last collection could not read everything')).toBeNull();
+    const earlier = within(card).getByText(
+      /^The last collection that worked, .+ ago, could not read everything$/,
+    );
+    // The failure is said first, the earlier gaps after it.
+    expect(
+      failure.compareDocumentPosition(earlier) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   /** Resolves once the catalogue has arrived: only then can a link have opened anything. */

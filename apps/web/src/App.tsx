@@ -39,6 +39,7 @@ import Setup from './pages/Setup';
 import SignIn from './pages/SignIn';
 import Portal from './pages/member/Portal';
 import { isAssistantKey, rememberShortcut, shortcutEnabled } from './lib/shortcut';
+import { mayChange } from './lib/format';
 
 interface NavItem {
   id: string;
@@ -67,11 +68,12 @@ export function useRoute() {
 }
 
 /** States in one line what Nyctr is allowed to change, from the server's own settings. */
-function writeLine(rules: Rules | null, demo: boolean) {
+export function writeLine(rules: Rules | null, demo: boolean) {
   if (demo) return 'Demo: every change is simulated';
   if (!rules) return 'Checking what Nyctr may change';
-  const allowed = rules.sources.filter((s) => s.write_mode === 'enabled').map((s) => s.name);
-  return allowed.length ? `May change ${allowed.join(' and ')}` : 'Read-only for every source';
+  // The same words as the headline on Sources, so the two cannot disagree.
+  const allowed = mayChange(rules.sources);
+  return allowed ? `May change ${allowed}` : 'Read-only for every source';
 }
 
 /**
@@ -217,7 +219,7 @@ function Console({ page, params }: { page: string; params: URLSearchParams }) {
           ))}
         </nav>
         <div className="side-foot">
-          <a className="writes" href="#/sources" title="What Nyctr may change">
+          <a className="writes" href="#/sources" title="What Nyctr may change: see Sources for all">
             <LockKeyhole size={13} />
             <span>{writeLine(rules.data, demo)}</span>
           </a>
@@ -306,7 +308,7 @@ function Screen({
     case 'briefing':
       return <Briefing attention={attention} loading={loading} />;
     case 'map':
-      return <MapPage params={params} />;
+      return <MapPage params={params} sources={sources} />;
     case 'inventory':
       return <Inventory params={params} />;
     case 'findings':

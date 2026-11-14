@@ -182,7 +182,7 @@ def test_refused_credential_after_rows_were_read_fails_and_stores_none_of_them(t
         assert source["last_sync"] is None
         assert client.get("/api/blocks").json()["rows"] == []
         assert client.get("/api/resources").json() == []
-        assert collection_audits(client, id_) == [("integration.collection_failed", {"name": "DNS"})]
+        assert collection_audits(client, id_) == [("integration.collection_failed", {"name": "DNS", "why": source["last_error"]})]
         with client.app.state.session_factory() as db:
             added = db.scalar(select(Audit).where(Audit.action == "integration.created", Audit.target_id == id_))
             assert added.details == {"provider": "nextdns", "name": "DNS"}

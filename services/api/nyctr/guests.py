@@ -459,7 +459,8 @@ def overview(db: Session, settings: Settings) -> dict:
     passes = list(db.scalars(select(GuestPass).order_by(GuestPass.created_at.desc()).limit(200)))
     sources = [{"id": i.id, "name": i.name, "provider_name": registry.name_of(i.provider),
                 "passes": _mode(settings, i.provider, "guest.passes"),
-                "control": _mode(settings, i.provider, "guest.control")} for i in _sources(db)]
+                "control": _mode(settings, i.provider, "guest.control"),
+                "collected": i.last_sync is not None} for i in _sources(db)]
     modes = {source["control"] for source in sources}
     return {
         # One answer for the page: how a cut-off or admit would be carried out right now.

@@ -295,6 +295,61 @@ def test_a_preexisting_entry_is_never_removed(tmp_path, monkeypatch):
         assert allowlist == ["click.proofing-studio.example"] and all(method == "GET" for method, _ in calls)
 
 
+@pytest.mark.parametrize("before, said", [("ours", "removed"), ("gone", "already_gone"), ("theirs", "not_owned")])
+def test_an_ending_records_what_it_did_at_the_source(tmp_path, monkeypatch, before, said):
+    """Removed, nothing left to remove, or never Nyctr's: the record and the administrator's list say which."""
+    allowlist: list[str] = []
+    nextdns_mock(monkeypatch, allowlist)
+    app = live_app(tmp_path, provider_writes="nextdns")
+    with TestClient(app) as client:
+        seed_live_member(app)
+        if before == "theirs":  # Already allowed at the source: the address is the one the fixture's block names.
+            with app.state.session_factory() as db:
+                allowlist.append(db.get(Observation, "dns:block:one").domain)
+        row, admin_headers = open_live(client, app)
+        assert allowlist == [row["domain"]]
+        lease = client.get("/api/leases").json()[0]
+        assert lease["removal"] is None
+        if before == "gone":
+            allowlist.clear()  # Someone took it out at the source meanwhile.
+        assert client.post(f"/api/leases/{lease['id']}/end", headers=admin_headers).status_code == 200
+        assert client.get("/api/leases").json()[0]["removal"] == said
+        with app.state.session_factory() as db:
+            closed = db.scalar(select(Audit).where(Audit.action == "access.closed"))
+            assert closed.details["removal"] == said and closed.details["execution"] == "applied"
+        # The member whose exception it was is told nothing about the source.
+        live_signin(client, LIVE_MEMBER)
+        assert [row["status"] for row in client.get("/api/leases").json()] == ["ended"]
+        assert "removal" not in client.get("/api/leases").json()[0]
+
+
+def test_an_ending_leaves_the_entry_another_open_exception_still_needs_and_says_so(tmp_path, monkeypatch):
+    """Two exceptions share one entry: the first ending sends nothing and records why, the last one removes it."""
+    allowlist: list[str] = []
+    calls = nextdns_mock(monkeypatch, allowlist)
+    app = live_app(tmp_path, provider_writes="nextdns")
+    with TestClient(app) as client:
+        seed_live_member(app)
+        row, admin_headers = open_live(client, app)
+        first = client.get("/api/leases").json()[0]["id"]
+        with app.state.session_factory() as db:
+            other = Lease(integration_id="dns", domain=row["domain"], execution="applied", owned=True,
+                          expires_at=utcnow() + timedelta(hours=1))
+            db.add(other)
+            db.commit()
+            second = other.id
+
+        def said():
+            return {lease["id"]: lease["removal"] for lease in client.get("/api/leases").json()}
+
+        sent = len(calls)
+        assert client.post(f"/api/leases/{first}/end", headers=admin_headers).status_code == 200
+        assert said() == {first: "kept_for_another", second: None}
+        assert allowlist == [row["domain"]] and len(calls) == sent
+        assert client.post(f"/api/leases/{second}/end", headers=admin_headers).status_code == 200
+        assert said() == {first: "kept_for_another", second: "removed"} and allowlist == []
+
+
 def test_a_failed_close_stays_open_visible_and_retried(tmp_path, monkeypatch):
     """When the provider refuses the removal the lease stays active with an error, never silently ended."""
     allowlist: list[str] = []

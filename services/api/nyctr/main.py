@@ -304,7 +304,8 @@ def create_app(settings: Settings | None = None):
                              for v in [e["source"], e["target"]]}
             nodes = [n for n in nodes if n.id in included]
             edges = [e for e in edges if e["source"] in included and e["target"] in included]
-        return {"nodes": [resource_json(n) for n in nodes], "edges": edges}
+        # Which source each item came from, so two with one name can be told apart on the Map.
+        return {"nodes": [{**resource_json(n), "integration_id": n.integration_id} for n in nodes], "edges": edges}
 
     @app.get("/api/findings")
     def findings(_user=Depends(admin), db: Session = Depends(get_db)):

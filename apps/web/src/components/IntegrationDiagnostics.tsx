@@ -197,7 +197,9 @@ export function IntegrationDiagnostics({
         {pending && (
           <div className="diagnostics-progress">
             <Loading text="Checking connection…" />
-            <p>Verifying configuration, credentials, transport, and supported provider reads.</p>
+            <p>
+              Verifying configuration, credentials, transport, and supported reads of the source.
+            </p>
           </div>
         )}
 

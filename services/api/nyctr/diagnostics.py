@@ -85,48 +85,48 @@ class DiagnosticReport(BaseModel):
 _CHECK_LABELS = {
     "configuration": "Saved configuration",
     "secret": "Server credential",
-    "connectivity": "Provider connectivity",
+    "connectivity": "Connection to the source",
     "tls": "HTTPS certificate validation",
-    "authentication": "Provider authentication and read access",
+    "authentication": "Sign-in to the source and read access",
     "provider_contract": "Supported response contract",
 }
 
 _FAILURES = {
     "configuration": (
         "The saved configuration does not meet the supported connector requirements.",
-        "Check the provider, identifier, HTTPS integration path, and server hostname allowlist.",
+        "Check the kind of source, identifier, HTTPS integration path, and server hostname allowlist.",
     ),
     "secret": (
         "A valid server-side credential reference and value are not available.",
         "Configure the referenced NYCTR_CONNECTOR_SECRET_ variable in the deployment secret store.",
     ),
     "transport": (
-        "The provider exchange could not be completed securely.",
-        "Check the provider address, network reachability, and certificate trust. No individual cause was established.",
+        "The exchange with the source could not be completed securely.",
+        "Check the source's address, network reachability, and certificate trust. No individual cause was established.",
     ),
     "tls": (
         "Certificate validation or the configured connector trust bundle failed.",
         "Use a certificate valid for the configured hostname and a trusted CA bundle. Keep TLS verification enabled.",
     ),
     "authentication": (
-        "The provider rejected the credential or its permissions for a requested read.",
-        "Check the API key, the selected site or profile, and the provider's read permissions.",
+        "The source rejected the credential or its permissions for a requested read.",
+        "Check the API key, the selected site or profile, and the source's read permissions.",
     ),
     "provider_contract": (
-        "The provider response could not be normalized within the adapter's supported contract and limits.",
-        "Check the supported provider API version and scope. Missing, malformed, redirected, or oversized data is not accepted.",
+        "The source's answer could not be normalized within the adapter's supported contract and limits.",
+        "Check the source's supported API version and scope. Missing, malformed, redirected, or oversized data is not accepted.",
     ),
     "rate_limit": (
         "The source's request limit was reached or is in use, so a requested read was not made.",
         "Try again shortly. If it keeps happening, narrow what this source reads or collect from it less often.",
     ),
     "timeout": (
-        "The bounded provider check reached its deadline before completion.",
-        "Check provider availability and narrow the site scope or DNS log lookback before retrying.",
+        "The bounded check of the source reached its deadline before completion.",
+        "Check that the source is available and narrow the site scope or DNS log lookback before retrying.",
     ),
     "internal": (
         "The diagnostic could not complete because of an unexpected internal failure.",
-        "Retry once, then report the failed stage and application version without credentials or provider payloads.",
+        "Retry once, then report the failed stage and application version without credentials or the source's answers.",
     ),
 }
 
@@ -166,7 +166,7 @@ def _capabilities(provider: str, evidence: ProbeEvidence) -> list[DiagnosticCapa
         summary = "Implemented by the adapter; not verified by this diagnostic."
         if capability in evidence.unavailable_capabilities:
             verification = "unavailable"
-            summary = "The provider explicitly reports that DNS logging is disabled for this profile."
+            summary = "The source explicitly reports that DNS logging is disabled for this profile."
         elif capability in evidence.verified_capabilities:
             verification = "verified"
             summary = "The corresponding source data passed the implemented parser within the checked scope."
@@ -230,7 +230,7 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
         api_key = os.environ.get(secret_ref)
     if api_key and api_key.strip() and not any(c in api_key for c in "\r\n"):
         _set_check(checks, "secret", "passed", "secret",
-                   "A server-side credential value is available. Provider acceptance is checked separately.")
+                   "A server-side credential value is available. Whether the source accepts it is checked separately.")
     else:
         api_key = None
         _failed_check(checks, "secret", "secret")
@@ -256,7 +256,7 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
                 error_category = "internal"
     if evidence.responses_received:
         _set_check(checks, "connectivity", "passed", "transport",
-                   "At least one provider response was received. DNS resolution and routing were not tested separately.")
+                   "At least one answer from the source was received. DNS resolution and routing were not tested separately.")
         _set_check(checks, "tls", "passed", "tls",
                    "An HTTPS response was received through the certificate-verifying connector client.")
     if evidence.verified_capabilities:
@@ -277,7 +277,7 @@ async def diagnose_integration(provider: str, integration_id: str, config: dict,
     implemented = [item for item in capabilities if item.implementation == "implemented"]
     if not evidence.verified_capabilities:
         outcome = "failed"
-        summary = "No supported provider read was verified. Review the checks before collecting data."
+        summary = "No supported read of the source was verified. Review the checks before collecting data."
     elif error_category or evidence.gaps or any(item.verification != "verified" for item in implemented):
         outcome = "partial"
         summary = "Some supported reads were verified, but source coverage is incomplete or a later check failed."

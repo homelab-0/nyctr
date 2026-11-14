@@ -5,9 +5,19 @@ from conftest import signin
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from nyctr import analysis
 from nyctr.config import Settings
 from nyctr.main import create_app
-from nyctr.models import AccessRequest, DeviceGrant, Lease, LoginSession, Observation, Resource, utcnow
+from nyctr.models import (
+    AccessRequest,
+    DeviceGrant,
+    Integration,
+    Lease,
+    LoginSession,
+    Observation,
+    Resource,
+    utcnow,
+)
 from nyctr.security import COOKIE_NAME
 
 
@@ -105,6 +115,37 @@ def test_expired_observations_are_removed(client, app, admin_headers):
     client.get("/api/blocks")
     with app.state.session_factory() as db:
         assert db.get(Observation, "block-expired") is None
+
+
+def test_the_map_says_where_each_item_came_from_and_source_lists_say_what_was_read(client, admin_headers):
+    """An administrator's Map can tell two same-named things apart, and a source never read is not named as read."""
+    nodes = client.get("/api/graph").json()["nodes"]
+    assert nodes and all(node["integration_id"] for node in nodes)
+    assert {source["collected"] for source in client.get("/api/rules").json()["sources"]} == {True}
+    assert {source["collected"] for source in client.get("/api/guests").json()["sources"]} == {True}
+
+
+def test_a_stuck_ending_gives_its_reason_as_nyctrs_own_words(client, app, admin_headers):
+    """The reason may be one Nyctr wrote before it asked the source anything, so it is never put in the source's mouth."""
+    why = "The source's secret is not configured on the server."
+    with app.state.session_factory() as db:
+        db.add(Lease(integration_id=db.scalar(select(Integration.id)), domain="stuck.example", execution="applied",
+                     owned=True, expires_at=utcnow() - timedelta(minutes=5), last_error=why))
+        db.flush()
+        found = [row for row in analysis._stuck_leases(db) if row["title"].startswith("stuck.example")]
+        assert [row["evidence"] for row in found] == [[f"Why it could not be removed: {why}"]]
+
+
+def test_a_source_never_collected_is_not_listed_as_read(client, app, admin_headers):
+    """Both lists an administrator's pages name sources from say which one has been read, source by source."""
+    with app.state.session_factory() as db:
+        unread = client.get("/api/guests").json()["sources"][0]["id"]
+        db.get(Integration, unread).last_sync = None
+        db.commit()
+    for path in ("/api/rules", "/api/guests"):
+        read = {source["id"]: source["collected"] for source in client.get(path).json()["sources"]}
+        assert read[unread] is False and all(done for key, done in read.items() if key != unread), path
+    assert len(client.get("/api/rules").json()["sources"]) > 1
 
 
 def test_request_checks_csrf_ownership_freshness_and_duration(client, member_headers):

@@ -242,7 +242,7 @@ remembers each change until it restarts, and reports it on the next read.
 has no member account. So with changes allowed, `--scenarios` also asks, as the
 administrator, for `lookup-00.example.test` to be opened for 15 minutes, and
 prints `PASS request`. In the console: Requests shows it waiting; Approve opens
-it; Open now lists the name with the time left and "Changed at the provider and
+it; Open now lists the name with the time left and "Changed at the source and
 checked."; End now ends it. The name is on the DNS profile's allowed list while
 the exception is open and leaves it when it is ended or runs out. One project
 has one request: once it is decided, `--scenarios` prints that it found it so.

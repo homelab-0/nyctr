@@ -32,6 +32,8 @@ export interface Resource {
   classification: string;
   owner_id: string | null;
   attributes: Record<string, unknown>;
+  /** The source it was collected from. Only the Map's answer carries it. */
+  integration_id?: string;
 }
 export interface Relationship {
   id: string;
@@ -255,6 +257,8 @@ export interface Lease {
   last_error: string | null;
   /** Its source was removed, so Nyctr cannot reach the entry; an administrator removes it by hand. */
   source_removed?: boolean;
+  /** What ending it did at the source, as a code in `REMOVAL`. Administrators only. */
+  removal?: string | null;
 }
 export interface Suggestion {
   domain: string;
@@ -291,6 +295,8 @@ export interface Rules {
     provider_name: string;
     changes: string[];
     write_mode: FeatureMode;
+    /** False until a collection from it has stored something. */
+    collected?: boolean;
   }[];
 }
 /** What any signed-in person may know about the schedule: on or off, how often, and when next. */
@@ -378,6 +384,7 @@ export interface GuestOverview {
     provider_name: string;
     passes: WriteMode;
     control: WriteMode;
+    collected?: boolean;
   }[];
   passes: GuestPass[];
   devices: GuestDevice[];

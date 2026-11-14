@@ -122,7 +122,7 @@ type Lease {
   "temporary or permanent."
   kind: String!
   status: String!
-  "simulated, applied, not_applied or failed: what happened at the provider."
+  "simulated, applied, not_applied or failed: what happened at the source."
   execution: String!
   scope: String!
   decidedBy: String!

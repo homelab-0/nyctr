@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, bytes, detectOs, left, span, word } from './format';
+import { ago, bytes, detectOs, left, someNames, span, word } from './format';
 
 describe('formatting', () => {
   const now = Date.parse('2026-11-10T12:00:00Z');
@@ -11,6 +11,17 @@ describe('formatting', () => {
     expect(left('2026-11-10T14:05:00Z', now)).toBe('2 hr 5 min left');
     expect(left('2026-11-10T11:59:00Z', now)).toBeNull();
     expect(left(null, now)).toBeNull();
+  });
+  it('keeps a list of names to one short phrase', () => {
+    const names = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+    expect([0, 1, 2, 3].map((n) => someNames(names.slice(0, n)))).toEqual([
+      '',
+      'A',
+      'A and B',
+      'A, B and C',
+    ]);
+    expect(someNames(names.slice(0, 4))).toBe('A, B and 2 more');
+    expect(someNames(names)).toBe('A, B and 5 more');
   });
   it('formats spans, sizes and small counts', () => {
     expect([span(1), span(45), span(60), span(120), span(1440)]).toEqual([

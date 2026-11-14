@@ -1,10 +1,10 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
+import App, { writeLine } from './App';
 import { setCsrfToken } from './api';
 import { AuthProvider } from './auth';
 import { mockApi } from './test/mock-api';
-import type { User } from './types';
+import type { Rules, User } from './types';
 
 const admin: User = {
   id: 'test-admin',
@@ -48,6 +48,26 @@ afterEach(() => {
   // Put element scrolling back exactly as jsdom had it, so the stand-in stays in these tests.
   if (scrollTo) Object.defineProperty(Element.prototype, 'scrollTo', scrollTo);
   else delete (Element.prototype as Partial<Element>).scrollTo;
+});
+
+describe('the footer line', () => {
+  const source = (name: string, write_mode: string, collected = true) =>
+    ({ id: name, name, write_mode, collected }) as unknown as Rules['sources'][number];
+  const line = (...sources: Rules['sources']) => writeLine({ sources } as Rules, false);
+
+  it('names only sources that have been read, and keeps a long list short', () => {
+    expect(line(source('A', 'enabled'), source('B', 'disabled'))).toBe('May change A');
+    expect(line(source('A', 'enabled'), source('Never read', 'enabled', false))).toBe(
+      'May change A',
+    );
+    expect(line(...['A', 'B', 'C', 'D', 'E'].map((name) => source(name, 'enabled')))).toBe(
+      'May change A, B and 3 more',
+    );
+    expect(line(source('Never read', 'enabled', false))).toBe(
+      'May change sources once they are collected',
+    );
+    expect(line(source('B', 'disabled'))).toBe('Read-only for every source');
+  });
 });
 
 describe('console landing', () => {

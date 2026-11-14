@@ -194,7 +194,7 @@ def get(provider_id: str) -> Provider:
     """Return a provider or raise the error an administrator sees for an unknown one."""
     provider = providers().get(provider_id)
     if provider is None:
-        raise IntegrationError("This provider is not implemented in this release.")
+        raise IntegrationError("This kind of source is not implemented in this release.")
     return provider
 
 

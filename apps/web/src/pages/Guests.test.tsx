@@ -134,6 +134,27 @@ describe('guests', () => {
     }
   });
 
+  it('says it reads only from sources that have been read, and shortens a long list', async () => {
+    const base = overview('enabled');
+    const named = (name: string, collected: boolean) => ({
+      ...base.sources[0],
+      id: name,
+      name,
+      collected,
+    });
+    const read = ['A', 'B', 'C', 'D'].map((name) => named(name, true));
+    open('enabled', { 'GET /guests': { ...base, sources: [...read, named('Never read', false)] } });
+    const link = await screen.findByRole('link', { name: 'A, B and 2 more' });
+    expect(link.getAttribute('title')).toBe('A, B, C, D');
+    expect(link.getAttribute('href')).toBe('#/sources');
+    expect(link.parentElement!.textContent).toContain('reads who is on from A, B and 2 more.');
+    cleanup();
+    open('enabled', { 'GET /guests': { ...base, sources: [named('Never read', false)] } });
+    expect(
+      await screen.findByText(/has not read who is on yet: no source has been collected\./),
+    ).toBeDefined();
+  });
+
   it('says what it has, not that Wi-Fi names are still to be collected', async () => {
     const base = overview('enabled');
     open('enabled', {
