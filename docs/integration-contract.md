@@ -164,12 +164,14 @@ statement.
 - **A log read from where the last one ended.** A source that keeps a log and
   can be asked for it from a given time declares `resumes=True`, and its
   `collect` takes a fourth argument, `since`. The core passes the time the last
-  stored collection's log read ended, less ten minutes, when the last thing
-  that happened to the source was a stored collection. After a failed
-  collection, after an edit, and the first time, it passes nothing and the
-  whole window is read. The ten minutes cover a source clock that differs from
-  Nyctr's by up to five (the allowance a future timestamp gets) and five for the
-  source's log to settle; a row the source shows later than that is not read.
+  stored collection's log read ended or the time of the newest row stored for
+  the source, whichever is earlier, less ten minutes. The newest stored row's
+  time is the source's own, so a source clock behind Nyctr's loses nothing.
+  After an edit, the first time, and while no row is stored, it passes nothing
+  and the whole window is read. A failed collection stored nothing, so the next
+  one picks up from the last stored one. The ten minutes are for the source's
+  log to settle: a row the source lists more than ten minutes late, after a
+  newer row was read, is not read, and nothing cures that.
   Call `core.log_read(window start, since, now)`: it returns where to start,
   never before the window, and the value for `Snapshot.log`, which the core
   needs in order to resume next time. Give every row an id that is the same
@@ -180,7 +182,10 @@ statement.
   source whose `observed_at` is inside the window, as a read of the whole
   window would find them, and treats older ones as missing. Set
   `partial_rows` only when rows inside what this read set out to read were left
-  unread.
+  unread. The core then takes the stored log to be whole only from the oldest
+  row that read kept, records that time with the collection, and shows the
+  source as partly collected until that time has passed out of the window, also
+  after later reads that left nothing unread.
 - **Changes live in `integrations/actions.py`** and nowhere else. Each takes an
   explicit `allowed` flag, validates its inputs, makes one documented call and
   reads back what it changed. They run only for an integration an operator named
