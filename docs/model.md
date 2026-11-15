@@ -104,9 +104,12 @@ and never the key. An id is sent as a keyed digest (HMAC-SHA256) because ids
 of findings are built from device ids, and a plain digest could be matched
 against guessed ids by anyone who knows how an id begins. The key is 32 random
 bytes this installation makes the first time it sends a session and keeps in
-its own database. It is not the model's key, it is in no request, answer, audit
-record or log, and two installations give the same finding different sessions.
-Replacing it only splits old and new traces into separate groups.
+its own database. It is not the model's key, it is in no request, answer or
+audit record and in no log line Nyctr writes, and two installations give the
+same finding different sessions. SQL statement logging, which is off unless
+whoever runs the server turns it on, writes stored values as they are saved,
+this key included. Replacing it only splits old and new traces into separate
+groups.
 The request's `user` field is never sent. The proxy still sees
 the request itself, which holds the redacted evidence pack and the
 administrator's question, so run it where that may be kept.
