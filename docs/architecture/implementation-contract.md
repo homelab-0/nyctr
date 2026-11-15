@@ -96,8 +96,10 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   (`PUT /api/devices/{id}/assignment`) also ends, in the same transaction, every tie on it
   held by anyone it does not name. Each ending writes one `presence.ended` audit record with
   the device, `user_id` and, unless a person ended that one tie, `because`: `assignment`,
-  `switched_off`, `lapsed` (written by the worker) or `device_removed`. `ended_at` in the
-  list is the recorded ending or, until the worker records it, 30 days after `last_at`.
+  `switched_off`, `lapsed` (written by the worker) or `device_removed`. A tie that had lapsed
+  and not yet been recorded when its device went is recorded as `lapsed`, with `ended_at`.
+  `ended_at` in the list is the recorded ending or, until the worker records it, 30 days after
+  `last_at`.
   A new tie's reach starts at the later of `first_at` minus `reach_back_hours`, the device's
   last `device.assignment_changed` record and, unless the device is shared, the end of the
   last tie another person held on it. A tie made on stored inventory (`basis: stored`) reaches

@@ -149,11 +149,14 @@ def _ties(db: Session, *where) -> list[DevicePresence]:
     return list(db.scalars(select(DevicePresence).where(*where).order_by(DevicePresence.id).with_for_update()))
 
 
-def _said(db: Session, by: str | None, tie: DevicePresence, because: str | None = None) -> None:
-    """One audit record that a tie ended: whose it was, on which device by name, and why unless a person ended it."""
+def _said(db: Session, by: str | None, tie: DevicePresence, because: str | None = None, ended=None) -> None:
+    """One audit record that a tie ended: whose it was, on which device by name, and why unless a person ended it.
+
+    `ended` is when it ended, for a record written later than that about a tie that is about to be deleted.
+    """
     device = db.get(Resource, tie.device_id)
     audit(db, by, "presence.ended", tie.device_id, user_id=tie.user_id, device_name=device.name if device else "",
-          **({"because": because} if because else {}))
+          **({"because": because} if because else {}), **({"ended_at": ended.isoformat()} if ended else {}))
 
 
 def _ended(row: DevicePresence, now):
@@ -196,6 +199,8 @@ def gone(db: Session, ids: list[str], by: str | None) -> None:
     """Take the ties and conflicts on these devices off record, because the devices are going. The caller commits.
 
     Each tie still in force is ended on record first, so the audit trail says whose it was.
+    A tie that ran out before now, which the worker had not written down yet, is recorded as
+    that, with when it ran out and under nobody's name: afterwards nothing could record it.
     The caller already holds these devices' rows, which a sign-in takes before it writes a tie.
 
     Called once for everything that is going, however many devices, and before any of it is
@@ -210,10 +215,16 @@ def gone(db: Session, ids: list[str], by: str | None) -> None:
     lots = [rows[start:start + 500] for start in range(0, len(rows), 500)]
     for lot in lots:
         _ties(db, DevicePresence.id.in_(lot))
+    now = utcnow()
     for lot in lots:
-        for tie in db.scalars(select(DevicePresence).where(*live_ties(), DevicePresence.id.in_(lot))
-                              .order_by(DevicePresence.id)):
-            _said(db, by, tie, "device_removed")
+        for tie in db.scalars(select(DevicePresence).where(
+                DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None), DevicePresence.id.in_(lot),
+        ).order_by(DevicePresence.id)):
+            lapsed = _ended(tie, now)
+            if lapsed is None:
+                _said(db, by, tie, "device_removed")
+            else:
+                _said(db, None, tie, "lapsed", lapsed)
         db.execute(delete(DevicePresence).where(DevicePresence.id.in_(lot)))
 
 

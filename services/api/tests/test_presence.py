@@ -1134,6 +1134,29 @@ def test_a_device_that_is_dropped_or_whose_source_is_removed_takes_its_ties_with
             assert person.get("/api/devices").json() == [] and person.get("/api/presence").json() == {"items": []}
 
 
+def test_a_tie_that_lapsed_unrecorded_is_recorded_as_lapsed_when_its_device_goes(tmp_path, monkeypatch):
+    """Kim's tie ran out and the worker has not written that down yet. Removal says so, with when, before it deletes it."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    with browser(app, LAPTOP, KIM) as kim:
+        kim.get("/api/me/device")
+    kims, = stored(app)
+    change(app, DevicePresence, kims.id, last_at=utcnow() - timedelta(days=31))
+    kims, = stored(app)
+    with browser(app, LAPTOP) as sam, browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        assert sam.get("/api/me/device").json()["how"] == "signed_in"  # a lapsed tie keeps nobody else off the device
+        assert admin.request("DELETE", "/api/integrations/gw", json={"name": "Gateway"}).status_code == 200
+    presence.keep(app.state.session_factory, utcnow())  # and the worker finds nothing left to record
+    assert stored(app) == []
+    with app.state.session_factory() as db:
+        admin_id = db.scalar(select(User.id).where(User.email == LIVE_ADMIN[0]))
+        said = {row.details["user_id"]: (row.actor_id, row.details) for row in db.scalars(
+            select(Audit).where(Audit.action == "presence.ended"))}
+    assert said == {
+        "kim": (None, {"user_id": "kim", "device_name": "Laptop", "because": "lapsed",
+                       "ended_at": (utc(kims.last_at) + timedelta(days=30)).isoformat()}),
+        "sam": (admin_id, {"user_id": "sam", "device_name": "Laptop", "because": "device_removed"})}
+
+
 # --- The gateway lookup ------------------------------------------------------------------------------------------
 
 
