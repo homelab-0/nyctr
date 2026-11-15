@@ -178,7 +178,7 @@ def test_a_default_live_installation_is_read_only_with_the_assistant_off(helm_bi
     assert env["NYCTR_PROVIDER_WRITES"] == {"name": "NYCTR_PROVIDER_WRITES", "value": ""}
     # No interval is given, so the chart must not force "off": the product default applies.
     assert "NYCTR_COLLECT_INTERVAL_SECONDS" not in env
-    assert not any(name.startswith("NYCTR_AI_") or name == "NYCTR_NUDGE_TOKEN" for name in env)
+    assert not any(name.startswith(("NYCTR_AI_", "NYCTR_MODEL_")) or name == "NYCTR_NUDGE_TOKEN" for name in env)
 
 
 def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_in_secrets(helm_binary, tmp_path):
@@ -195,12 +195,32 @@ def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_
     assert env["NYCTR_COLLECT_INTERVAL_SECONDS"]["value"] == "300"
     assert env["NYCTR_AI_BASE_URL"]["value"] == "http://gateway.ai.svc.cluster.local:4000/v1"
     assert env["NYCTR_AI_MODEL"]["value"] == "local/reasoner"
+    assert env["NYCTR_AI_TRACE"]["value"] == "off"  # no trace header unless the operator asks for one
+    traced = environment(render(helm_binary, tmp_path, merge(values, {"assistant": {"trace": "proxy"}})))
+    assert traced["NYCTR_AI_TRACE"]["value"] == "proxy"
     assert env["NYCTR_NUDGE_TOKEN"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-nudge", "key": "nudge-token"}
     assert env["NYCTR_AI_API_KEY"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-model", "key": "key"}
     assert "Secret" not in manifests and "envFrom" not in container(manifests)
     # A model gateway that needs no key is supported: the endpoint is set and no key is passed.
     keyless = environment(render(helm_binary, tmp_path, merge(values, {"assistant": {"existingSecret": ""}})))
     assert keyless["NYCTR_AI_MODEL"]["value"] == "local/reasoner" and "NYCTR_AI_API_KEY" not in keyless
+
+
+def test_the_console_can_connect_a_model_only_within_the_hosts_and_secrets_the_chart_passes(helm_binary, tmp_path):
+    """The host list and each model key reach the pod as a plain list and Secret references, with no endpoint set."""
+    values = merge(fixture("live-values.yaml"), {"assistant": {
+        # A bare name is HTTPS on port 443 only; a proxy in the cluster on plain HTTP is written in full.
+        "hosts": ["http://gateway.ai.svc.cluster.local:4000", "llm.example.test", "https://llm.example.test:8443"],
+        "secrets": [{"envName": "NYCTR_MODEL_SECRET_GATEWAY", "existingSecret": "nyctr-model", "key": "api-key"},
+                    {"envName": "NYCTR_MODEL_SECRET_SPARE", "existingSecret": "nyctr-spare", "key": "key"}]}})
+    manifests = render(helm_binary, tmp_path, values)
+    env = environment(manifests)
+    assert env["NYCTR_MODEL_HOSTS"]["value"] == (
+        "http://gateway.ai.svc.cluster.local:4000,llm.example.test,https://llm.example.test:8443")
+    assert env["NYCTR_MODEL_SECRET_GATEWAY"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-model", "key": "api-key"}
+    assert env["NYCTR_MODEL_SECRET_SPARE"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-spare", "key": "key"}
+    assert not any(name.startswith("NYCTR_AI_") for name in env)
+    assert "Secret" not in manifests and "envFrom" not in container(manifests)
 
 
 @pytest.mark.parametrize("trusted", [["10.42.0.0/16"], ["10.42.7.0/24", "10.42.0.10"], ["2001:db8:42::/56"]])
@@ -375,6 +395,18 @@ def test_a_member_portal_address_adds_one_hostname_and_one_setting(helm_binary, 
     {"assistant": {"baseUrl": "https://gateway.example.test/v1?key=inline", "model": "m"}},
     {"assistant": {"baseUrl": "https://gateway.example.test/v1", "model": "m", "apiKey": "inline-credential"}},
     {"podSecurityContext": {"runAsUser": 0}},
+    # A model's key and a source's key each keep their own name pattern, and a host is a bare name.
+    {"assistant": {"secrets": [{"envName": "NYCTR_CONNECTOR_SECRET_HOME", "existingSecret": "one", "key": "key"}]}},
+    {"connectors": {"secrets": [{"envName": "NYCTR_MODEL_SECRET_MAIN", "existingSecret": "one", "key": "key"}]}},
+    {"assistant": {"secrets": [{"envName": "NYCTR_MODEL_SECRET_MAIN", "existingSecret": "one", "key": "key"},
+                               {"envName": "NYCTR_MODEL_SECRET_MAIN", "existingSecret": "two", "key": "key"}]}},
+    {"assistant": {"secrets": [{"envName": "NYCTR_MODEL_SECRET_MAIN", "value": "inline-credential"}]}},
+    {"assistant": {"hosts": ["https://llm.example.test/v1"]}},
+    {"assistant": {"hosts": ["https://someone@llm.example.test"]}},
+    {"assistant": {"hosts": ["ftp://llm.example.test"]}},
+    {"assistant": {"trace": "proxy"}},  # a trace style with no endpoint to trace
+    {"assistant": {"baseUrl": "http://gateway.ai.svc:4000/v1", "model": "m", "trace": "everything"}},
+    {"assistant": {"hosts": ["llm.example.test:4000"]}},
     {"connectors": {"secrets": [{"envName": "NYCTR_MODE", "existingSecret": "secret", "key": "mode"}]}},
     {"connectors": {"secrets": [
         {"envName": "NYCTR_CONNECTOR_SECRET_HOME", "existingSecret": "one", "key": "key"},
@@ -403,6 +435,8 @@ def test_invalid_or_unsafe_live_configuration_fails_before_rendering(helm_binary
     {"collection": {"intervalSeconds": 300}},
     {"collection": {"nudge": {"existingSecret": "nyctr-nudge"}}},
     {"assistant": {"baseUrl": "http://gateway.ai.svc:4000/v1", "model": "m"}},
+    {"assistant": {"hosts": ["llm.example.test"]}},
+    {"assistant": {"secrets": [{"envName": "NYCTR_MODEL_SECRET_MAIN", "existingSecret": "real", "key": "key"}]}},
 ])
 def test_demo_cannot_be_accidentally_exposed_or_connected_to_live_providers(helm_binary, tmp_path, changes):
     """Keep known credentials on the explicit isolated path and require a single database choice."""

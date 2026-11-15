@@ -142,6 +142,8 @@ spec:
               value: {{ .Values.assistant.baseUrl | quote }}
             - name: NYCTR_AI_MODEL
               value: {{ .Values.assistant.model | quote }}
+            - name: NYCTR_AI_TRACE
+              value: {{ .Values.assistant.trace | quote }}
             {{- with .Values.assistant.existingSecret }}
             - name: NYCTR_AI_API_KEY
               valueFrom:
@@ -149,6 +151,17 @@ spec:
                   name: {{ . | quote }}
                   key: {{ $.Values.assistant.apiKeyKey | quote }}
             {{- end }}
+            {{- end }}
+            {{- with .Values.assistant.hosts }}
+            - name: NYCTR_MODEL_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- range .Values.assistant.secrets }}
+            - name: {{ .envName | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .key | quote }}
             {{- end }}
           startupProbe:
             httpGet:

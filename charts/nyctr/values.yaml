@@ -111,6 +111,18 @@ assistant:
   # Optional existing Secret holding the endpoint's API key under apiKeyKey.
   existingSecret: ""
   apiKeyKey: api-key
+  # How calls to baseUrl are traced: off, standard, proxy or proxy_body. Off sends
+  # no trace header. A model connected in the Console carries its own choice.
+  trace: "off"
+  # An administrator can also connect the model in the Console (Setup, This
+  # installation), within these two lists. hosts: servers a model endpoint may
+  # be on, besides baseUrl's own. A bare name allows HTTPS on port 443 only;
+  # write any other port, or plain HTTP, in full: https://name:8443,
+  # http://name:4000. Empty allows no other server. secrets: keys the Console
+  # can name, each with envName (NYCTR_MODEL_SECRET_...), existingSecret and
+  # key. Values are never placed in Helm values.
+  hosts: []
+  secrets: []
 
 demo:
   allowKnownCredentials: false
