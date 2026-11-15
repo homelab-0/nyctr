@@ -140,6 +140,25 @@ describe('briefing: sources that need a look', () => {
     expect(rows.get('complete')!.querySelector('.dot')!.className).toBe('dot green');
   });
 
+  it('sends a saved model that cannot be used to Setup, where it is saved again', async () => {
+    await open([source('complete', 'connected')], scheduleFixture(), [
+      {
+        kind: 'model',
+        id: 'model_connection',
+        severity: 'medium',
+        at: null,
+        title: "The assistant is off: the model's setting cannot be used",
+        detail: 'The saved model setting cannot be read by this version of Nyctr.',
+      },
+    ]);
+    const row = screen
+      .getByText("The assistant is off: the model's setting cannot be used")
+      .closest('a')!;
+    expect(row.getAttribute('href')).toBe('#/setup?tab=system');
+    expect(row.textContent).toContain('Model');
+    expect(row.textContent).toContain('cannot be read by this version');
+  });
+
   it('says nothing needs you only when the list is empty', async () => {
     await open([source('complete', 'connected')]);
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
