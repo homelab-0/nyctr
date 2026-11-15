@@ -3,6 +3,7 @@
 import json
 import re
 import sys
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -13,6 +14,8 @@ import pytest
 from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi import Request
 from fastapi.testclient import TestClient
+from joserfc import jwt
+from joserfc.jwk import RSAKey
 from uvicorn import Config
 
 from nyctr import peer
@@ -221,6 +224,12 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
             "entries": 0, "proxy_hops": 1}
 
 
+@pytest.fixture(scope="module")
+def signing_key():
+    """Generate a test-only RSA signing key for the fabricated identity provider."""
+    return RSAKey.generate_key(2048, parameters={"kid": "test-key"})
+
+
 @pytest.mark.parametrize(("peer_address", "headers"), [
     (PROXY, {"X-Forwarded-For": MEMBER, "X-Forwarded-Proto": "https"}),
     # A proxy that reports plain HTTP, or a forged claim of it, cannot weaken the cookie or the return address.
@@ -228,22 +237,43 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
     (ATTACKER, {"X-Forwarded-Proto": "http", "X-Forwarded-Host": "attacker.example"}),
     (ATTACKER, {}),
 ])
-def test_secure_cookies_and_the_sign_in_return_address_come_from_configuration(tmp_path, peer_address, headers):
-    """Behind a proxy or not, the scheme of cookies and of single sign-on is the configured origin's."""
-    origin = "https://nyctr.example.test"
+def test_secure_cookies_and_the_sign_in_return_address_come_from_configuration(tmp_path, signing_key,
+                                                                              peer_address, headers):
+    """Behind a proxy or not, single sign-on returns to the configured origin and every cookie is Secure."""
+    origin, issuer = "https://nyctr.example.test", "https://id.example/issuer/"
     app = live_app(tmp_path, forwarded_allow_ips=PROXY, public_url=origin, cookie_secure=True,
-                   oidc_issuer="https://id.example/issuer", oidc_client_id="nyctr",
-                   oidc_client_secret="test-client-secret")
-    app.state.oidc_transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
-        "issuer": "https://id.example/issuer", "authorization_endpoint": "https://id.example/authorize",
-        "token_endpoint": "https://id.example/token", "jwks_uri": "https://id.example/keys",
-        "code_challenge_methods_supported": ["S256"]}))
+                   oidc_issuer=issuer, oidc_client_id="nyctr", oidc_client_secret="test-client-secret")
+    sent = {}
+
+    def idp(request):
+        """Emulate discovery, keys and the token endpoint, keeping the return address Nyctr sent."""
+        if request.url.path == "/keys":
+            return httpx.Response(200, json={"keys": [signing_key.as_dict()]})
+        if request.url.path == "/token":
+            sent["returned_to"] = parse_qs(request.content.decode())["redirect_uri"]
+            claims = {"iss": issuer, "aud": "nyctr", "sub": "subject-123", "nonce": sent["nonce"][0],
+                      "exp": int(time.time()) + 300, "iat": int(time.time())}
+            token = jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, signing_key)
+            return httpx.Response(200, json={"access_token": "test-access", "id_token": token})
+        return httpx.Response(200, json={
+            "issuer": issuer, "authorization_endpoint": "https://id.example/authorize",
+            "token_endpoint": "https://id.example/token", "jwks_uri": "https://id.example/keys",
+            "code_challenge_methods_supported": ["S256"]})
+
+    app.state.oidc_transport = httpx.MockTransport(idp)
+    here = origin + "/api/auth/oidc/callback"
     with served(app, peer_address, base_url=origin) as client:
         started = client.get("/api/auth/oidc/login", headers=headers, follow_redirects=False)
         assert started.status_code == 302
-        sent = parse_qs(urlsplit(started.headers["location"]).query)
-        assert sent["redirect_uri"] == [origin + "/api/auth/oidc/callback"]
+        sent.update(parse_qs(urlsplit(started.headers["location"]).query))
+        assert sent["redirect_uri"] == [here]
         assert "secure" in started.headers["set-cookie"].lower()
+        back = client.get("/api/auth/oidc/callback", params={"state": sent["state"][0], "code": "code"},
+                          headers=headers, follow_redirects=False)
+        assert (back.status_code, back.headers["location"], sent["returned_to"]) == (302, "/#/portal", [here])
+        session = [x for x in back.headers.get_list("set-cookie") if x.startswith(COOKIE_NAME + "=")]
+        assert len(session) == 1 and "secure" in session[0].lower()
+        assert client.get("/api/auth/me", headers=headers).json()["role"] == "member"
         signed_in = client.post("/api/auth/login", headers=headers,
                                 json={"email": LIVE_ADMIN[0], "password": LIVE_ADMIN[1]})
         assert signed_in.status_code == 200
