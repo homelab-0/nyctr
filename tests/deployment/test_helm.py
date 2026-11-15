@@ -157,7 +157,10 @@ def test_live_secrets_are_references_and_ca_mount_preserves_read_only_boundary(h
         assert env[variable] == {"name": variable, "valueFrom": {"secretKeyRef": {"name": name, "key": key}}}
     assert env["NYCTR_MODE"]["value"] == "live"
     assert env["NYCTR_COOKIE_SECURE"]["value"] == "true"
-    assert env["FORWARDED_ALLOW_IPS"]["value"] == "10.42.0.10"
+    assert env["NYCTR_TRUSTED_PROXIES"]["value"] == "10.42.0.10"
+    # The web server's own name for a list of proxies is never set, so it believes only itself.
+    assert "FORWARDED_ALLOW_IPS" not in env
+    assert env["NYCTR_PROXY_HOPS"]["value"] == "1"
     assert env["NYCTR_CONNECTOR_HOSTS"]["value"] == "console.example.test"
     assert env["NYCTR_CONNECTOR_CA_BUNDLE"]["value"] == "/etc/nyctr/connector-ca/ca-bundle.crt"
     mount = next(row for row in container(manifests)["volumeMounts"] if row["name"] == "connector-ca")
@@ -204,9 +207,23 @@ def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_
 def test_a_bounded_proxy_range_is_accepted_only_behind_the_network_policy(helm_binary, tmp_path, trusted):
     """A range of proxy peers is accepted only while the chart renders its ingress policy."""
     manifests = render(helm_binary, tmp_path, merge(fixture("live-values.yaml"), {"forwardedAllowIps": trusted}))
-    assert environment(manifests)["FORWARDED_ALLOW_IPS"]["value"] == ",".join(trusted)
+    assert environment(manifests)["NYCTR_TRUSTED_PROXIES"]["value"] == ",".join(trusted)
     policy = manifests["NetworkPolicy"]["spec"]
     assert policy["policyTypes"] == ["Ingress"] and policy["ingress"][0]["from"]
+
+
+def test_the_number_of_proxies_reaches_the_application_and_the_install_notes(helm_binary, tmp_path):
+    """`proxyHops` is one by default and passed on as set; the notes say what the proxy and the edge must do."""
+    values = fixture("live-values.yaml")
+    assert "proxyHops" not in values and yaml.safe_load((CHART / "values.yaml").read_text())["proxyHops"] == 1
+    for hops in (1, 2, 10):
+        env = environment(render(helm_binary, tmp_path, merge(values, {"proxyHops": hops})))
+        assert env["NYCTR_PROXY_HOPS"]["value"] == str(hops)
+    # Helm 3 renders install notes only against a cluster, so the notes are read as written.
+    notes = (CHART / "templates" / "NOTES.txt").read_text()
+    for said in (".Values.proxyHops", "must append the address it saw", "must keep the client's address",
+                 "proxies must be in forwardedAllowIps", "a client inside a listed range"):
+        assert said in notes
 
 
 def test_local_bootstrap_uses_existing_secret_and_can_be_removed_after_provisioning(helm_binary, tmp_path):
@@ -232,7 +249,7 @@ def test_demo_keeps_known_credentials_isolated_and_database_choice_explicit(helm
     assert set(manifests) == {"Deployment", "Service", "ServiceAccount"}
     env = environment(manifests)
     assert env["NYCTR_MODE"]["value"] == "demo" and env["NYCTR_COOKIE_SECURE"]["value"] == "false"
-    assert env["FORWARDED_ALLOW_IPS"]["value"] == ""
+    assert env["NYCTR_TRUSTED_PROXIES"]["value"] == "" and "FORWARDED_ALLOW_IPS" not in env
     assert not any(key.startswith("NYCTR_CONNECTOR_SECRET_") for key in env)
     if external:
         assert env["NYCTR_DATABASE_URL"]["valueFrom"]["secretKeyRef"]["name"] == "nyctr-db"
@@ -320,6 +337,10 @@ def test_a_member_portal_address_adds_one_hostname_and_one_setting(helm_binary, 
     {"forwardedAllowIps": ["10.42.0.0/16,10.43.0.0/16"]},
     {"forwardedAllowIps": ["not-an-ip"]},
     {"forwardedAllowIps": ["999.0.0.1"]},
+    {"proxyHops": 0},
+    {"proxyHops": 11},
+    {"proxyHops": "2"},
+    {"proxyHops": 1.5},
     {"database": {"existingSecret": ""}},
     {"database": {"url": "postgresql://inline-credential@database/nyctr"}},
     {"auth": {"oidc": {"clientSecret": "inline-credential"}}},

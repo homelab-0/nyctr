@@ -14,6 +14,7 @@ import { span, useNow, writeText } from '../lib/format';
 import { UNREACHABLE, nextCollection, useSchedule } from '../lib/schedule';
 import type {
   AccessRule,
+  AddressSeen,
   AssistantConfig,
   AuthConfig,
   CollectionSchedule,
@@ -484,6 +485,76 @@ function SystemPanel({ rules }: { rules: Rules }) {
   );
 }
 
+/** How Nyctr worked out the address, or why it has none, in words an operator can act on. */
+export function addressText(seen: AddressSeen): string {
+  const proxy = `The connection came from ${seen.peer}, which is on your list of proxies`;
+  switch (seen.why) {
+    case 'peer':
+      return `The connection came straight from this address. It is not on your list of proxies, so nothing it said about another address was read. If one of your proxies sits at this address, add it to the list.`;
+    case 'forwarded':
+      return `${proxy}. Nyctr read address ${seen.entry} of the ${seen.entries} it passed on, counted from the right: the one your proxy wrote.`;
+    case 'missing':
+      return `${proxy}, but it passed no address on. Set the proxy to add the address it saw (X-Forwarded-For).`;
+    case 'short':
+      return `${proxy}, but it passed on ${seen.entries} and Nyctr is set to read number ${seen.proxy_hops} from the right. Lower the number of proxies Nyctr counts, or check that each proxy adds the address it saw.`;
+    case 'unlisted':
+      return `${proxy}, but ${seen.unlisted}, at position ${seen.entry} from the right of what it passed on, is not on the list. Nyctr is set to count ${seen.proxy_hops} proxies, and every one of them must be on the list. If ${seen.unlisted} is one of your proxies, add it. If it is your own device, you reached Nyctr without passing all of them, and Nyctr gives no address for that.`;
+    case 'zone':
+      return `The connection came from ${seen.peer}, an address that only works on one network link (the part after % names the link). Nyctr cannot match such an address to your list of proxies or to a device, so it gives none. Reach Nyctr, or have your proxy reach it, over an ordinary address.`;
+    case 'hops':
+      return `${proxy}, but Nyctr is set to count ${seen.proxy_hops} proxies. The number must be 1 or more.`;
+    case 'malformed':
+      return `${proxy}, but what it passed on at position ${seen.entry} from the right is not an address.`;
+    default:
+      return 'The server did not say where the connection came from.';
+  }
+}
+
+/** The operator's check that a proxy passes the right address on, before members rely on it. */
+function AddressPanel() {
+  const seen = useApi<AddressSeen>('/me/address');
+  return (
+    <Panel
+      title="The address Nyctr sees for you"
+      hint="Use this to check your proxy. It should be the address of the device you are on now."
+    >
+      {seen.error ? (
+        <InlineError message={seen.error} />
+      ) : !seen.data ? (
+        <p className="aside">Checking…</p>
+      ) : (
+        <div className="stack">
+          {seen.data.old_name && (
+            <div className="note yellow" role="status">
+              <div>
+                <b>Your list of proxies is set under an old name.</b>
+                <p>
+                  It is read from <span className="mono">FORWARDED_ALLOW_IPS</span>. That name will
+                  stop working in a later release. Set{' '}
+                  <span className="mono">NYCTR_TRUSTED_PROXIES</span> to the same list and remove
+                  the old name.
+                </p>
+              </div>
+            </div>
+          )}
+          <p className="rule mono">{seen.data.address || 'Nyctr cannot tell your address'}</p>
+          <p>{addressText(seen.data)}</p>
+          <p className="aside">
+            {!seen.data.address
+              ? 'Sign-in attempts from every request like this one are counted together, and no device is recognised.'
+              : seen.data.address_is_proxy
+                ? 'This address is on your list of proxies. If it is one of your proxies and not your device, something in front of your proxy is hiding your address, or raise the number of proxies Nyctr counts.'
+                : 'If this is a router or load balancer and not your device, something in front of your proxy is hiding your address.'}{' '}
+            Set with <span className="mono">NYCTR_TRUSTED_PROXIES</span> (your proxies) and{' '}
+            <span className="mono">NYCTR_PROXY_HOPS</span> (how many a request passes, now{' '}
+            {seen.data.proxy_hops}).
+          </p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 /** Rules Nyctr acts on, who owns which device, and how the server is configured. */
 export default function Setup({ params }: { params: URLSearchParams }) {
   const rules = useApi<Rules>('/rules');
@@ -517,6 +588,7 @@ export default function Setup({ params }: { params: URLSearchParams }) {
         <div className="stack">
           <SchedulePanel />
           <SystemPanel rules={rules.data} />
+          <AddressPanel />
         </div>
       )}
     </div>

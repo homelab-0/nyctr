@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import hmac
+import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -162,6 +163,10 @@ def create_app(settings: Settings | None = None):
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)
+        if settings.old_proxy_name_in_use:
+            logging.getLogger("nyctr").warning(
+                "The list of proxies is read from FORWARDED_ALLOW_IPS. That name will stop working in a later "
+                "release: set NYCTR_TRUSTED_PROXIES to the same list and remove the old name.")
         upkeep = asyncio.create_task(worker.run(app)) if settings.worker_enabled else None
         yield
         if upkeep:
