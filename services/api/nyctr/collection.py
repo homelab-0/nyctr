@@ -65,7 +65,8 @@ def apply_snapshot(db, integration, snapshot, settings, gaps=()):
 
     Reject cross-integration identities and relationships outside the snapshot.
     What a whole read did not list is marked missing (`retention.mark_unseen`; `gaps` are the
-    codes this read recorded), relationships are replaced, and replayed
+    codes this read recorded, and `retention.standing` says what they and the reads before
+    leave in doubt), relationships are replaced, and replayed
     observations keep their original expiry. The caller commits or rolls back
     the full collection transaction; provider infrastructure is never modified.
 
@@ -102,10 +103,12 @@ def apply_snapshot(db, integration, snapshot, settings, gaps=()):
     if resumed:
         # What earlier reads stored from the log still stands while it is inside the window, exactly
         # as a read of the whole window would find it; older than that, it is missing like anything else.
-        seen |= {row.id for row in stored.values()
-                 if row.evidence_kind == "observed" and utc(row.observed_at) >= window_from}
+        carried = [row for row in stored.values()
+                   if row.id not in seen and row.evidence_kind == "observed" and utc(row.observed_at) >= window_from]
+        retention.present(carried)
+        seen |= {row.id for row in carried}
     # Keep previously seen inventory and ownership; mark what this read left out only if it was whole.
-    retention.mark_unseen(stored.values(), seen, retention.unread(integration.provider, snapshot, gaps), now)
+    retention.mark_unseen(stored.values(), seen, retention.standing(db, integration, snapshot, gaps)[0], now)
     kept = {}
     if resumed:
         again = {data["id"] for data in snapshot.relationships}
@@ -473,6 +476,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                     if not _still_holds(own, integration_id, started):
                         return None
                     source = own.get(Integration, integration_id)
+                    doubt, sure_from = retention.standing(own, source, snapshot, evidence.gaps)
                     new = apply_snapshot(own, source, snapshot, settings, evidence.gaps)
                     if partial:
                         source.status = "partial"
@@ -480,7 +484,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                           resources=len(snapshot.resources), observations=len(snapshot.blocks), partial=partial,
                           **({"rows_kept": snapshot.partial_rows} if snapshot.partial_rows is not None else {}),
                           gaps=sorted(evidence.gaps),
-                          unread=retention.unread(source.provider, snapshot, evidence.gaps),
+                          unread=doubt, **({"unread_from": sure_from} if sure_from else {}),
                           **({"gap_causes": {code: sorted(causes)
                                              for code, causes in sorted(evidence.gap_causes.items())}}
                              if evidence.gap_causes else {}),

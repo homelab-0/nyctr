@@ -1,13 +1,15 @@
 """Background upkeep: close expired access, and collect on the schedule in force.
 
-Runs inside each API process. Every 30 seconds a tick does two separate things,
-and neither waits for the other. It ends the exceptions whose time is up, so
+Runs inside each API process. Every 30 seconds a tick does three separate things,
+and none waits for another. It ends the exceptions whose time is up, so
 temporary access ends even if nobody opens the console and however long a
 collection takes. And it starts a collection pass unless this copy's previous
 pass is still going: the pass claims the scheduled run if one is due, collects
 each source in turn, then runs the retries that are due. The schedule is read
 from the database at every pass, so a change an administrator saves applies at
-the next pass on every running copy, and it never runs in demo mode.
+the next pass on every running copy, and it never runs in demo mode. And it
+clears out, on a worker thread, the lookups whose time is up and, once an hour,
+what has left the sources (`retention`).
 
 A scheduled collection that fails for a reason that may pass is retried up to
 three times before the source is shown as failed (see `schedule.plan_retry`).
@@ -193,13 +195,14 @@ class Upkeep:
         self.factory, self.settings, self.clock = factory, settings, clock
         self.collecting: asyncio.Task | None = None
         self.ending: dict[str | None, asyncio.Task] = {}
+        self.clearing: asyncio.Task | None = None
         self.dropped_at = None
 
     def tick(self) -> None:
-        """Start a collection pass if none is going and the endings that are due, then remove what expired or left.
+        """Start a collection pass if none is going, the endings that are due, and the clearing out.
 
         Lookups whose time is up go at every tick; what has left a source is looked for once
-        an hour (`retention`). Neither calls a source.
+        an hour (`retention`). Neither calls a source, and neither runs on the server's loop.
 
         A run or retry that comes due during a pass is not claimed until the pass
         ends, so it stays due in the database for the next tick, or for another copy.
@@ -218,13 +221,23 @@ class Upkeep:
             # Endings still going at this source cover it; what they miss is due again next tick.
             if source not in self.ending or self.ending[source].done():
                 self.ending[source] = asyncio.create_task(end_at_source(self.factory, self.settings, lease_ids))
-        # Last, so a failure here never holds up an ending.
-        now = self.clock()
-        retention.expire_lookups(self.factory, now)
-        if self.dropped_at is None or now - self.dropped_at >= retention.DROP_EVERY:
-            # Stamped first, so a run that fails is not tried again at every tick.
-            self.dropped_at = now
-            retention.drop(self.factory, now)
+        # Clearing out touches no source and is blocking database work, so it has its own thread.
+        if self.clearing is None or self.clearing.done():
+            self.clearing = asyncio.create_task(self._clear(self.clock()))
+
+    async def _clear(self, now) -> None:
+        """Remove the lookups whose time is up and, once an hour, what has left the sources.
+
+        Off the server's loop, as a collection's store is. A failure is logged without its
+        cause text; the hour is stamped first, so a run that fails is not tried again at every tick.
+        """
+        try:
+            await off_loop(lambda: retention.expire_lookups(self.factory, now))
+            if self.dropped_at is None or now - self.dropped_at >= retention.DROP_EVERY:
+                self.dropped_at = now
+                await off_loop(lambda: retention.drop(self.factory, now))
+        except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
+            log.warning("Background upkeep failed: %s", type(error).__name__)
 
     async def _collect(self) -> None:
         """Run one collection pass. A failure is logged without its cause text; the next tick starts another."""
@@ -235,7 +248,7 @@ class Upkeep:
 
     async def stop(self) -> None:
         """Cancel whatever is still going and wait until it has stopped."""
-        tasks = [task for task in (self.collecting, *self.ending.values()) if task]
+        tasks = [task for task in (self.collecting, self.clearing, *self.ending.values()) if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

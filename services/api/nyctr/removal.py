@@ -143,26 +143,23 @@ def remove(db, integration: Integration) -> None:
     db.delete(integration)
 
 
-def forget(db, ids: list[str]) -> dict[str, int]:
-    """Delete these items and what hangs on them, and say how many current assignments and label links went.
+def forget(db, ids: list[str]) -> None:
+    """Delete these items and what hangs on them.
 
     Used when a source is removed and when items that have left it are dropped. The caller holds
     the items' locks. Lookups tied to one of these devices lose that tie: it rested on the item.
     """
-    gone, went = set(ids), {"assignments": 0, "links": 0}
+    gone = set(ids)
     for start in range(0, len(ids), 500):
         items = ids[start:start + 500]
-        went["assignments"] += _count(db, DeviceGrant, DeviceGrant.device_id.in_(items),
-                                      DeviceGrant.valid_until.is_(None))
         db.execute(delete(DeviceGrant).where(DeviceGrant.device_id.in_(items)))
-        went["links"] += db.execute(delete(DeviceLink).where(
-            or_(DeviceLink.source_id.in_(items), DeviceLink.device_id.in_(items)))).rowcount
+        db.execute(delete(DeviceLink).where(or_(DeviceLink.source_id.in_(items), DeviceLink.device_id.in_(items))))
         db.execute(update(Observation).where(Observation.device_id.in_(items))
                    .values(device_id=None, attribution="unverified"))
         db.execute(delete(Relationship).where(or_(Relationship.source.in_(items), Relationship.target.in_(items))))
         db.execute(delete(Sighting).where(Sighting.device_id.in_(items)))
         db.execute(delete(GuestAction).where(GuestAction.device_id.in_(items)))
-    for finding in db.scalars(select(Finding)):
+    for finding in db.scalars(select(Finding)) if gone else ():
         about = list(finding.resource_ids or [])
         if not gone.intersection(about):
             continue
@@ -173,7 +170,6 @@ def forget(db, ids: list[str]) -> dict[str, int]:
             finding.resource_ids = [x for x in about if x not in gone]
     for start in range(0, len(ids), 500):
         db.execute(delete(Resource).where(Resource.id.in_(ids[start:start + 500])))
-    return went
 
 
 def removed_names(db) -> dict[str, str]:
