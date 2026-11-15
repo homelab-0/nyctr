@@ -96,8 +96,10 @@ source (`nyctr/retention.py`):
   no read in between listed it. One read says only that the item was not
   there at that moment, so a source that was down, or is collected by hand
   now and then, drops nothing until it has been read on 7 days. The number is
-  `KEEP_DAYS` in `nyctr/retention.py`. An item that comes back later is a new
-  item.
+  `KEEP_DAYS` in `nyctr/retention.py`. A day on which the kind was in doubt
+  neither counts nor starts the count again: nobody knows whether the item
+  was there that day, so the days before it still stand and the day itself
+  adds nothing. An item that comes back later is a new item.
 - What a person attached something to is never dropped by itself: a device
   assigned to someone or filed by an administrator, and an item with a DNS
   label link on either side. It stays, marked missing and not counted, until
@@ -110,8 +112,10 @@ source (`nyctr/retention.py`):
   and takes any mark off it. It vouches only for the stretch it read: while
   the stored log is not whole from the window's start (a read before it kept
   only part, or hit a gap) it is in doubt for the same kinds, and marks and
-  counts nothing of them. Each collection records how far back the stored log
-  is whole (`whole_from`) beside what it left in doubt (`unread`).
+  counts nothing of them. Each collection records what it left in doubt
+  (`unread`) and from when nothing is in doubt (`unread_from`), beside how
+  far back the stored log has no hole (`whole_from`), which a gap does not
+  move.
 - Not knowing is not the same as gone. Nothing is marked, and no day is
   counted, on a collection that kept only its most recent rows, did not list
   the kind in full, or recorded a gap that could have hidden items (the
