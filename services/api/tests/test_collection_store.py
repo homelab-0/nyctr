@@ -534,6 +534,11 @@ def test_what_a_store_refuses_and_what_a_read_that_picked_up_carries(tmp_path, m
         profile, rules, address = item("p", "dns_profile", "configured"), item("rules", "policy", "configured"), \
             item("a.example")
         apply(app, Snapshot(resources=[profile, rules, address], blocks=[lookup(1)]))
+        with app.state.session_factory() as db:
+            # What a collection records beside the store: it left nothing in doubt, from the window's start.
+            db.add(Audit(action="integration.collected", target_id="dns", details={
+                "unread": [], "unread_from": (now - timedelta(hours=24)).isoformat()}))
+            db.commit()
         with pytest.raises(ValueError, match="Observation identity crosses"):
             apply(app, Snapshot(blocks=[lookup(1)]), source="other")
         with pytest.raises(ValueError, match="Resource identity crosses"):
