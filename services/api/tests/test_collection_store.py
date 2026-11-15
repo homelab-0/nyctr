@@ -12,11 +12,11 @@ from conftest import live_app, live_signin
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
 
-from nyctr import collection, integrations
+from nyctr import analysis, collection, integrations, worker
 from nyctr.assistant import attention
 from nyctr.collection import collect_integration
 from nyctr.integrations import Snapshot, core, registry
-from nyctr.models import Audit, Integration, Observation, Relationship, Resource, utcnow
+from nyctr.models import Audit, Finding, Integration, Observation, Relationship, Resource, Sighting, utcnow
 
 KEY = "fabricated-key-never-logged"
 NAME = 'Office "DNS"\nsecond line'
@@ -98,10 +98,13 @@ def test_requests_are_answered_while_a_collection_of_the_production_shape_is_bei
                           page=client.get("/api/resources").json())
             return result
         monkeypatch.setattr(collection, "apply_snapshot", storing)
+        analysed = collection.after_collection
+        monkeypatch.setattr(collection, "after_collection", lambda *args: (
+            during.update(analysis=threading.get_ident()), analysed(*args))[1])
         loop_thread = returns(monkeypatch, shaped(1500, 4000), during=second_copy)
         response = client.post("/api/integrations/dns/sync", headers=live_signin(client))
         assert response.status_code == 200, response.text
-        assert during["thread"] not in loop_thread
+        assert during["thread"] not in loop_thread and during["analysis"] not in loop_thread
         # Answered mid-store, and with what was stored before it: nothing of a half-stored run is visible.
         assert during["health"] == 200 and during["page"] == []
         assert len(client.get("/api/resources").json()) == 1500
@@ -144,8 +147,10 @@ def test_a_store_stopped_half_way_leaves_the_source_as_it_was(tmp_path, monkeypa
             assert (row.status, row.sync_started_at) == ("error", None)
 
 
-def test_a_collection_cancelled_during_its_store_waits_for_the_store_to_end_whole(tmp_path, monkeypatch):
-    """Stopping the server mid-store never closes the session under the store: it ends stored, all of it."""
+@pytest.mark.parametrize("cancels", [1, 2])
+def test_a_collection_cancelled_during_its_store_waits_for_the_store_to_end_whole(tmp_path, monkeypatch, caplog,
+                                                                                 cancels):
+    """Stopping the server mid-store, however often it cancels, ends stored: all of it, and its record with it."""
     app, entered, release = live_app(tmp_path), threading.Event(), threading.Event()
     with TestClient(app):
         add_source(app, monkeypatch)
@@ -163,35 +168,41 @@ def test_a_collection_cancelled_during_its_store_waits_for_the_store_to_end_whol
             task = asyncio.create_task(collect_integration(app.state.session_factory, app.state.settings,
                                                            "dns", None))
             assert await asyncio.to_thread(entered.wait, 30)
-            task.cancel()
-            for _ in range(5):
-                await asyncio.sleep(0)
-            assert not task.done()  # still waiting for the store it started
+            for _ in range(cancels):
+                task.cancel()
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                assert not task.done()  # still waiting for the store it started
             release.set()
             with pytest.raises(asyncio.CancelledError):
                 await task
         asyncio.run(scenario())
         assert counts(app) == (20, 19, 30, 1)
         with app.state.session_factory() as db:
-            assert db.get(Integration, "dns").status == "connected"
+            row = db.get(Integration, "dns")
+            assert (row.status, row.sync_started_at) == ("connected", None)
+    # The pair of log lines stays whole: a stopped run says so, and that its store was finished.
+    last = [record.getMessage() for record in caplog.records if record.name == "nyctr.collection"][-1]
+    assert last.startswith('Collection ended: source="Office DNS" outcome=stopped ') and last.endswith(" stored=True")
 
 
 class Log:
     """A fabricated DNS source whose log answers `from` and `to`, newest first, a page at a time.
 
-    The clock the adapter and the store read is `at`, so a test moves time by setting it.
+    The clock the adapter and the store read is `at`, so a test moves time by setting it. The
+    source stamps its rows by its own clock, which is `behind` ours.
     """
 
-    def __init__(self, monkeypatch, at, *, end_included=True):
+    def __init__(self, monkeypatch, at, *, end_included=True, behind=timedelta(0)):
         self.at, self.rows, self.asked, self.served, self.fail = at, [], [], [], False
-        self.end_included = end_included
+        self.end_included, self.behind = end_included, behind
         monkeypatch.setattr(core, "utc_now", lambda: self.at)
         monkeypatch.setattr(collection, "utcnow", lambda: self.at)
         monkeypatch.setattr(core, "make_http_client", lambda key: httpx.AsyncClient(
             transport=httpx.MockTransport(self.answer), follow_redirects=False, trust_env=False))
 
     def add(self, when, name):
-        self.rows.append((when, name))
+        self.rows.append((when - self.behind, name))
 
     def answer(self, request):
         assert request.method == "GET"
@@ -222,10 +233,13 @@ def stored_names(app):
         return sorted(db.scalars(select(Observation.domain)))
 
 
-def test_a_run_on_the_owners_shape_reads_what_is_new_and_is_not_partial(tmp_path, monkeypatch, caplog):
+def test_a_run_on_the_owners_shape_reads_what_is_new_and_is_partial_while_a_hole_is_in_the_window(
+        tmp_path, monkeypatch, caplog):
     """About 100 new lookups per 15 minutes: the first run fills its bound and is partial, the next reads 167 rows.
 
     A person pressing Collect straight after the scheduled run picks up the same way, from that run's end.
+    Those runs left nothing unread, but the source stays partly collected until the stretch the first
+    run left out, older than the oldest lookup it kept, has passed out of the window.
     """
     start = utcnow().replace(microsecond=0)
     log, app = Log(monkeypatch, start), live_app(tmp_path)
@@ -248,21 +262,30 @@ def test_a_run_on_the_owners_shape_reads_what_is_new_and_is_not_partial(tmp_path
             assert error is None and snapshot.partial_rows is None and log.served == [rows]
             assert log.asked[-1] == since - collection.RESUME_OVERLAP
             del log.served[:]
-        with app.state.session_factory() as db:
-            assert db.get(Integration, "dns").status == "connected"
-            assert [item for item in attention(db, app.state.settings) if item["kind"] == "source"] == []
         assert len(stored_names(app)) == 4100
+        # The oldest lookup the first run kept is 3,999 nine-second steps before it: 9 seconds short of ten hours.
+        for hours_on, status in ((timedelta(hours=14), "partial"), (timedelta(hours=14, seconds=10), "connected")):
+            log.at = start + hours_on
+            assert run(app, attempt=0)[1] is None
+            with app.state.session_factory() as db:
+                assert db.get(Integration, "dns").status == status
+                last = db.scalar(select(Audit).where(Audit.action == "integration.collected")
+                                 .order_by(Audit.created_at.desc()).limit(1))
+                assert last.details["partial"] is (status == "partial") and "rows_kept" not in last.details
+                assert bool([item for item in attention(db, app.state.settings) if item["kind"] == "source"]) is (
+                    status == "partial")
     # One line at the start and one at the end of each run, with what it cost and nothing it read.
     assert logging.getLogger("nyctr.collection").isEnabledFor(logging.INFO)
     lines = [record.getMessage() for record in caplog.records if record.name == "nyctr.collection"]
     assert lines[0] == ('Collection started: source="Office \\"DNS\\"\\nsecond line" by=schedule retry=0 '
                         "reading=since_last_read")
-    assert lines[1].startswith('Collection ended: source="Office \\"DNS\\"\\nsecond line" outcome=stored seconds=')
+    assert lines[1].startswith('Collection ended: source="Office \\"DNS\\"\\nsecond line" outcome=partial seconds=')
     assert lines[1].endswith("requests=2 waited_seconds=0.0 by=schedule retry=0 store_seconds=" +
                              lines[1].split("store_seconds=")[1])
     assert lines[1].split("store_seconds=")[1].split(" ", 1)[1] == (
         "items_read=173 items_new=100 lookups_read=167 lookups_new=100")
-    assert "by=person" in lines[2] and "lookups_read=67 lookups_new=0" in lines[3] and len(lines) == 4
+    assert "by=person" in lines[2] and "lookups_read=67 lookups_new=0" in lines[3] and len(lines) == 8
+    assert " outcome=partial " in lines[5] and " outcome=stored " in lines[7]
     assert not any(secret in line for line in lines for secret in (KEY, "abc123", ".example", "\n"))
 
 
@@ -296,21 +319,58 @@ def test_overlapping_runs_lose_and_repeat_nothing_across_a_restart_a_failure_and
     happen(start - timedelta(minutes=4), "shown-late.example")  # before the first read ended, visible after it
     happen(start + timedelta(minutes=14), "new.example")
     log.at = start + timedelta(minutes=15)
-    assert collect_once()[0][1] is None and log.asked[-1] == start - collection.RESUME_OVERLAP
+    # This source left out the three lookups at the first read's own end, so the newest one stored is the
+    # early one, and the read picks up ten minutes before it: the earlier of that and the read's end.
+    assert collect_once()[0][1] is None and log.asked[-1] == start - timedelta(hours=1) - collection.RESUME_OVERLAP
     assert stored_names(live_app(tmp_path)) == sorted(wanted)
-    # A failed run stores nothing, and the run after it reads the whole window again.
+    # A failed run stores nothing, so the run after it picks up where the last stored one ended:
+    # ten minutes before the newest lookup stored, which is the earlier of the two places.
     log.at, log.fail = start + timedelta(minutes=30), True
     assert collect_once()[0][0] is None
     log.at, log.fail = start + timedelta(minutes=45), False
     happen(log.at - timedelta(minutes=1), "after-failure.example")
     (_snapshot, error), edit = collect_once()
-    assert error is None and log.asked[-1] == log.at - timedelta(hours=24) and edit.status_code == 200
-    # So does the run after an edit, here to a shorter window.
+    assert error is None and log.asked[-1] == start + timedelta(minutes=14) - collection.RESUME_OVERLAP
+    assert edit.status_code == 200
+    # The run after an edit reads the whole window, here a shorter one.
     log.at = start + timedelta(minutes=60)
     assert collect_once()[0][1] is None and log.asked[-1] == log.at - timedelta(hours=12)
     log.at = start + timedelta(minutes=75)
-    assert collect_once()[0][1] is None and log.asked[-1] == start + timedelta(minutes=60) - collection.RESUME_OVERLAP
+    assert collect_once()[0][1] is None and log.asked[-1] == start + timedelta(minutes=44) - collection.RESUME_OVERLAP
     assert stored_names(live_app(tmp_path)) == sorted(wanted)
+
+
+@pytest.mark.parametrize("behind", [12, 20, 30, 60])
+def test_a_source_whose_clock_is_behind_loses_no_lookup(tmp_path, monkeypatch, behind):
+    """One lookup a minute for two hours, a collection every 15 minutes: the place to pick up is the source's own."""
+    start = utcnow().replace(microsecond=0)
+    log, app = Log(monkeypatch, start, behind=timedelta(minutes=behind)), live_app(tmp_path)
+    with TestClient(app):
+        add_source(app, monkeypatch)
+        for quarter in range(10):
+            log.at = start + timedelta(minutes=15 * quarter)
+            for minute in range(15 if 0 < quarter < 9 else 0):
+                log.add(log.at - timedelta(minutes=15) + timedelta(minutes=minute, seconds=30),
+                        f"m{quarter}-{minute}.example")
+            assert run(app, attempt=0)[1] is None
+        assert len(stored_names(app)) == len(log.rows) == 120
+        with app.state.session_factory() as db:
+            assert db.get(Integration, "dns").status == "connected"
+
+
+def test_a_read_end_written_by_a_clock_that_was_ahead_loses_no_lookup(tmp_path, monkeypatch):
+    """The last read's end is 20 minutes later than it was: the newest stored lookup says where to pick up."""
+    start = utcnow().replace(microsecond=0)
+    log, app = Log(monkeypatch, start + timedelta(minutes=20)), live_app(tmp_path)
+    with TestClient(app):
+        add_source(app, monkeypatch)
+        log.add(start - timedelta(minutes=1), "before.example")
+        assert run(app, attempt=0)[1] is None
+        log.at = start + timedelta(minutes=15)  # a copy with the right clock reads 15 real minutes later
+        for minute in range(1, 15):
+            log.add(start + timedelta(minutes=minute), f"minute{minute}.example")
+        assert run(app, attempt=0)[1] is None and log.asked[-1] == start - timedelta(minutes=11)
+        assert len(stored_names(app)) == 15
 
 
 def dump(app):
@@ -328,7 +388,7 @@ def test_reads_that_pick_up_leave_exactly_what_reads_of_the_whole_window_would(t
         log, app = Log(monkeypatch, start), live_app(tmp_path / folder)
         (tmp_path / folder).mkdir()
         if not resume:
-            monkeypatch.setattr(collection, "_resume_from", lambda db, integration: None)
+            monkeypatch.setattr(collection, "_resume_from", lambda db, integration: (None, None))
         log.add(start - timedelta(hours=23, minutes=50), "leaving.example")
         log.add(start - timedelta(hours=1), "staying.example")
         with TestClient(app):
@@ -387,3 +447,126 @@ def test_only_a_source_that_declares_it_is_asked_to_read_its_log_from_a_time(mon
             now - timedelta(minutes=25), now + timedelta(hours=1))] == [window, window, now - timedelta(minutes=25), now]
     assert core.log_read(window, None, now)[1] == {
         "window_from": window.isoformat(), "read_from": window.isoformat(), "read_to": now.isoformat()}
+
+
+def item(name, kind="domain", evidence="observed", **attributes):
+    """Build one fabricated item of the DNS source."""
+    return {"id": f"dns:{kind}:{name}", "name": name, "kind": kind, "provider": "nextdns", "source_id": name,
+            "site_id": None, "evidence_kind": evidence, "observed_at": utcnow().isoformat(), "attributes": attributes}
+
+
+def link(name, source, target, **attributes):
+    """Build one fabricated relationship between two items."""
+    return {"id": f"dns:relation:{name}", "source": source["id"], "target": target["id"], "kind": "blocked_dns_query",
+            "provider": "nextdns", "evidence_kind": "observed", "observed_at": utcnow().isoformat(),
+            "attributes": attributes}
+
+
+def lookup(key):
+    """Build one fabricated blocked lookup."""
+    return {"id": f"dns:block:{key}", "device_id": None, "device_name": "Unattributed DNS client",
+            "domain": "a.example", "source": "nextdns", "reason": "Fabricated list",
+            "observed_at": utcnow().isoformat(), "evidence_kind": "observed", "attribution": "unattributed",
+            "risk_score": None, "risk_explanation": "Unassessed"}
+
+
+def apply(app, snapshot, source="dns"):
+    """Stage one snapshot for a source through the store's own routine and commit it."""
+    with app.state.session_factory() as db:
+        new = collection.apply_snapshot(db, db.get(Integration, source), snapshot, app.state.settings)
+        db.commit()
+        return new
+
+
+def test_an_answer_that_repeats_an_identifier_is_stored_once_and_the_last_one_stands(tmp_path, monkeypatch):
+    """An item, a relationship and a lookup listed twice are each one row; a guest listed twice is one sighting
+    for each access point it was listed on."""
+    app = live_app(tmp_path)
+    with TestClient(app):
+        add_source(app, monkeypatch)
+        profile, address = item("p", "dns_profile", "configured"), item("a.example")
+        phone = [item("phone", "client", guest={"authorized": True}, uplink=uplink)
+                 for uplink in ("ap-1", "ap-1", "ap-2")]
+        assert apply(app, Snapshot(
+            resources=[profile, address, {**address, "name": "named again"}, *phone],
+            relationships=[link("one", profile, address, order=1), link("one", profile, address, order=2)],
+            blocks=[lookup(1), lookup(1)])) == (3, 1)
+        with app.state.session_factory() as db:
+            assert db.get(Resource, address["id"]).name == "named again"
+            assert [row.attributes for row in db.scalars(select(Relationship))] == [{"order": 2}]
+            assert db.scalar(select(func.count()).select_from(Observation)) == 1
+            assert sorted(db.scalars(select(Sighting.uplink_id))) == ["ap-1", "ap-2"]
+
+
+def test_what_a_store_refuses_and_what_a_read_that_picked_up_carries(tmp_path, monkeypatch):
+    """A lookup identifier another source holds is refused. On a read that picked up, a relationship may
+    join only what that answer names, and only observed items it did not name are kept from being missing."""
+    app, now = live_app(tmp_path), utcnow()
+    with TestClient(app):
+        add_source(app, monkeypatch)
+        with app.state.session_factory() as db:
+            db.add(Integration(id="other", provider="nextdns", name="Other DNS", config={"profile_id": "def456"},
+                               secret_ref="NYCTR_CONNECTOR_SECRET_DNS", status="configured"))
+            db.commit()
+        profile, rules, address = item("p", "dns_profile", "configured"), item("rules", "policy", "configured"), \
+            item("a.example")
+        apply(app, Snapshot(resources=[profile, rules, address], blocks=[lookup(1)]))
+        with pytest.raises(ValueError, match="Observation identity crosses"):
+            apply(app, Snapshot(blocks=[lookup(1)]), source="other")
+        picked_up = {"window_from": (now - timedelta(hours=24)).isoformat(),
+                     "read_from": (now - timedelta(minutes=25)).isoformat(), "read_to": now.isoformat()}
+        with pytest.raises(ValueError, match="outside this snapshot"):
+            apply(app, Snapshot(resources=[profile], relationships=[link("kept", profile, address)], log=picked_up))
+        apply(app, Snapshot(resources=[profile], log=picked_up))
+        with app.state.session_factory() as db:
+            assert [row.id for row in db.scalars(select(Resource).order_by(Resource.id))
+                    if row.attributes.get("missing_from_latest_snapshot")] == [rules["id"]]
+            assert db.scalar(select(func.count()).select_from(Observation)) == 1
+
+
+def test_two_analyses_never_run_at_once_and_neither_runs_on_the_servers_loop(tmp_path, monkeypatch):
+    """A scheduled pass and a person's Collect that find the same new finding: the second waits for the
+    first to be stored, and neither fails."""
+    app = live_app(tmp_path)
+    factory, settings = app.state.session_factory, app.state.settings
+    arrived, inside, go, threads = threading.Semaphore(0), threading.Event(), threading.Event(), []
+    lock, refresh = analysis.ONE_AT_A_TIME, analysis.refresh_findings
+
+    class Watched:
+        """The analysis lock, saying when someone arrives at it."""
+
+        def __enter__(self):
+            arrived.release()
+            lock.acquire()
+
+        def __exit__(self, *_error):
+            lock.release()
+
+    def held(db):
+        refresh(db)  # the finding is staged and flushed, not yet committed
+        threads.append(threading.get_ident())
+        if not inside.is_set():
+            inside.set()
+            assert go.wait(30)
+    monkeypatch.setattr(analysis, "ONE_AT_A_TIME", Watched())
+    monkeypatch.setattr(analysis, "refresh_findings", held)
+
+    async def scenario():
+        scheduled = asyncio.create_task(worker._analyse(factory, settings))
+        assert await asyncio.to_thread(inside.wait, 30)
+        person = asyncio.create_task(collection.off_loop(lambda: collection.analyse(factory, settings)))
+        for _ in range(2):  # the scheduled analysis, which holds the lock, and the person's, which waits at it
+            assert await asyncio.to_thread(arrived.acquire, True, 30)
+        go.set()
+        await asyncio.gather(scheduled, person)
+    with TestClient(app):
+        add_source(app, monkeypatch)
+        with factory() as db:
+            db.add(Resource(id="dns:dns_profile:p", integration_id="dns", name="Profile", kind="dns_profile",
+                            provider="nextdns", source_id="p", evidence_kind="configured", observed_at=utcnow(),
+                            attributes={"logs_enabled": False}, classification="infrastructure"))
+            db.commit()
+        asyncio.run(scenario())
+        with factory() as db:
+            assert db.scalar(select(func.count()).select_from(Finding)) == 1
+    assert len(threads) == 3 and threading.get_ident() not in threads[:2]
