@@ -444,6 +444,7 @@ describe('recognising devices at sign-in, in Setup', () => {
     user_name: who,
     device_id: 'laptop',
     device_name: 'Laptop',
+    address: '192.0.2.10',
     first_at: '2026-11-14T09:00:00Z',
     last_at: '2026-11-15T09:00:00Z',
     ended_at,
@@ -507,9 +508,11 @@ describe('recognising devices at sign-in, in Setup', () => {
       });
       render(<Setup params={new URLSearchParams('tab=people')} />);
       expect(
-        await screen.findByText(/Sam signed in on it, last on/, undefined, wait),
+        await screen.findByText(/Sam signed in on it from 192\.0\.2\.10, last on/, undefined, wait),
       ).toBeDefined();
-      expect(screen.getByText(/Kim signed in on it on .+ and was not tied to it/)).toBeDefined();
+      expect(
+        screen.getByText(/Kim signed in on it from 192\.0\.2\.10 on .+ and was not tied to it/),
+      ).toBeDefined();
       expect(document.body.textContent).not.toContain('Lee'); // an ended tie is not listed under the device
       expect(screen.getAllByRole('button', { name: /^End / })).toHaveLength(1);
       expect(screen.getByText('End this tie')).toBeDefined();

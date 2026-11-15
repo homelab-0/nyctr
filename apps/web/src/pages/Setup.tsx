@@ -22,6 +22,7 @@ import type {
   DeviceLabel,
   Person,
   Presence,
+  PresenceRow,
   Resource,
   Rules,
   WriteMode,
@@ -138,6 +139,9 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   );
 }
 
+/** Where a person signed in from, for the line under a device. Empty when the record holds no address. */
+const from = (item: PresenceRow) => (item.address ? ` from ${item.address}` : '');
+
 /** Who each device belongs to, and which inventory device a DNS label really is. */
 function PeoplePanel() {
   const devices = useApi<Resource[]>('/devices');
@@ -208,8 +212,8 @@ function PeoplePanel() {
                         .map((item) => (
                           <div className="muted tiny" key={item.id}>
                             {item.kind === 'tie'
-                              ? `${item.user_name} signed in on it, last on ${dateTime(item.last_at)}. `
-                              : `${item.user_name} signed in on it on ${dateTime(item.last_at)} and was not tied to it, because it is someone else's.`}
+                              ? `${item.user_name} signed in on it${from(item)}, last on ${dateTime(item.last_at)}. `
+                              : `${item.user_name} signed in on it${from(item)} on ${dateTime(item.last_at)} and was not tied to it, because it is someone else's.`}
                             {item.kind === 'tie' && (
                               <button
                                 className="button quiet small"

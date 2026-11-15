@@ -535,6 +535,8 @@ export interface PresenceRow {
   first_at: string;
   last_at: string;
   ended_at: string | null;
+  /** Where the request came from. Only an administrator is given it. */
+  address?: string | null;
 }
 /** A member's own ties, or for an administrator every tie and conflict with the setting. */
 export interface Presence {
