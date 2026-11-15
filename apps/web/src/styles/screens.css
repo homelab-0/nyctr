@@ -109,6 +109,17 @@ button.row.on {
   letter-spacing: -0.01em;
   max-width: 60ch;
 }
+.tier {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.tier ul {
+  padding-left: 18px;
+  list-style: disc;
+}
 .bandbar {
   display: flex;
   height: 10px;

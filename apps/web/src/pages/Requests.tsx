@@ -187,7 +187,11 @@ export default function Requests({
                 </div>
                 <RiskScale
                   value={row.risk_score}
-                  limit={rules.data?.access.enabled ? rules.data.access.max_score : undefined}
+                  limit={
+                    rules.data?.access.enabled && rules.data.access.ad_tracker.mode === 'on'
+                      ? rules.data.access.ad_tracker.max_score
+                      : undefined
+                  }
                 />
                 {row.risk_factors && <Factors items={row.risk_factors} />}
                 {row.decision_note && <p className="aside">{row.decision_note}</p>}
