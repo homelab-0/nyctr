@@ -11,6 +11,7 @@ import {
   Switch,
   kindIcon,
 } from '../components/ui';
+import { isMissing, missingFor } from '../lib/counts';
 import { span, useNow, writeText } from '../lib/format';
 import { UNREACHABLE, nextCollection, useSchedule } from '../lib/schedule';
 import type {
@@ -197,7 +198,8 @@ function PeoplePanel() {
                     <th>
                       <span className="srcn">
                         <Icon size={15} /> {row.name}
-                      </span>
+                      </span>{' '}
+                      {isMissing(row) && <span className="tag yellow">{missingFor(row)}</span>}
                     </th>
                     <td className="muted mono">{String(row.attributes.ip || '')}</td>
                     <td>

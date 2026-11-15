@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Sparkles } from 'lucide-react';
 import { useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
-import { counted, lookupSpan, namedCounts } from '../lib/counts';
+import { counted, lookupSpan, namedCounts, notSeen } from '../lib/counts';
 import { failing, uncollected, waitingText, whyEmpty } from '../lib/coverage';
 import { ago, atSource, isOpen, left, useNow, word } from '../lib/format';
 import { askNyctr, hrefFor } from '../lib/links';
@@ -64,6 +64,7 @@ function needHref(item: AttentionItem) {
 function briefingCounts(overview: Overview, now: number, connected: Integration[] | null) {
   if (!overview.integration_count) return 'No sources are connected yet.';
   const named = namedCounts(overview.kind_counts || {});
+  const gone = Object.values(overview.missing_counts || {}).reduce((sum, count) => sum + count, 0);
   const sources = counted(overview.integration_count, 'source');
   // A count with no working collection behind it is not a zero: it has not been collected.
   const dns = uncollected(connected, 'dns.blocks');
@@ -80,6 +81,7 @@ function briefingCounts(overview: Overview, now: number, connected: Integration[
         );
   return [
     named ? `${named} from ${sources}.` : `Nothing inventoried yet from ${sources}.`,
+    gone && `${notSeen(gone)}.`,
     waitingText(connected),
     span,
   ]

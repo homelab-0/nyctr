@@ -211,5 +211,6 @@ PROVIDER = Provider(
             "Some firewall switches could not be read",
             "Affected guests show their firewall state as unknown, not as off."),
     },
+    detail_gaps=frozenset({"proxmox_firewall_options_unavailable"}),
     validate=validate, collect=collect_proxmox,
 )

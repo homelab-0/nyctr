@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, access, assistant, guests, model, query, removal, worker
+from . import __version__, access, assistant, guests, model, query, removal, retention, worker
 from . import blocks as block_list
 from .collection import (  # noqa: F401
     after_collection,
@@ -327,8 +327,12 @@ def create_app(settings: Settings | None = None):
         live = Observation.expires_at > utcnow()
         blocks, oldest, newest = db.execute(select(func.count(), func.min(Observation.observed_at),
                                                    func.max(Observation.observed_at)).where(live)).one()
-        kinds = dict(db.execute(select(Resource.kind, func.count()).group_by(Resource.kind)).all())
-        return {"resource_count": count(Resource), "kind_counts": kinds,
+        # What a source left out of its latest whole read is counted apart, never as present.
+        by_kind = select(Resource.kind, func.count()).group_by(Resource.kind)
+        missing = dict(db.execute(by_kind.where(retention.flagged())).all())
+        kinds = {kind: items - missing.get(kind, 0) for kind, items in db.execute(by_kind).all()
+                 if items > missing.get(kind, 0)}
+        return {"resource_count": sum(kinds.values()), "kind_counts": kinds, "missing_counts": missing,
                 "relationship_count": count(Relationship), "finding_count": count(Finding),
                 "recent_block_count": blocks, "oldest_block_at": oldest and utc(oldest),
                 "newest_block_at": newest and utc(newest),
@@ -347,10 +351,13 @@ def create_app(settings: Settings | None = None):
         An unknown focus returns 404. Expansion follows relationships in either
         direction and does not treat them as proof of successful network access.
         """
-        nodes = list(db.scalars(select(Resource)))
+        # What a source no longer reports is not drawn, unless it is the item asked for. Inventory lists it.
+        nodes = [n for n in db.scalars(select(Resource)) if n.id == focus or not retention.is_missing(n)]
+        drawn = {n.id for n in nodes}
         edges = [relationship_json(e) for e in db.scalars(select(Relationship))]
         # Cross-source links are worked out at read time and always labelled inferred.
         edges += derived_links(nodes)
+        edges = [e for e in edges if e["source"] in drawn and e["target"] in drawn]
         if focus:
             if not any(n.id == focus for n in nodes):
                 raise HTTPException(404, "Resource not found")

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useApi } from '../api';
 import { Empty, ErrorState, Loading, Panel, SearchInput } from '../components/ui';
-import { counted } from '../lib/counts';
+import { counted, namedCounts, namedTotal } from '../lib/counts';
 import { REMOVAL, clock } from '../lib/format';
 import type { AuditEvent, Integration, Person } from '../types';
 
@@ -50,6 +50,7 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
   'integration.collection_failed': (name) => `Could not collect from ${name}`,
   'integration.diagnosed': (name) => `Tested ${name}`,
   'integration.removed': (name) => `Removed the source ${name}`,
+  'inventory.dropped': (name) => `Dropped what has left ${name}`,
   'integration.updated': (name) => `Edited the source ${name}`,
   'integration.retries_stopped': (name) => `Stopped retrying ${name} and showed it as failed`,
 };
@@ -203,7 +204,18 @@ function summary(event: AuditEvent) {
     parts.push(
       `settled ${d.looked < 90 ? counted(d.looked, 'second') : counted(Math.round(d.looked / 60), 'minute')} after the attempt`,
     );
-  if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
+  // What was dropped is said by kind. Where a kind has no plain name the total is said first, so
+  // an item of such a kind is still counted.
+  const dropped =
+    event.action === 'inventory.dropped' && d.kinds && typeof d.kinds === 'object'
+      ? (d.kinds as Record<string, number>)
+      : null;
+  const kinds = dropped ? namedCounts(dropped) : '';
+  if (typeof d.resources === 'number') {
+    const total = counted(d.resources, 'item');
+    if (!kinds) parts.push(total);
+    else parts.push(namedTotal(dropped!) === d.resources ? kinds : `${total} (${kinds})`);
+  }
   if (typeof d.observations === 'number') parts.push(counted(d.observations, 'blocked lookup'));
   if (d.partial === true) parts.push('most recent only');
   // Only the count: the codes are for the record, and the source's card says what each means.

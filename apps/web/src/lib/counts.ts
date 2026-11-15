@@ -21,6 +21,20 @@ export const number = (value: number) => value.toLocaleString('en-US');
 export const counted = (value: number, one: string, many = `${one}s`) =>
   `${number(value)} ${value === 1 ? one : many}`;
 
+/** Whether an item's source left it out of its latest read. It stays listed, marked, until it is dropped. */
+export const isMissing = (row: { attributes: Record<string, unknown> }) =>
+  Boolean(row.attributes.missing_from_latest_snapshot);
+
+/** The mark on a missing item, with how long ago a collection first missed it when that is on record. */
+export const missingFor = (row: { attributes: Record<string, unknown> }, now = Date.now()) =>
+  typeof row.attributes.missing_since === 'string'
+    ? `Missing, first missed ${ago(row.attributes.missing_since, now)}`
+    : 'Missing from last collection';
+
+/** How many stored items were not in the latest collection, said wherever the present ones are counted. */
+export const notSeen = (missing: number) =>
+  missing ? `${number(missing)} not seen at the last collection` : '';
+
 const NOUNS: [Exclude<Group, 'all'> | 'blocked', string, string][] = [
   ['devices', 'device', 'devices'],
   ['gear', 'piece of network equipment', 'pieces of network equipment'],
@@ -41,6 +55,11 @@ export function namedCounts(kinds: Record<string, number>) {
   if (parts.length < 2) return parts.join('');
   return `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 }
+
+/** How many of these items are of a kind `namedCounts` has a name for. */
+export const namedTotal = (kinds: Record<string, number>) =>
+  NAMED.reduce((sum, kind) => sum + (kinds[kind] || 0), 0);
+const NAMED = ['domain', ...Object.values(GROUPS).flatMap((group) => group.kinds ?? [])];
 
 /**
  * How many blocked lookups are stored and the span they actually cover, from the oldest and

@@ -1,13 +1,15 @@
 """Background upkeep: close expired access, and collect on the schedule in force.
 
-Runs inside each API process. Every 30 seconds a tick does two separate things,
-and neither waits for the other. It ends the exceptions whose time is up, so
+Runs inside each API process. Every 30 seconds a tick does three separate things,
+and none waits for another. It ends the exceptions whose time is up, so
 temporary access ends even if nobody opens the console and however long a
 collection takes. And it starts a collection pass unless this copy's previous
 pass is still going: the pass claims the scheduled run if one is due, collects
 each source in turn, then runs the retries that are due. The schedule is read
 from the database at every pass, so a change an administrator saves applies at
-the next pass on every running copy, and it never runs in demo mode.
+the next pass on every running copy, and it never runs in demo mode. And it
+clears out, on a worker thread, the lookups whose time is up and, once an hour
+for each source, what has left it (`retention`).
 
 A scheduled collection that fails for a reason that may pass is retried up to
 three times before the source is shown as failed (see `schedule.plan_retry`).
@@ -21,7 +23,7 @@ import logging
 
 from sqlalchemy import select, update
 
-from . import schedule
+from . import retention, schedule
 from .access import OPEN, BeingEnded, clear_stale_reviews, end_lease
 from .collection import analyse, collect_integration, off_loop
 from .guests import enforce
@@ -193,9 +195,14 @@ class Upkeep:
         self.factory, self.settings, self.clock = factory, settings, clock
         self.collecting: asyncio.Task | None = None
         self.ending: dict[str | None, asyncio.Task] = {}
+        self.clearing: asyncio.Task | None = None
+        self.dropped: dict = {}  # When each source was last gone through for what has left it.
 
     def tick(self) -> None:
-        """Start a collection pass if none is going, then the endings that are due.
+        """Start a collection pass if none is going, the endings that are due, and the clearing out.
+
+        Lookups whose time is up go at every tick; what has left a source is looked for once
+        an hour, and at the next tick when a collection had the source (`retention`). Neither calls a source, and neither runs on the server's loop.
 
         A run or retry that comes due during a pass is not claimed until the pass
         ends, so it stays due in the database for the next tick, or for another copy.
@@ -214,6 +221,23 @@ class Upkeep:
             # Endings still going at this source cover it; what they miss is due again next tick.
             if source not in self.ending or self.ending[source].done():
                 self.ending[source] = asyncio.create_task(end_at_source(self.factory, self.settings, lease_ids))
+        # Clearing out touches no source and is blocking database work, so it has its own thread.
+        if self.clearing is None or self.clearing.done():
+            self.clearing = asyncio.create_task(self._clear(self.clock()))
+
+    async def _clear(self, now) -> None:
+        """Remove the lookups whose time is up and go through each source whose hour has come for what has left it.
+
+        Off the server's loop, as a collection's store is. Each source has its own hour, counted
+        from when it was last gone through. One that a collection had at that moment is tried
+        again at the next tick, so a collection that falls on the same tick every hour cannot
+        keep a source from ever being cleared. A failure is logged without its cause text.
+        """
+        try:
+            await off_loop(lambda: retention.expire_lookups(self.factory, now))
+            await off_loop(lambda: retention.drop(self.factory, now, self.dropped))
+        except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
+            log.warning("Background upkeep failed: %s", type(error).__name__)
 
     async def _collect(self) -> None:
         """Run one collection pass. A failure is logged without its cause text; the next tick starts another."""
@@ -224,7 +248,7 @@ class Upkeep:
 
     async def stop(self) -> None:
         """Cancel whatever is still going and wait until it has stopped."""
-        tasks = [task for task in (self.collecting, *self.ending.values()) if task]
+        tasks = [task for task in (self.collecting, self.clearing, *self.ending.values()) if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

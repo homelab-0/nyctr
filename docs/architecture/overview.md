@@ -80,6 +80,75 @@ exceptions ahead of it at that same source, however long a collection takes. A
 run or retry that comes due during a pass is not claimed until the pass ends;
 it stays due in the database for the next tick, or for another copy.
 
+The tick also clears out what Nyctr no longer needs, without calling a source
+and on a worker thread, so the server goes on answering meanwhile. Blocked
+lookups whose time is up are removed at every tick; a request keeps its own
+copy of what it asked about. Once an hour it looks for what has left each
+source (`nyctr/retention.py`):
+
+- A collection that listed a kind of item in full marks every stored item of
+  that kind it did not list as missing, with the time, and notes the day. A
+  missing item is kept, stays in Inventory with its mark, and is not counted
+  as present or drawn on the Map. When its source lists it again it is the
+  same item, with its owner, its assignment and its label links.
+- A missing item is dropped when whole reads of its kind on at least 7
+  separate days, the last of them 7 days after the first, all left it out and
+  no read in between listed it. One read says only that the item was not
+  there at that moment, so a source that was down, or is collected by hand
+  now and then, drops nothing until it has been read on 7 days. The number is
+  `KEEP_DAYS` in `nyctr/retention.py`. A day on which the kind was in doubt
+  neither counts nor starts the count again: nobody knows whether the item
+  was there that day, so the days before it still stand and the day itself
+  adds nothing. An item that comes back later is a new item.
+- What a person attached something to is never dropped by itself: a device
+  assigned to someone or filed by an administrator, and an item with a DNS
+  label link on either side. It stays, marked missing and not counted, until
+  an administrator removes the assignment or the link, or removes the source.
+  Setup's table says how long it has been missing.
+- A blocked address is kept by its lookups instead of the 7 days: it goes when
+  no stored lookup from its source names it.
+- A collection that read a log only from where the last one ended counts what
+  earlier reads took from the log, and is still inside the window, as listed,
+  and takes any mark off it. It vouches only for the stretch it read: while
+  the stored log is not whole from the window's start (a read before it kept
+  only part, or hit a gap) it is in doubt for the same kinds, and marks and
+  counts nothing of them. Each collection records what it left in doubt
+  (`unread`) and from when nothing is in doubt (`unread_from`), beside how
+  far back the stored log has no hole (`whole_from`), which a gap does not
+  move.
+- Not knowing is not the same as gone. Nothing is marked, and no day is
+  counted, on a collection that kept only its most recent rows, did not list
+  the kind in full, or recorded a gap that could have hidden items (the
+  integration declares which gaps cannot, see the integration contract).
+  Nothing is dropped while a source's latest collection failed, while it is
+  being collected, after an edit that sent it back to be tested, or before a
+  collection has recorded what it read in full.
+- Each source is gone through once an hour, counted from when it last was. A
+  source that a collection has at that moment is tried again at the next
+  tick, so a collection that falls on the same tick every hour cannot keep a
+  source from being cleared.
+- What may go is read once a run, with no lock held: the source's blocked
+  addresses and the addresses its stored lookups name are each read through
+  the index on their source and compared, so the cost grows with their sum.
+  The drop then works in batches of 500 items, each in its own transaction
+  that locks the source's row first, as the store step of a collection does.
+  Lookups are stored only by that step, so a batch that finds a collection
+  has stored since the read stops, and the run starts again at the next
+  tick. So a drop and a store of one
+  source never work at once: a collection waits for one batch at most, and a
+  collection that has taken the source stops the run until the next tick.
+  SQLite has one write lock for the whole database, so there a batch keeps
+  every other write waiting; the run pauses between batches to let them in.
+- An item Nyctr still holds something on is kept, marked missing, until that
+  ends: a blocked address with an open or unconfirmed exception or a waiting
+  request; a device a stored lookup is tied to; a guest Nyctr cut off or
+  locked out, or whose access at the source has not run out. Guest passes are
+  not items and are never dropped here. No lookup, request or audit record
+  goes with a dropped item.
+- Each run writes one audit record for each source that lost something, with
+  how many of each kind went; Activity shows it. A run that drops nothing
+  records nothing, and one source that fails does not stop the others.
+
 An exception is ended at the source once, whoever asks: the tick, someone
 opening the list of exceptions, an administrator ending it, or another copy.
 Before Nyctr reads or changes an entry at a source, to open an exception or
@@ -176,7 +245,9 @@ future reconciliation layer must preserve evidence before joining records.
 
 Each graph edge is **observed**, **configured**, or **inferred**. Physical
 attachment, VLAN membership, hosting, policy application and DNS resolution are
-different relationships. Unknown or stale evidence stays visible. There is no
+different relationships. Unknown or stale evidence stays visible, and an item its
+source has stopped reporting is marked and counted apart until it is dropped
+(see the upkeep loop above). There is no
 claim of a proven end-to-end traffic path merely because nodes are connected.
 
 ## Integration contract

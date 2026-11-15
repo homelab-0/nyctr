@@ -11,7 +11,7 @@ import {
   SourceTag,
   kindIcon,
 } from '../components/ui';
-import { GROUPS, UNLISTED, type Group } from '../lib/counts';
+import { GROUPS, UNLISTED, isMissing, notSeen, type Group } from '../lib/counts';
 import { failing, uncollected, whyEmpty } from '../lib/coverage';
 import { ago, useNow } from '../lib/format';
 import type { Integration, Person, Resource } from '../types';
@@ -81,9 +81,11 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
           value={group}
           onChange={setGroup}
           options={(Object.keys(GROUPS) as Group[]).map((id) => {
+            // A tab counts what is present. What has left stays in the list below, marked.
             const count = all.filter(
               (row) =>
-                !GROUPS[id].kinds || (GROUPS[id].kinds as readonly string[]).includes(row.kind),
+                !isMissing(row) &&
+                (!GROUPS[id].kinds || (GROUPS[id].kinds as readonly string[]).includes(row.kind)),
             ).length;
             return {
               id,
@@ -94,6 +96,12 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
         />
         <SearchInput value={text} onChange={setText} placeholder="Find by name, address or model" />
       </div>
+      {rows.some(isMissing) && (
+        <p className="muted" role="status">
+          {notSeen(rows.filter(isMissing).length)}. Each is marked below and is not counted above.
+          Nyctr drops one that stays away.
+        </p>
+      )}
       {rows.length > 0 && stale.length > 0 && (
         <div className="note yellow" role="status">
           <div>
@@ -139,7 +147,7 @@ export default function Inventory({ params }: { params: URLSearchParams }) {
               <tbody>
                 {rows.map((row) => {
                   const Icon = kindIcon(row.kind);
-                  const missing = Boolean(row.attributes.missing_from_latest_snapshot);
+                  const missing = isMissing(row);
                   return (
                     <tr
                       key={row.id}

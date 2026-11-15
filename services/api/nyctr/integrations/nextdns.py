@@ -93,6 +93,10 @@ def _domain(value: Any) -> str:
     return domain
 
 
+# The kinds of item that exist only because a lookup named them, so a log not read in full leaves them in doubt.
+FROM_LOOKUPS = ("domain", "client")
+
+
 async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: str,
                           since: datetime | None = None) -> Snapshot:
     """Collect profile controls and recent blocks without assigning users or risk.
@@ -156,10 +160,13 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             core.record_gap("nextdns_policy_fields_missing")
         if type(log_settings.get("enabled")) is not bool:
             core.record_gap("nextdns_log_settings_unknown")
+            # The log is still asked for, but an empty answer may only mean that logging is off.
+            snapshot.unread = list(FROM_LOOKUPS)
         if log_settings.get("enabled") is False:
             core.record_capability("blocked_dns_logs:read", unavailable=True)
             snapshot.capabilities = [x for x in snapshot.capabilities if x != "blocked_dns_logs:read"]
             snapshot.capabilities.append("blocked_dns_logs:disabled_at_source")
+            snapshot.unread = list(FROM_LOOKUPS)  # Not read is not gone.
             return snapshot
         # The published API returns logs "from newest to oldest" under sort=desc, so when the
         # stretch holds more than one collection may read, the rows kept are the most recent.
@@ -170,6 +177,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
         })
         if more:
             snapshot.partial_rows = len(logs)
+            snapshot.unread = list(FROM_LOOKUPS)
         for row in logs:
             # Never classify another status as a block just because a query asked
             # for blocked records. Providers may return unexpected records.
@@ -268,6 +276,9 @@ PROVIDER = Provider(
             "The source logging setting is unknown",
             "The profile did not explicitly report whether logging is enabled. Any successful log read describes only the requested window."),
     },
+    # With the logging setting unknown the read itself names what came from lookups as unread;
+    # the profile and its policy sections were still read in full.
+    detail_gaps=frozenset({"nextdns_log_settings_unknown"}),
     validate=validate, collect=collect_nextdns, classify=classify, resumes=True,
     allow_domain=actions.nextdns_allow, disallow_domain=actions.nextdns_disallow,
     domain_listed=actions.nextdns_listed,
