@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+import secrets
 import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -10,10 +12,10 @@ import httpx
 import pytest
 from conftest import live_app, live_signin
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select
+from sqlalchemy import create_engine, event, func, select, text
 from test_guests import live_guest
 
-from nyctr import analysis, collection, integrations, worker
+from nyctr import analysis, collection, integrations, removal, worker
 from nyctr.assistant import attention
 from nyctr.collection import collect_integration
 from nyctr.guests import enforce
@@ -31,6 +33,7 @@ from nyctr.models import (
 )
 
 KEY = "fabricated-key-never-logged"
+POSTGRES = "NYCTR_TEST_POSTGRES"
 NAME = 'Office "DNS"\nsecond line'
 
 
@@ -546,6 +549,24 @@ def test_what_a_store_refuses_and_what_a_read_that_picked_up_carries(tmp_path, m
             assert db.scalar(select(func.count()).select_from(Observation)) == 1
 
 
+def postgres_database(request) -> dict:
+    """An empty database of this test's own on the PostgreSQL server named in the environment, as a
+    `live_app` override; nothing when no server is named. The database is dropped when the test ends."""
+    server = os.environ.get(POSTGRES)
+    if not server:
+        return {}
+    name, admin = f"t_{secrets.token_hex(8)}", create_engine(server + "postgres", isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:
+        connection.execute(text(f"create database {name}"))
+
+    def drop():
+        with admin.connect() as connection:
+            connection.execute(text(f"drop database if exists {name} with (force)"))
+        admin.dispose()
+    request.addfinalizer(drop)
+    return {"database_url": server + name}
+
+
 def held_analysis(monkeypatch):
     """Hold the first analysis after it has staged its findings, until `go`; say who arrives at the lock."""
     arrived, inside, go, threads = threading.Semaphore(0), threading.Event(), threading.Event(), []
@@ -642,7 +663,7 @@ def test_an_analysis_and_a_refresh_of_findings_each_wait_for_the_lock(tmp_path, 
             assert ran == [1] and db.scalar(select(func.count()).select_from(Finding)) == 1
 
 
-def test_a_guest_action_during_an_analysis_that_holds_a_new_finding_is_recorded_and_answered(tmp_path, monkeypatch):
+def test_a_guest_action_during_an_analysis_that_holds_a_new_finding_is_recorded_and_answered(tmp_path, monkeypatch, request):
     """An administrator cuts a guest off while an analysis holds a finding it has not stored yet: the action
     is on record before the findings are touched, the refresh waits its turn, and the answer is 200."""
     sent = []
@@ -654,9 +675,10 @@ def test_a_guest_action_during_an_analysis_that_holds_a_new_finding_is_recorded_
     monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", KEY)
     monkeypatch.setattr(core, "make_http_client", lambda key, **_: httpx.AsyncClient(
         transport=httpx.MockTransport(source), headers={"X-Api-Key": key}, follow_redirects=False))
-    app = live_app(tmp_path, provider_writes="unifi_network")
+    app = live_app(tmp_path, provider_writes="unifi_network", **postgres_database(request))
     if app.state.engine.dialect.name == "sqlite":
-        pytest.skip("SQLite has one writer: while an analysis holds a finding, the action's own write waits for it")
+        pytest.skip("SQLite has one writer, so the action's own write waits for the analysis. "
+                    f"Set {POSTGRES} to a PostgreSQL server's address ending in / to run this.")
     factory, answers = app.state.session_factory, []
     arrived, inside, go, threads = held_analysis(monkeypatch)
     with TestClient(app) as client:
@@ -684,3 +706,19 @@ def test_a_guest_action_during_an_analysis_that_holds_a_new_finding_is_recorded_
             ids = [row.id for row in db.scalars(select(Finding))]
             assert len(ids) == len(set(ids)) and len(ids) >= 2
     assert threading.get_ident() not in threads
+
+
+def test_a_guest_action_is_answered_when_its_source_is_removed_during_the_refresh(client, app, admin_headers,
+                                                                                  monkeypatch):
+    """The source, and the guest device with it, is removed while the refresh of findings waits its turn:
+    the administrator is still told what was just done, never an error."""
+    def removed_meanwhile(bind):
+        with app.state.session_factory() as db:
+            removal.remove(db, db.get(Integration, db.get(Resource, "guest-hvac").integration_id))
+            db.commit()
+    monkeypatch.setattr(analysis, "refresh_alone", removed_meanwhile)
+    answer = client.post("/api/guests/actions", headers=admin_headers,
+                         json={"device_id": "guest-hvac", "action": "cut", "reason": "Unknown device"})
+    assert answer.status_code == 200 and answer.json()["state"] == "cut"
+    with app.state.session_factory() as db:
+        assert db.get(Resource, "guest-hvac") is None
