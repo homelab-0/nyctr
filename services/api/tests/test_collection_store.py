@@ -11,12 +11,14 @@ import pytest
 from conftest import live_app, live_signin
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
+from test_guests import live_guest
 
 from nyctr import analysis, collection, integrations, worker
 from nyctr.assistant import attention
 from nyctr.collection import collect_integration
+from nyctr.guests import enforce
 from nyctr.integrations import Snapshot, core, registry
-from nyctr.models import Audit, Finding, Integration, Observation, Relationship, Resource, Sighting, utcnow
+from nyctr.models import Audit, Finding, GuestAction, Integration, Observation, Relationship, Resource, Sighting, utcnow
 
 KEY = "fabricated-key-never-logged"
 NAME = 'Office "DNS"\nsecond line'
@@ -534,11 +536,8 @@ def test_what_a_store_refuses_and_what_a_read_that_picked_up_carries(tmp_path, m
             assert db.scalar(select(func.count()).select_from(Observation)) == 1
 
 
-def test_two_analyses_never_run_at_once_and_neither_runs_on_the_servers_loop(tmp_path, monkeypatch):
-    """A scheduled pass and a person's Collect that find the same new finding: the second waits for the
-    first to be stored, and neither fails."""
-    app = live_app(tmp_path)
-    factory, settings = app.state.session_factory, app.state.settings
+def held_analysis(monkeypatch):
+    """Hold the first analysis after it has staged its findings, until `go`; say who arrives at the lock."""
     arrived, inside, go, threads = threading.Semaphore(0), threading.Event(), threading.Event(), []
     lock, refresh = analysis.ONE_AT_A_TIME, analysis.refresh_findings
 
@@ -560,23 +559,118 @@ def test_two_analyses_never_run_at_once_and_neither_runs_on_the_servers_loop(tmp
             assert go.wait(30)
     monkeypatch.setattr(analysis, "ONE_AT_A_TIME", Watched())
     monkeypatch.setattr(analysis, "refresh_findings", held)
+    return arrived, inside, go, threads
+
+
+def unlogged_profile(app):
+    """Store a DNS profile with logging off: something no analysis has yet made a finding of."""
+    with app.state.session_factory() as db:
+        db.add(Resource(id="dns:dns_profile:p", integration_id="dns", name="Profile", kind="dns_profile",
+                        provider="nextdns", source_id="p", evidence_kind="configured", observed_at=utcnow(),
+                        attributes={"logs_enabled": False}, classification="infrastructure"))
+        db.commit()
+
+
+def test_two_analyses_never_run_at_once_and_none_holds_or_runs_on_the_servers_loop(tmp_path, monkeypatch):
+    """A scheduled pass, a person's Collect and the guest rule's step that find the same new finding: each
+    waits for the one before to be stored, the loop goes on meanwhile, and none fails."""
+    app = live_app(tmp_path)
+    factory, settings = app.state.session_factory, app.state.settings
+    arrived, inside, go, threads = held_analysis(monkeypatch)
+
+    async def step():
+        with factory() as db:
+            return await enforce(db, settings, [])
 
     async def scenario():
         scheduled = asyncio.create_task(worker._analyse(factory, settings))
         assert await asyncio.to_thread(inside.wait, 30)
         person = asyncio.create_task(collection.off_loop(lambda: collection.analyse(factory, settings)))
-        for _ in range(2):  # the scheduled analysis, which holds the lock, and the person's, which waits at it
+        rule = asyncio.create_task(step())
+        for _ in range(3):  # the scheduled analysis, which holds the lock, and the two that wait at it
             assert await asyncio.to_thread(arrived.acquire, True, 30)
+        for _ in range(5):  # the loop is not held by the step that waits
+            await asyncio.sleep(0)
+        assert not rule.done() and not person.done()
         go.set()
-        await asyncio.gather(scheduled, person)
+        await asyncio.gather(scheduled, person, rule)
     with TestClient(app):
         add_source(app, monkeypatch)
-        with factory() as db:
-            db.add(Resource(id="dns:dns_profile:p", integration_id="dns", name="Profile", kind="dns_profile",
-                            provider="nextdns", source_id="p", evidence_kind="configured", observed_at=utcnow(),
-                            attributes={"logs_enabled": False}, classification="infrastructure"))
-            db.commit()
+        unlogged_profile(app)
         asyncio.run(scenario())
         with factory() as db:
             assert db.scalar(select(func.count()).select_from(Finding)) == 1
-    assert len(threads) == 3 and threading.get_ident() not in threads[:2]
+    assert len(threads) == 4 and threading.get_ident() not in threads
+
+
+@pytest.mark.parametrize("work", ["analysis", "refresh"])
+def test_an_analysis_and_a_refresh_of_findings_each_wait_for_the_lock(tmp_path, monkeypatch, work):
+    """While the lock is held nothing is refreshed; once it is let go the work runs and is stored."""
+    app = live_app(tmp_path)
+    factory, arrived, ran = app.state.session_factory, threading.Semaphore(0), []
+    lock, refresh = analysis.ONE_AT_A_TIME, analysis.refresh_findings
+
+    class Watched:
+        def __enter__(self):
+            arrived.release()
+            lock.acquire()
+
+        def __exit__(self, *_error):
+            lock.release()
+    monkeypatch.setattr(analysis, "ONE_AT_A_TIME", Watched())
+    monkeypatch.setattr(analysis, "refresh_findings", lambda db: (ran.append(1), refresh(db)))
+    with TestClient(app):
+        add_source(app, monkeypatch)
+        unlogged_profile(app)
+        waiting = threading.Thread(target=(lambda: collection.analyse(factory, app.state.settings))
+                                   if work == "analysis" else lambda: analysis.refresh_alone(app.state.engine))
+        with lock:
+            waiting.start()
+            assert arrived.acquire(timeout=30) and not ran
+        waiting.join(30)
+        with factory() as db:
+            assert ran == [1] and db.scalar(select(func.count()).select_from(Finding)) == 1
+
+
+def test_a_guest_action_during_an_analysis_that_holds_a_new_finding_is_recorded_and_answered(tmp_path, monkeypatch):
+    """An administrator cuts a guest off while an analysis holds a finding it has not stored yet: the action
+    is on record before the findings are touched, the refresh waits its turn, and the answer is 200."""
+    sent = []
+
+    def source(request):
+        """The guest's source, fabricated: it takes the cut-off and then reports the guest without access."""
+        sent.append(request.method)
+        return httpx.Response(200, json={"id": "g1", "access": {"type": "GUEST", "authorized": False}})
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", KEY)
+    monkeypatch.setattr(core, "make_http_client", lambda key, **_: httpx.AsyncClient(
+        transport=httpx.MockTransport(source), headers={"X-Api-Key": key}, follow_redirects=False))
+    app = live_app(tmp_path, provider_writes="unifi_network")
+    if app.state.engine.dialect.name == "sqlite":
+        pytest.skip("SQLite has one writer: while an analysis holds a finding, the action's own write waits for it")
+    factory, answers = app.state.session_factory, []
+    arrived, inside, go, threads = held_analysis(monkeypatch)
+    with TestClient(app) as client:
+        live_guest(app)
+        headers = live_signin(client)
+        unlogged_profile(app)
+        running = threading.Thread(target=lambda: collection.analyse(factory, app.state.settings))
+        asked = threading.Thread(target=lambda: answers.append(client.post(
+            "/api/guests/actions", headers=headers, json={"device_id": "unifi:client:g1", "action": "cut"})))
+        running.start()
+        try:
+            assert inside.wait(30)
+            asked.start()
+            for _ in range(2):  # the analysis, which holds the lock, and the action's refresh, which waits
+                assert arrived.acquire(timeout=30)
+            with factory() as db:  # sent to the source and on record, before the findings are touched
+                assert sent[0] == "POST" and db.scalar(select(GuestAction)).execution == "applied"
+        finally:
+            go.set()
+            running.join(60)
+            asked.join(60)
+        assert [answer.status_code for answer in answers] == [200], answers[0].text
+        with factory() as db:
+            assert db.scalar(select(func.count()).select_from(GuestAction)) == 1
+            ids = [row.id for row in db.scalars(select(Finding))]
+            assert len(ids) == len(set(ids)) and len(ids) >= 2
+    assert threading.get_ident() not in threads
