@@ -4,6 +4,7 @@ import ast
 import asyncio
 import dataclasses
 import inspect
+import itertools
 import threading
 from contextlib import contextmanager
 from datetime import timedelta
@@ -15,6 +16,8 @@ from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
+from test_collection_store import POSTGRES, postgres_database
 
 from nyctr import access, peer, presence, retention
 from nyctr.deps import observation_permitted, observations_permitted
@@ -240,6 +243,21 @@ def test_a_busy_database_is_a_reason_not_an_error_and_the_work_is_off_the_server
     assert not inspect.iscoroutinefunction(access.this_device) and not inspect.iscoroutinefunction(presence.recognise)
 
 
+# The tests that run two writers against each other run on both engines. The PostgreSQL case needs a server
+# named in NYCTR_TEST_POSTGRES (its address, ending in /) and makes and drops a database of its own.
+BOTH_ENGINES = pytest.mark.parametrize("engine", ["sqlite", "postgresql"])
+
+
+def on(engine, request):
+    """Where this case keeps its database, as a `home` setting: nothing for SQLite in the test's own folder."""
+    if engine == "sqlite":
+        return {}
+    place = postgres_database(request)
+    if not place:
+        pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    return place
+
+
 def switch_off(app):
     """Have an administrator switch recognition off, through the route's own function, and say what it answered."""
     with app.state.session_factory() as db:
@@ -247,9 +265,10 @@ def switch_off(app):
         return presence.switch(presence.Recognition(enabled=False, reach_back_hours=2), admin, db)
 
 
-def test_recognition_switched_off_while_the_network_is_being_asked_ties_nobody(tmp_path, monkeypatch):
+@BOTH_ENGINES
+def test_recognition_switched_off_while_the_network_is_being_asked_ties_nobody(tmp_path, monkeypatch, request, engine):
     """The sign-in passed the check while recognition was on. Switched off before the tie is written, none is made."""
-    app, gateway = home(tmp_path, monkeypatch)
+    app, gateway = home(tmp_path, monkeypatch, **on(engine, request))
     provider, asked = registry.get("unifi_network"), []
 
     async def client_at(integration_id, *_rest):
@@ -261,9 +280,11 @@ def test_recognition_switched_off_while_the_network_is_being_asked_ties_nobody(t
     assert asked == [{"enabled": False, "reach_back_hours": 2}] and gateway["reads"] == 0
 
 
-def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_it(tmp_path, monkeypatch):
+@BOTH_ENGINES
+def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_it(tmp_path, monkeypatch, request,
+                                                                                  engine):
     """Whichever comes first, no tie is in force once recognition is off: the switch and the write take one lock."""
-    app, _gateway = home(tmp_path, monkeypatch)
+    app, _gateway = home(tmp_path, monkeypatch, **on(engine, request))
     write, others, answers, waiting = presence._record, [], [], []
 
     def record(*args):
@@ -288,9 +309,11 @@ def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_i
             "ties_ended"] == 1
 
 
-def test_two_people_signing_in_on_one_unshared_device_at_the_same_moment_are_not_both_tied(tmp_path, monkeypatch):
+@BOTH_ENGINES
+def test_two_people_signing_in_on_one_unshared_device_at_the_same_moment_are_not_both_tied(tmp_path, monkeypatch,
+                                                                                           request, engine):
     """Sam has read that nobody is tied to the laptop and is about to write. Kim's request arrives just then."""
-    app, _gateway = home(tmp_path, monkeypatch)
+    app, _gateway = home(tmp_path, monkeypatch, **on(engine, request))
     write, others, answers, waiting = presence._record, [], [], []
 
     with browser(app, LAPTOP) as sam, browser(app, LAPTOP, KIM) as kim:
@@ -310,6 +333,110 @@ def test_two_people_signing_in_on_one_unshared_device_at_the_same_moment_are_not
         assert kim.get("/api/devices").json() == [] and len(sam.get("/api/devices").json()) == 1
     assert [(tie.user_id, tie.ended_at) for tie in stored(app)] == [("sam", None)]
     assert [(row.user_id, row.device_id) for row in stored(app, "conflict")] == [("kim", "gw:client:laptop")]
+
+
+# Everything that writes a tie, each as the console, the portal or the worker does it.
+WRITERS = {
+    "switch": lambda who: who["chief"].put("/api/presence", json={"enabled": True, "reach_back_hours": 1}),
+    "assign": lambda who: assigned(who["deputy"], "laptop", "shared", "sam"),
+    "sign_in": lambda who: who["again"].get("/api/me/device"),
+    "forget": lambda who: who["sam"].delete(f"/api/presence/{who['tie']}"),
+    "keep": lambda who: presence.keep(who["app"].state.session_factory, utcnow()),
+}
+
+
+@contextmanager
+def stopped_before_it_writes(second):
+    """Stop the next writer after its reads and just before it sends its first change, and run `second` then.
+
+    That is the moment a writer holds what it read and has changed nothing yet, so a second writer that
+    is not made to wait would have its work overwritten. `second` runs on another thread and connection.
+
+    Yields what happened: whether `second` was still waiting when the first went on, and what it raised.
+    """
+    seen = {"armed": True, "waiting": [], "raised": []}
+
+    def run():
+        try:
+            second()
+        except Exception as error:  # noqa: BLE001 - reported to the test, which fails on it
+            seen["raised"].append(error)
+
+    def before_flush(session, *_rest):
+        if seen["armed"] and (session.dirty or session.new or session.deleted):
+            seen["armed"] = False
+            seen["other"] = threading.Thread(target=run)
+            seen["other"].start()
+            seen["other"].join(0.5)  # under the locks it is still waiting, however long this machine takes
+            seen["waiting"].append(seen["other"].is_alive())
+
+    event.listen(Session, "before_flush", before_flush)
+    try:
+        yield seen
+        seen["other"].join()
+    finally:
+        event.remove(Session, "before_flush", before_flush)
+
+
+@BOTH_ENGINES
+@pytest.mark.parametrize("first, second", list(itertools.permutations(WRITERS, 2)),
+                         ids=[f"{first} then {second}" for first, second in itertools.permutations(WRITERS, 2)])
+def test_no_writer_of_a_tie_overtakes_another_between_its_read_and_its_write(tmp_path, monkeypatch, request, engine,
+                                                                              first, second):
+    """Each writer takes the setting's row, the device's row and the ties, in that order, before it reads a tie.
+
+    So the second of any two waits for the first to commit, and what it then writes rests on what the
+    first wrote: nothing an assignment set is put back by a change of the setting read earlier, and so on.
+    """
+    app, _gateway = home(tmp_path, monkeypatch, **on(engine, request))
+    blocked(app, recent=("laptop", 10))
+    with browser(app, LAPTOP) as sam, browser(app, LAPTOP) as again, browser(app, PHONE, KIM) as kim, \
+            browser(app, "198.51.100.9", LIVE_ADMIN) as chief, browser(app, "198.51.100.9", LIVE_ADMIN) as deputy:
+        sam.get("/api/me/device")
+        kim.get("/api/me/device")
+        mine, kims = stored(app)
+        change(app, DevicePresence, kims.id, last_at=utcnow() - timedelta(days=31))  # lapsed, for the worker to close
+        who = {"app": app, "sam": sam, "again": again, "chief": chief, "deputy": deputy, "tie": mine.id}
+        start = utcnow()
+        with stopped_before_it_writes(lambda: WRITERS[second](who)) as seen:
+            WRITERS[first](who)
+        assert seen["waiting"] == [True] and seen["raised"] == []
+        both = {first, second}
+        shown = [] if "assign" in both or ("forget" in both and (first, second) != ("forget", "sign_in")) else ["recent"]
+        assert seen_by(sam) == shown
+    mine, kims = stored(app)[:2]
+    assert (kims.ended_by == "expired") == ("keep" in both)
+    assert (mine.ended_at is not None) == ("forget" in both)
+    if "forget" not in both:
+        if "assign" in both:  # the assignment is the earliest moment the tie shows, whoever wrote last
+            assert utc(mine.reach_from) >= start
+        else:
+            assert mine.reach_from == mine.first_at - timedelta(hours=1 if "switch" in both else 2)
+
+
+@BOTH_ENGINES
+@pytest.mark.parametrize("first", list(WRITERS))
+def test_removing_the_source_waits_for_a_writer_of_a_tie(tmp_path, monkeypatch, request, engine, first):
+    """Removal takes the devices' rows and then deletes the ties. A writer holds its device's row, so removal waits."""
+    app, _gateway = home(tmp_path, monkeypatch, **on(engine, request))
+    with browser(app, LAPTOP) as sam, browser(app, LAPTOP) as again, browser(app, PHONE, KIM) as kim, \
+            browser(app, "198.51.100.9", LIVE_ADMIN) as chief, browser(app, "198.51.100.9", LIVE_ADMIN) as deputy:
+        sam.get("/api/me/device")
+        kim.get("/api/me/device")
+        mine, kims = stored(app)
+        change(app, DevicePresence, kims.id, last_at=utcnow() - timedelta(days=31))
+        who = {"app": app, "sam": sam, "again": again, "chief": chief, "deputy": deputy, "tie": mine.id}
+
+        def remove():
+            with browser(app, "198.51.100.9", LIVE_ADMIN) as third:
+                answer = third.request("DELETE", "/api/integrations/gw", json={"name": "Gateway"})
+                assert answer.status_code == 200, answer.text
+
+        with stopped_before_it_writes(remove) as seen:
+            done = WRITERS[first](who)
+        assert seen["waiting"] == [True] and seen["raised"] == []
+        assert done is None or done.status_code == 200  # the writer finished its own work first, undisturbed
+    assert stored(app) == [] and stored(app, "conflict") == []
 
 
 def test_a_source_that_declares_no_lookup_takes_no_part_in_finding_a_device(tmp_path, monkeypatch):

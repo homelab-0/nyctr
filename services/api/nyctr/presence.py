@@ -10,6 +10,14 @@ whose network holds the address. What a tie lets a member see is decided in
 `deps` and nowhere else; this module makes, lists and ends ties, and records a
 conflict where one must not be made. Its record keeping runs in the worker
 (`keep`), so that a member's page writes nothing unless a tie is made.
+
+Everything that writes a tie takes the same locks in the same order before it
+reads one: the stored setting's row (`hold`), then the rows of the devices
+concerned (`_devices`), then the ties themselves (`_ties`). That is a sign-in,
+the switch, an assignment, forgetting and the worker's record keeping. So none
+of them works from a tie another is changing, and none can deadlock another.
+Removing a source or dropping a device comes from the other side, holding the
+device's row before it deletes the ties, which fits the same order.
 """
 
 from __future__ import annotations
@@ -92,7 +100,7 @@ class Found:
 
 def settings(db: Session) -> Recognition:
     """Read the setting in force. Never written, or no longer valid, is off."""
-    # The stored value itself is read, never a copy this session already holds: see `_held`.
+    # The stored value itself is read, never a copy this session already holds: see `hold`.
     value = db.scalar(select(Setting.value).where(Setting.key == KEY))
     try:
         return Recognition(**value) if value is not None else Recognition()
@@ -100,10 +108,11 @@ def settings(db: Session) -> Recognition:
         return Recognition()
 
 
-def _held(db: Session) -> Recognition:
+def hold(db: Session) -> Recognition:
     """Hold the setting's row until this transaction ends, and read the setting again under that hold.
 
-    The one lock that making a tie and switching recognition off both take. Whichever comes
+    The first lock of every writer of a tie, and the one that making a tie and switching
+    recognition off both take. Whichever comes
     second waits for the first to commit, so a tie is never committed after the switch: either
     the switch finds it and ends it, or the sign-in finds recognition off and makes none. Two
     sign-ins wait for each other the same way, so two people cannot both be first on a device.
@@ -113,6 +122,18 @@ def _held(db: Session) -> Recognition:
     db.execute(update(Setting).where(Setting.key == KEY).values(updated_at=Setting.updated_at)
                .execution_options(synchronize_session=False))
     return settings(db)
+
+
+def _devices(db: Session, ids) -> None:
+    """Hold these devices' rows, in id order, until this transaction ends. Second in the order, after `hold`."""
+    wanted = sorted(set(ids))
+    if wanted:
+        db.execute(select(Resource.id).where(Resource.id.in_(wanted)).order_by(Resource.id).with_for_update()).all()
+
+
+def _ties(db: Session, *where) -> list[DevicePresence]:
+    """These ties, each row held, in id order. Last in the order, after `hold` and `_devices`."""
+    return list(db.scalars(select(DevicePresence).where(*where).order_by(DevicePresence.id).with_for_update()))
 
 
 def _said(db: Session, by: str | None, tie: DevicePresence, because: str | None = None) -> None:
@@ -136,11 +157,15 @@ def keep(factory, now) -> None:
     the addresses it held. What a tie shows never waits for this: `deps` counts the days itself.
     """
     with factory() as db:
-        for tie in db.scalars(select(DevicePresence).where(
-                DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
-                DevicePresence.last_at <= now - timedelta(days=TIE_DAYS))):
-            tie.ended_at, tie.ended_by = _ended(tie, now), "expired"
-            _said(db, None, tie, "lapsed")
+        lapsed = (DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
+                  DevicePresence.last_at <= now - timedelta(days=TIE_DAYS))
+        # The locks are taken only when a tie is waiting to be closed, so an idle tick holds nobody up.
+        if db.scalar(select(DevicePresence.id).where(*lapsed).limit(1)) is not None:
+            hold(db)
+            _devices(db, db.scalars(select(DevicePresence.device_id).where(*lapsed)))
+            for tie in _ties(db, *lapsed):
+                tie.ended_at, tie.ended_by = _ended(tie, now), "expired"
+                _said(db, None, tie, "lapsed")
         old = now - timedelta(days=KEPT_DAYS)
         db.execute(delete(DevicePresence).where(or_(
             DevicePresence.ended_at <= old, (DevicePresence.kind == "conflict") & (DevicePresence.last_at <= old))))
@@ -151,8 +176,9 @@ def gone(db: Session, ids: list[str], by: str | None) -> None:
     """Take the ties and conflicts on these devices off record, because the devices are going. The caller commits.
 
     Each tie still in force is ended on record first, so the audit trail says whose it was.
+    The caller already holds these devices' rows, which every writer of a tie takes before the tie.
     """
-    for tie in db.scalars(select(DevicePresence).where(*live_ties(), DevicePresence.device_id.in_(ids))):
+    for tie in _ties(db, *live_ties(), DevicePresence.device_id.in_(ids)):
         _said(db, by, tie, "device_removed")
     db.execute(delete(DevicePresence).where(DevicePresence.device_id.in_(ids)))
 
@@ -240,8 +266,7 @@ def _record(db: Session, kind: str, user, device: Resource, holder: dict, basis:
             address) -> DevicePresence:
     """Move the time of this person's open tie or conflict on the device, or put a new one on record."""
     live = live_ties(now) if kind == "tie" else [DevicePresence.kind == "conflict"]
-    row = db.scalar(select(DevicePresence).where(
-        *live, DevicePresence.user_id == user.id, DevicePresence.device_id == device.id).limit(1))
+    row = next(iter(_ties(db, *live, DevicePresence.user_id == user.id, DevicePresence.device_id == device.id)), None)
     if row is None:
         reach = None
         if kind == "tie":
@@ -334,7 +359,7 @@ def _tie(db: Session, user, integration: Integration, holder: dict, basis: str, 
     write beside this one. PostgreSQL holds the device's row as well, against an assignment
     saved at the same moment; SQLite has no row to hold, so there the lock is all of it.
     """
-    if not _held(db).enabled:
+    if not hold(db).enabled:
         return Found(why="off")  # switched off since the first check: nothing is written
     device = db.scalar(select(Resource).where(Resource.id == holder["id"]).with_for_update())
     if device is None or device.kind != "client" or device.integration_id != integration.id:
@@ -371,24 +396,16 @@ def release(db: Session, device: Resource, named: list[str], by: str, now, chang
     use a shared device is tied again the next time they sign in on it. Every tie that
     stays, also after a save that changed nothing, starts again at this moment: an
     assignment does not show what came before it, and a tie made earlier must not either.
+    The caller took `hold` and then the device's row before this, in that order.
     """
     ended = 0
-    for tie in db.scalars(select(DevicePresence).where(*live_ties(now), DevicePresence.device_id == device.id)):
+    for tie in _ties(db, *live_ties(now), DevicePresence.device_id == device.id):
         if changed and tie.user_id not in named:
             tie.ended_at, tie.ended_by, ended = now, by, ended + 1
             _said(db, by, tie, "assignment")
         else:
             tie.reach_from = max(utc(tie.reach_from), now)
     return ended
-
-
-def _end(db: Session, tie: DevicePresence, by: str, now) -> None:
-    """End every tie in force of that person on that device, at once."""
-    for row in db.scalars(select(DevicePresence).where(
-            *live_ties(now), DevicePresence.user_id == tie.user_id, DevicePresence.device_id == tie.device_id)):
-        row.ended_at, row.ended_by = now, by
-    if tie.ended_at is None:
-        tie.ended_at, tie.ended_by = now, by
 
 
 @router.get("/presence")
@@ -421,8 +438,9 @@ def switch(body: Recognition, user=Depends(admin), db: Session = Depends(get_db)
     if db.get(Setting, KEY) is None:  # the lock below needs a row to hold
         db.add(Setting(key=KEY, value=Recognition().model_dump(), updated_at=now))
         db.flush()
-    _held(db)  # a sign-in that is writing a tie finishes first, and none starts until this commits
-    for tie in db.scalars(select(DevicePresence).where(*live_ties(now))):
+    hold(db)  # a sign-in that is writing a tie finishes first, and none starts until this commits
+    _devices(db, db.scalars(select(DevicePresence.device_id).where(*live_ties(now))))
+    for tie in _ties(db, *live_ties(now)):  # read under the locks, so nothing written meanwhile is put back
         if not body.enabled:
             tie.ended_at, tie.ended_by, ended = now, user.id, ended + 1
             _said(db, user.id, tie, "switched_off")
@@ -442,7 +460,16 @@ def forget(tie_id: str, auth=Depends(identity), db: Session = Depends(get_db)):
     if tie is None or tie.kind != "tie" or (user.role != "admin" and tie.user_id != user.id):
         raise HTTPException(404, "That device is not on record")
     if tie.ended_at is None:
-        _end(db, tie, user.id, utcnow())
-        _said(db, user.id, tie)
+        now = utcnow()
+        hold(db)
+        _devices(db, [tie.device_id])
+        # Every tie of that person on that device that has not ended, read under the locks: if something
+        # else ended it meanwhile there is nothing left to end, and no second record of an ending.
+        mine = _ties(db, DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
+                     DevicePresence.user_id == tie.user_id, DevicePresence.device_id == tie.device_id)
+        for row in mine:
+            row.ended_at, row.ended_by = now, user.id
+        if mine:
+            _said(db, user.id, tie)
         db.commit()
     return {"ok": True}

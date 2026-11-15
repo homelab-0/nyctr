@@ -109,6 +109,10 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   recognition is switched off; a sign-in that lost that race answers `off`. A sign-in takes
   that row before it reads who is tied to the device, so of two people signing in on one
   unshared device at the same moment one is tied and the other is answered `other_person`.
+  Every writer of a tie (a sign-in, `PUT /api/presence`, an assignment, `DELETE
+  /api/presence/{id}` and the worker's record keeping) takes its locks in one order before it
+  reads a tie: the setting's row, the devices' rows, then the ties. So an assignment saved
+  while the setting is being changed is never overwritten by it.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as

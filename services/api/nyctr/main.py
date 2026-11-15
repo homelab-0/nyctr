@@ -653,6 +653,8 @@ def create_app(settings: Settings | None = None):
         the device held by anyone the new assignment does not name ends in that
         transaction too, and every tie that stays starts again at this save.
         """
+        # The order every writer of a sign-in tie takes its locks in: the setting's row, the device, the ties.
+        presence.hold(db)
         row = db.scalar(select(Resource).where(Resource.id == device_id).with_for_update())
         if not row or row.kind != "client":
             raise HTTPException(404, "Device not found")
