@@ -434,10 +434,12 @@ export interface AddressSeen {
   /** Where the connection itself came from: the client, or the proxy in front of Nyctr. */
   peer: string | null;
   via_proxy: boolean;
-  why: 'peer' | 'forwarded' | 'no_peer' | 'missing' | 'short' | 'malformed';
-  /** Which passed-on address was read, counted from the right, out of `entries`. */
+  why: 'peer' | 'forwarded' | 'no_peer' | 'missing' | 'short' | 'malformed' | 'unlisted';
+  /** Which passed-on address was read or refused, counted from the right, out of `entries`. */
   entry: number | null;
   entries: number;
+  /** The passed-on address that should be one of the operator's proxies and is not on the list. */
+  unlisted: string | null;
   proxy_hops: number;
 }
 export interface AssistantConfig {

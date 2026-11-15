@@ -35,7 +35,9 @@ Client addresses: Nyctr reads entry {{ .Values.proxyHops }} from the right of X-
 {{- if eq (int .Values.proxyHops) 1 }}
 Your proxy must append the address it saw to that header.
 {{- else }}
-Your edge must keep the client's address, each proxy after it must append the address it saw, and every request must pass all {{ .Values.proxyHops }}.
+Your edge must keep the client's address, and each proxy after it must append the address it saw.
+Every one of the {{ .Values.proxyHops }} proxies must be in forwardedAllowIps: a request that did not pass them all gets no address.
+What remains: a client inside a listed range that reaches an inner proxy directly passes for a proxy. Keep it out with your network rules.
 {{- end }}
 Check it after install: sign in as an administrator and open Setup, This installation, "The address Nyctr sees for you".
 Secret values and external PostgreSQL connectivity are not validated by Helm rendering.

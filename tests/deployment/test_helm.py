@@ -219,7 +219,8 @@ def test_the_number_of_proxies_reaches_the_application_and_the_install_notes(hel
         assert env["NYCTR_PROXY_HOPS"]["value"] == str(hops)
     # Helm 3 renders install notes only against a cluster, so the notes are read as written.
     notes = (CHART / "templates" / "NOTES.txt").read_text()
-    for said in (".Values.proxyHops", "must append the address it saw", "must keep the client's address"):
+    for said in (".Values.proxyHops", "must append the address it saw", "must keep the client's address",
+                 "proxies must be in forwardedAllowIps", "a client inside a listed range"):
         assert said in notes
 
 

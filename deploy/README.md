@@ -88,7 +88,8 @@ not listed is the client and its headers are ignored. For a listed peer, Nyctr
 reads `X-Forwarded-For` from the right and takes the entry at position
 `NYCTR_PROXY_HOPS` (default 1), the one your own proxy wrote; entries to its left
 came from the client and are never read. A missing or malformed entry gives no
-address. The sign-in limit counts by that address, with a separate per-account
+address, and so does an entry to its right that is not a listed proxy. The
+sign-in limit counts by that address, with a separate per-account
 quota. If the proxy is not listed, all its users share one 60-attempt quota, and
 so do all requests that have no address.
 
@@ -103,10 +104,14 @@ proxy_set_header X-Forwarded-For $remote_addr;
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
-With two proxies, set `NYCTR_PROXY_HOPS=2` and list the inner one. The edge
-writes the client's address, the inner proxy appends the edge's, and every
-request must pass both: a client that can reach the inner proxy directly writes
-the entry Nyctr would read. Keep direct application access restricted to your
+With more than one proxy, set `NYCTR_PROXY_HOPS` to their number and **list every
+one of them** in `FORWARDED_ALLOW_IPS`. The edge writes the client's address and
+the inner proxy appends the edge's. Nyctr checks that each entry to the right of
+the one it reads is a listed proxy, so a client that reaches the inner proxy
+without passing the edge gets no address, and so does everyone while the edge is
+not listed. One limit remains: a client whose own address is inside a listed
+range, and which can reach an inner proxy directly, passes for a proxy and can
+name any address. Keep direct application access restricted to your
 proxies using the loopback binding, firewall rules, or Kubernetes NetworkPolicy;
 a peer that arrives under a listed address is believed. `X-Forwarded-Proto` is
 taken from a listed peer only, and cookies and sign-in do not depend on it: they

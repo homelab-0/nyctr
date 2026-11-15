@@ -87,14 +87,17 @@ server's own forwarded-header handling is off. A peer that is not one of the
 operator's listed proxies is the client and its headers are ignored. Behind a
 listed proxy Nyctr reads `X-Forwarded-For` from the right and takes the entry
 that proxy wrote, at position `NYCTR_PROXY_HOPS`; entries to its left came from
-the client and are never read, and a missing or malformed entry gives no
-address. The sign-in limit counts by that address, and requests with none share
+the client and are never read. With more than one proxy every proxy must be
+listed: an entry to the right of the one read that is not a listed proxy means
+the request did not pass them all. That, or a missing or malformed entry, gives
+no address. The sign-in limit counts by that address, and requests with none share
 one quota. The address is evidence of where a request came from. It grants
 nothing by itself.
 
-This holds only as far as the operator's set-up does: a peer that can connect
-under a listed address is believed, and with more than one hop a client that
-can reach an inner proxy directly writes the entry Nyctr reads.
+This holds only as far as the operator's set-up does. A peer that can connect
+under a listed address is believed. With more than one proxy, a client whose own
+address is inside a listed range and which can reach an inner proxy directly
+passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 
 ## Threats considered
 

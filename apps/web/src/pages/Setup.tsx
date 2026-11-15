@@ -497,6 +497,8 @@ export function addressText(seen: AddressSeen): string {
       return `${proxy}, but it passed no address on. Set the proxy to add the address it saw (X-Forwarded-For).`;
     case 'short':
       return `${proxy}, but it passed on ${seen.entries} and Nyctr is set to read number ${seen.proxy_hops} from the right. Lower the number of proxies Nyctr counts, or check that each proxy adds the address it saw.`;
+    case 'unlisted':
+      return `${proxy}, but ${seen.unlisted}, at position ${seen.entry} from the right of what it passed on, is not on the list. Nyctr is set to count ${seen.proxy_hops} proxies, and every one of them must be on the list. If ${seen.unlisted} is one of your proxies, add it. If it is your own device, you reached Nyctr without passing all of them, and Nyctr gives no address for that.`;
     case 'malformed':
       return `${proxy}, but what it passed on at position ${seen.entry} from the right is not an address.`;
     default:

@@ -8,6 +8,8 @@ peer Nyctr sees is the real TCP peer. The rule:
 2. A peer that is in the list: `X-Forwarded-For` is read from the right and the
    entry at position `proxy_hops` is taken. That is the one the operator's own
    proxy wrote. Entries to its left came from the client and are never read.
+   Every entry to its right must itself be a listed proxy: one that is not
+   means the request did not pass them all, and gives no address.
 3. A missing or malformed entry gives no address.
 
 No address is a real answer. A caller must handle `None` and must not fall back
@@ -28,7 +30,9 @@ class Seen:
 
     `why` is `peer` (the peer is the client), `forwarded` (a listed proxy's entry
     was used), or the reason there is no address: `no_peer`, `missing`, `short`
-    (fewer entries than hops) or `malformed`. `entry` counts from the right.
+    (fewer entries than hops), `malformed`, or `unlisted` (an entry between the
+    peer and the one to read is not a listed proxy; `unlisted` holds it).
+    `entry` counts from the right and names the entry read or the one refused.
     """
     address: str | None
     peer: str | None
@@ -36,6 +40,7 @@ class Seen:
     why: str
     entry: int | None = None
     entries: int = 0
+    unlisted: str | None = None
 
 
 @lru_cache(maxsize=16)
@@ -99,6 +104,13 @@ def seen(request: Request) -> Seen:
         return Seen(None, str(peer), True, "missing")
     if len(entries) < hops:
         return Seen(None, str(peer), True, "short", entries=len(entries))
+    # The entries to the right of the one read are about the operator's own proxies. One that is
+    # not listed means a request that went round a proxy and wrote the entry itself: no address.
+    for position in range(1, hops):
+        proxy = _entry(entries[-position])
+        if proxy is None or not _listed(proxy, settings):
+            return Seen(None, str(peer), True, "unlisted" if proxy else "malformed", entry=position,
+                        entries=len(entries), unlisted=str(proxy) if proxy else None)
     address = _entry(entries[-hops])
     return Seen(str(address) if address else None, str(peer), True, "forwarded" if address else "malformed",
                 entry=hops, entries=len(entries))

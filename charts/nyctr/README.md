@@ -208,9 +208,11 @@ Nyctr works out the client's address itself; the web server no longer does.
    ignored.
 2. For a peer that is, Nyctr reads `X-Forwarded-For` from the right and takes
    the entry at position `proxyHops` (default 1): the one your own proxy wrote.
-   Entries to its left came from the client and are never read.
-3. A missing or malformed entry gives no address. Such requests share one
-   sign-in quota, and no device is recognised for them.
+   Entries to its left came from the client and are never read. Every entry to
+   its right must itself be in `forwardedAllowIps`.
+3. A missing or malformed entry, or an entry to the right that is not a listed
+   proxy, gives no address. Such requests share one sign-in quota, and no
+   device is recognised for them.
 
 What you must provide:
 
@@ -219,12 +221,17 @@ What you must provide:
 - **The edge keeps the client's address.** If a load balancer or node in front
   of the proxy replaces the client's address with its own, the proxy can only
   write that one, and every member appears at it.
-- **Two proxies** (an edge in front of the gateway): set `proxyHops: 2`. The
-  edge writes the client's address, the gateway appends the edge's, and every
-  request must pass both. A client that can reach the gateway directly writes
-  the entry Nyctr would read, and so chooses its own address. If some clients
-  do reach it directly, leave `proxyHops: 1`: clients behind the edge then
-  appear at the edge's address, which is wrong for them but cannot be forged.
+- **More than one proxy** (an edge in front of the gateway): set `proxyHops`
+  to their number, and **list every one of them** in `forwardedAllowIps`. The
+  edge writes the client's address and the gateway appends the edge's. Nyctr
+  checks that each entry to the right of the one it reads is a listed proxy. A
+  client that reaches the gateway without passing the edge has its own address
+  there instead, and gets no address: a wrong address is worse than none. The
+  same happens to everyone while the edge is missing from the list.
+- **The limit that remains.** A client whose own address lies inside a listed
+  range, and which can reach an inner proxy directly, passes for a proxy and
+  can name any address. Nyctr cannot tell the two apart. Keep such clients
+  from reaching the inner proxy, or list exact addresses, not a range.
 
 `X-Forwarded-Proto` is taken from a listed peer only. Nyctr's cookies and its
 single sign-on return address do not depend on it: they follow `publicUrl` and

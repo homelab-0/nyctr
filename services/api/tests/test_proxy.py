@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin, seed_live_member
+from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin, seed_live_member, signin
 from fastapi import Request
 from fastapi.testclient import TestClient
 from joserfc import jwt
@@ -97,6 +97,9 @@ def test_the_image_starts_the_web_server_with_its_own_forwarded_handling_off(mon
     # Two proxies: counted as one hop the edge is the client; counted as two, the member is.
     (f"{PROXY},{EDGE}", 1, PROXY, f"{FORGED}, {MEMBER}, {EDGE}", EDGE, "https"),
     (f"{PROXY},{EDGE}", 2, PROXY, f"{FORGED}, {MEMBER}, {EDGE}", MEMBER, "https"),
+    # Counted as two, a client that went round the edge, or an edge that is not listed, has no address.
+    (f"{PROXY},{EDGE}", 2, PROXY, f"{FORGED}, {ATTACKER}", None, "https"),
+    (PROXY, 2, PROXY, f"{MEMBER}, {EDGE}", None, "https"),
     # A range, as the chart allows behind its network policy: any proxy pod in it is believed, a
     # peer outside it is not, and a client inside it that goes through the proxy is itself.
     ("10.42.0.0/16", 1, "10.42.9.77", MEMBER, MEMBER, "https"),
@@ -218,10 +221,10 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
         live_signin(client, LIVE_ADMIN)
         assert client.get("/api/me/address", headers={"X-Forwarded-For": f"{FORGED}, {MEMBER}"}).json() == {
             "address": MEMBER, "peer": PROXY, "via_proxy": True, "why": "forwarded", "entry": 1, "entries": 2,
-            "proxy_hops": 1}
+            "unlisted": None, "proxy_hops": 1}
         assert client.get("/api/me/address").json() == {
             "address": None, "peer": PROXY, "via_proxy": True, "why": "missing", "entry": None, "entries": 0,
-            "proxy_hops": 1}
+            "unlisted": None, "proxy_hops": 1}
     with served(app, base_url="http://portal.example.test") as portal:
         for who in (LIVE_MEMBER, LIVE_ADMIN):
             live_signin(portal, who)
@@ -230,7 +233,16 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
         live_signin(direct, LIVE_ADMIN)
         assert direct.get("/api/me/address", headers={"X-Forwarded-For": MEMBER}).json() == {
             "address": ATTACKER, "peer": ATTACKER, "via_proxy": False, "why": "peer", "entry": None,
-            "entries": 0, "proxy_hops": 1}
+            "entries": 0, "unlisted": None, "proxy_hops": 1}
+
+
+def test_the_administrator_is_told_which_entry_is_not_a_listed_proxy():
+    """With no address because an edge is not on the list, the answer names it so the list can be fixed."""
+    with served(demo_app(PROXY, hops=2)) as client:
+        signin(client)
+        assert client.get("/api/me/address", headers={"X-Forwarded-For": f"{MEMBER}, {EDGE}"}).json() == {
+            "address": None, "peer": PROXY, "via_proxy": True, "why": "unlisted", "entry": 1, "entries": 2,
+            "unlisted": EDGE, "proxy_hops": 2}
 
 
 @pytest.fixture(scope="module")

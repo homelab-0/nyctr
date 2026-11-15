@@ -22,6 +22,7 @@ const seen: AddressSeen = {
   why: 'forwarded',
   entry: 1,
   entries: 2,
+  unlisted: null,
   proxy_hops: 1,
 };
 
@@ -365,6 +366,11 @@ describe('the address Nyctr sees for you, in Setup', () => {
     );
     expect(say({ why: 'short', entry: null, entries: 1, proxy_hops: 2 })).toMatch(
       /passed on 1 and Nyctr is set to read number 2 from the right/,
+    );
+    expect(
+      say({ why: 'unlisted', address: null, entry: 1, unlisted: '10.42.0.11', proxy_hops: 2 }),
+    ).toMatch(
+      /but 10\.42\.0\.11, at position 1 from the right of what it passed on, is not on the list\. Nyctr is set to count 2 proxies, and every one of them must be on the list/,
     );
     expect(say({ why: 'malformed', entry: 1 })).toMatch(
       /position 1 from the right is not an address/,

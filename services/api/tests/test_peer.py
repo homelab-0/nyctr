@@ -49,12 +49,40 @@ def test_a_client_inside_the_trusted_range_that_goes_through_the_proxy_gets_its_
     assert (answer.address, answer.via_proxy, answer.entry, answer.entries) == (inside, True, 1, 2)
 
 
-def test_two_proxies_are_counted_with_two_hops():
+def test_a_client_that_goes_round_the_edge_gets_no_address():
+    """Straight to the inner proxy, a client writes the entry Nyctr would read. A wrong address is worse than none."""
+    answer = seen(ask(PROXY, f"{FORGED}, {ATTACKER}", listed=f"{PROXY},{EDGE}", hops=2))
+    assert (answer.address, answer.why, answer.entry, answer.unlisted) == (None, "unlisted", 1, ATTACKER)
+    # The same with three proxies, whichever of them was skipped.
+    for chain in (f"{FORGED}, {ATTACKER}, {EDGE}", f"{FORGED}, {EDGE}, {ATTACKER}"):
+        skipped = seen(ask(PROXY, chain, listed=f"{PROXY},{EDGE},10.42.0.12", hops=3))
+        assert (skipped.address, skipped.why, skipped.unlisted) == (None, "unlisted", ATTACKER)
+
+
+def test_an_edge_that_is_not_listed_gives_no_address():
+    """With more than one proxy every one of them must be listed, and the answer names the one that is not."""
+    answer = seen(ask(PROXY, f"{MEMBER}, {EDGE}", hops=2))
+    assert (answer.address, answer.via_proxy, answer.why, answer.entry, answer.entries, answer.unlisted) == (
+        None, True, "unlisted", 1, 2, EDGE)
+
+
+def test_two_proxies_that_are_both_listed_are_counted_with_two_hops():
     """The edge wrote the client, the inner proxy wrote the edge: the second entry from the right."""
     answer = seen(ask(PROXY, f"{FORGED}, {MEMBER}, {EDGE}", listed=f"{PROXY},{EDGE}", hops=2))
-    assert (answer.address, answer.entry, answer.entries) == (MEMBER, 2, 3)
+    assert (answer.address, answer.why, answer.entry, answer.entries, answer.unlisted) == (
+        MEMBER, "forwarded", 2, 3, None)
     # With the default of one hop the same request is the edge's address, not the member's.
     assert client_address(ask(PROXY, f"{FORGED}, {MEMBER}, {EDGE}")) == EDGE
+
+
+def test_the_limit_that_remains_is_a_direct_client_inside_a_listed_range():
+    """Known and documented: a client inside a listed range that skips the edge passes for the edge.
+
+    Nyctr cannot tell it from a proxy by its address. The operator's network
+    rules must keep such a client from reaching the inner proxy.
+    """
+    inside = "10.42.3.3"
+    assert client_address(ask("10.42.9.77", f"{FORGED}, {inside}", listed="10.42.0.0/16", hops=2)) == FORGED
 
 
 @pytest.mark.parametrize(("lines", "hops", "why"), [
@@ -77,12 +105,13 @@ def test_two_proxies_are_counted_with_two_hops():
     ((f"{MEMBER}, garbage",), 1, "malformed"),
     ((f"{MEMBER},",), 1, "malformed"),
     ((f"garbage, {EDGE}",), 2, "malformed"),
+    ((f"{MEMBER}, garbage",), 2, "malformed"),
 ])
 def test_a_missing_short_or_malformed_entry_gives_no_address(lines, hops, why):
     """Rule 3: no address is the answer. Neither the peer nor another entry stands in."""
-    answer = seen(ask(PROXY, *lines, hops=hops))
-    assert (answer.address, answer.via_proxy, answer.why) == (None, True, why)
-    assert client_address(ask(PROXY, *lines, hops=hops)) is None
+    answer = seen(ask(PROXY, *lines, listed=f"{PROXY},{EDGE}", hops=hops))
+    assert (answer.address, answer.via_proxy, answer.why, answer.unlisted) == (None, True, why, None)
+    assert client_address(ask(PROXY, *lines, listed=f"{PROXY},{EDGE}", hops=hops)) is None
 
 
 def test_a_request_with_no_usable_peer_has_no_address():
