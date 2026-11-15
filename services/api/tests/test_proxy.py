@@ -36,11 +36,20 @@ def demo_app(listed=PROXY, hops=1):
 
 
 @contextmanager
-def served(app, peer_address=PROXY, **options):
-    """Serve the app as the image does, the web server's own forwarded-header handling off."""
+def served(app, peer_address=PROXY, plain=False, **options):
+    """Serve the app as the image does, the web server's own forwarded-header handling off.
+
+    `plain` is what Nyctr gets when TLS ends at a proxy: the browser speaks HTTPS
+    to the public address, and the connection that reaches the server is plain HTTP.
+    """
     config = Config(app, interface="asgi3", log_config=None, proxy_headers=False)
     config.load()
-    with TestClient(config.loaded_app, client=(peer_address, 45678), **options) as client:
+
+    async def over_plain_http(scope, receive, send):
+        """Hand the request on as the web server would have received it: without TLS."""
+        await config.loaded_app({**scope, "scheme": "http"} if plain else scope, receive, send)
+
+    with TestClient(over_plain_http, client=(peer_address, 45678), **options) as client:
         yield client
 
 
@@ -232,8 +241,10 @@ def signing_key():
 
 @pytest.mark.parametrize(("peer_address", "headers"), [
     (PROXY, {"X-Forwarded-For": MEMBER, "X-Forwarded-Proto": "https"}),
-    # A proxy that reports plain HTTP, or a forged claim of it, cannot weaken the cookie or the return address.
+    # A proxy that reports plain HTTP or no scheme, a forged claim from elsewhere, and no proxy at
+    # all: none of them weakens the cookie or changes the return address.
     (PROXY, {"X-Forwarded-For": MEMBER, "X-Forwarded-Proto": "http"}),
+    (PROXY, {"X-Forwarded-For": MEMBER}),
     (ATTACKER, {"X-Forwarded-Proto": "http", "X-Forwarded-Host": "attacker.example"}),
     (ATTACKER, {}),
 ])
@@ -262,7 +273,7 @@ def test_secure_cookies_and_the_sign_in_return_address_come_from_configuration(t
 
     app.state.oidc_transport = httpx.MockTransport(idp)
     here = origin + "/api/auth/oidc/callback"
-    with served(app, peer_address, base_url=origin) as client:
+    with served(app, peer_address, plain=True, base_url=origin) as client:
         started = client.get("/api/auth/oidc/login", headers=headers, follow_redirects=False)
         assert started.status_code == 302
         sent.update(parse_qs(urlsplit(started.headers["location"]).query))
