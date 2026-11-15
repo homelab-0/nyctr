@@ -647,11 +647,15 @@ async def act(body: ActionInput, request: Request, user=Depends(admin), db: Sess
         raise HTTPException(409, str(error)) from None
     except NotCollected as error:
         raise HTTPException(409, str(error)) from None
-    await refresh_after(db)  # the action is committed before the findings are touched
-    if record.execution == "failed":
-        raise HTTPException(502, record.error or "The source refused the change.")
-    passes = list(db.scalars(select(GuestPass)))
-    return guest_json(db, device, passes)
+    db.commit()  # the action is on record before the findings are touched
+    # The answer is built before the refresh: a source removed while the refresh waits takes the device
+    # with it, and the administrator is still told what was just done.
+    failed, refused = record.execution == "failed", record.error
+    answer = None if failed else guest_json(db, device, list(db.scalars(select(GuestPass))))
+    await refresh_after(db)
+    if failed:
+        raise HTTPException(502, refused or "The source refused the change.")
+    return answer
 
 
 @router.post("/demo/guest-activity")
