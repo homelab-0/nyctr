@@ -261,6 +261,20 @@ def after_collection(db, settings):
     return evaluate_rule(db, settings)
 
 
+def analyse(factory, settings):
+    """Run the analysis in a session and transaction of its own and return who the guest rule cuts off.
+
+    Blocking database work over everything stored: call it through `off_loop`. One analysis runs
+    at a time in a process, so two never add the same new finding.
+    """
+    from .analysis import ONE_AT_A_TIME
+
+    with ONE_AT_A_TIME, factory() as db:
+        due = after_collection(db, settings)
+        db.commit()
+        return due
+
+
 def last_gaps(db, integration) -> list[dict[str, str]]:
     """Say what the last collection that stored data could not read, in the integration's own words.
 
@@ -284,35 +298,64 @@ def last_gaps(db, integration) -> list[dict[str, str]]:
     return [{"id": code, "title": title, "summary": text} for code, title, text in described]
 
 
-def _resume_from(db, integration) -> datetime | None:
+def _resume_from(db, integration) -> tuple[datetime | None, str | None]:
     """Say where the next read of this source's log may start, or None to read its whole window.
 
-    A read resumes only from the last thing that happened to the source being a stored collection
-    that said where its log read ended: not after a failed attempt, an edit, or a first run. It
-    starts `RESUME_OVERLAP` before that end, and what is read twice is stored once.
+    A read picks up when the last stored collection or edit of the source is a stored collection
+    that said where its log read ended: not after an edit or a first run. A failed attempt stored
+    nothing, so the stored read before it still says where. The read starts `RESUME_OVERLAP` before
+    that end, and never later than `RESUME_OVERLAP` before the newest lookup stored for the source,
+    whose time is the source's own: a source clock behind ours then loses nothing. With no lookup
+    stored the whole window is read. What is read twice is stored once.
+
+    Also returns the time that record says the stored log is whole from.
     """
-    if integration.last_error:
-        return None
     last = db.scalar(select(Audit).where(
         Audit.target_id == integration.id, Audit.action.in_(("integration.collected", "integration.updated"))
     ).order_by(Audit.created_at.desc()).limit(1))
+    newest = db.scalar(select(func.max(Observation.observed_at)).where(Observation.integration_id == integration.id))
     try:
-        return parsed_date(last.details["read_to"]) - RESUME_OVERLAP
+        return min(parsed_date(last.details["read_to"]), utc(newest)) - RESUME_OVERLAP, last.details.get("whole_from")
     except (AttributeError, KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _whole_from(snapshot, earlier: str | None) -> datetime | None:
+    """Say the oldest time the stored log has no hole after, once this snapshot is stored.
+
+    A read that kept only its most recent rows leaves a hole before the oldest row it kept. A
+    complete read of the whole window leaves none. A complete read that picked up joins what was
+    stored, so the time the last record gave still stands. None when the snapshot read no log.
+    """
+    if not snapshot.log:
         return None
+    window_from, read_from = (parsed_date(snapshot.log[key]) for key in ("window_from", "read_from"))
+    if snapshot.partial_rows is not None:
+        return min((parsed_date(data["observed_at"]) for data in snapshot.blocks),
+                   default=parsed_date(snapshot.log["read_to"]))
+    if read_from <= window_from:
+        return window_from
+    try:
+        return parsed_date(earlier)
+    except (AttributeError, TypeError, ValueError):
+        return read_from
 
 
 async def off_loop(work):
     """Run blocking database work on a worker thread, so the server goes on answering meanwhile.
 
-    If the caller is cancelled the work is still waited for: it ends as a whole,
-    stored or not, before the session it uses is closed.
+    The work is waited for however often the caller is cancelled: it ends as a whole, stored or
+    not, before the caller goes on. Work that uses a session opens it itself, on its own thread.
     """
     task = asyncio.ensure_future(asyncio.to_thread(work))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        await asyncio.wait([task])
+        while not task.done():
+            try:
+                await asyncio.wait([task])
+            except asyncio.CancelledError:
+                continue
         raise
 
 
@@ -392,8 +435,11 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 db.commit()
                 return None, "secret"
         # Nobody else stores for this source while the lease is held, so its last record is final.
-        since = _resume_from(db, integration)
-        name, clock = integration.name, time.monotonic()
+        since, earlier = _resume_from(db, integration)
+        name, clock, stored = integration.name, time.monotonic(), []
+        provider, config = integration.provider, integration.config
+        # The store has a session of its own, so this one holds no transaction open meanwhile.
+        db.rollback()
         told = {"by": "schedule" if attempt is not None else "person" if actor else "nudge", "retry": attempt or 0}
         _report("started", name, **told, reading="since_last_read" if since else "whole_window")
 
@@ -406,31 +452,43 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             # The time limit is a backstop only; see BACKSTOP_SECONDS.
             with capture_probe() as evidence:
                 snapshot = await asyncio.wait_for(
-                    collect(integration.provider, integration.id, integration.config, api_key,
-                            **({"since": since} if since else {})),
+                    collect(provider, integration_id, config, api_key, **({"since": since} if since else {})),
                     timeout=BACKSTOP_SECONDS)
-            partial = snapshot.partial_rows is not None
+            # Partial while rows this read set out to read were left unread, and for as long as a
+            # hole an earlier read left is still inside the window.
+            whole = _whole_from(snapshot, earlier)
+            partial = snapshot.partial_rows is not None or (
+                whole is not None and whole > parsed_date(snapshot.log["window_from"]))
 
             def store():
-                """Store the snapshot and its record in one transaction; None if the lease is no longer ours."""
-                # Lock the source row before any other row, and store only while this lease is still ours.
-                # A lease older than five minutes can be taken over, and an edit can then move the source;
-                # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
-                if not _still_holds(db, integration.id, started):
-                    db.rollback()
-                    return None
-                new = apply_snapshot(db, integration, snapshot, settings)
-                audit(db, actor, "integration.collected", integration.id, name=integration.name,
-                      resources=len(snapshot.resources), observations=len(snapshot.blocks),
-                      partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}),
-                      gaps=sorted(evidence.gaps),
-                      **({"gap_causes": {code: sorted(causes)
-                                         for code, causes in sorted(evidence.gap_causes.items())}}
-                         if evidence.gap_causes else {}),
-                      **({"read_to": snapshot.log["read_to"]} if snapshot.log else {}),
-                      **({"attempt": attempt} if attempt is not None else {}))
-                db.commit()
-                return new
+                """Store the snapshot and its record in one transaction; None if the lease is no longer ours.
+
+                The session is opened here, on the thread that uses it, and closed here: nothing
+                the caller does, cancelled or not, can close it under the store.
+                """
+                with factory() as own:
+                    # Lock the source row before any other row, and store only while this lease is still ours.
+                    # A lease older than five minutes can be taken over, and an edit can then move the source;
+                    # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
+                    if not _still_holds(own, integration_id, started):
+                        return None
+                    source = own.get(Integration, integration_id)
+                    new = apply_snapshot(own, source, snapshot, settings)
+                    if partial:
+                        source.status = "partial"
+                    audit(own, actor, "integration.collected", source.id, name=source.name,
+                          resources=len(snapshot.resources), observations=len(snapshot.blocks), partial=partial,
+                          **({"rows_kept": snapshot.partial_rows} if snapshot.partial_rows is not None else {}),
+                          gaps=sorted(evidence.gaps),
+                          **({"gap_causes": {code: sorted(causes)
+                                             for code, causes in sorted(evidence.gap_causes.items())}}
+                             if evidence.gap_causes else {}),
+                          **({"read_to": snapshot.log["read_to"], "whole_from": whole.isoformat()}
+                             if snapshot.log else {}),
+                          **({"attempt": attempt} if attempt is not None else {}))
+                    own.commit()
+                    stored.append(True)
+                    return new
 
             # Off the server's loop: storing is blocking database work and requests go on meanwhile.
             read_at = time.monotonic()
@@ -441,6 +499,10 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             _report("ended", name, outcome="partial" if partial else "stored", **spent(evidence),
                     store_seconds=round(time.monotonic() - read_at, 2), items_read=len(snapshot.resources),
                     items_new=new[0], lookups_read=len(snapshot.blocks), lookups_new=new[1])
+        except asyncio.CancelledError:
+            # Stopped by the server or a dropped request. A store already begun was waited for.
+            _report("ended", name, outcome="stopped", **spent(evidence), stored=bool(stored))
+            raise
         except Exception as exc:
             db.rollback()
             if not _still_holds(db, integration_id, started):

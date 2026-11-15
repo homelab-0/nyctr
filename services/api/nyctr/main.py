@@ -21,9 +21,11 @@ from . import __version__, access, assistant, guests, query, removal, worker
 from . import blocks as block_list
 from .collection import (  # noqa: F401
     after_collection,
+    analyse,
     apply_snapshot,
     collect_integration,
     last_gaps,
+    off_loop,
     parsed_date,
     show_log,
 )
@@ -571,12 +573,12 @@ def create_app(settings: Settings | None = None):
         if error:
             raise HTTPException(502, error)
         # Deterministic analysis and the written guest rule run on the stored evidence.
-        due = after_collection(db, settings)
-        db.commit()
-        await guests.enforce(db, settings, due)
+        # Off the server's loop, and never alongside the analysis of a scheduled pass.
+        await guests.enforce(db, settings, await off_loop(lambda: analyse(factory, settings)))
+        stored = db.get(Integration, integration_id)
         return {"ok": True, "resource_count": len(snapshot.resources), "observation_count": len(snapshot.blocks),
-                "partial": snapshot.partial_rows is not None,
-                "gaps": len(last_gaps(db, stored)) if (stored := db.get(Integration, integration_id)) else 0}
+                "partial": stored.status == "partial" if stored else snapshot.partial_rows is not None,
+                "gaps": len(last_gaps(db, stored)) if stored else 0}
 
     @app.get("/api/devices")
     def devices(auth=Depends(identity), db: Session = Depends(get_db)):

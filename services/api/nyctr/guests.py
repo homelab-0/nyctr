@@ -413,10 +413,11 @@ async def enforce(db: Session, settings: Settings, due: list[tuple[str, str]]) -
     for device_id in [device.id for device in guest_devices(db)
                       if state_of(device, _actions(db, device.id)) == "locked" and _grant(device).get("authorized")]:
         count += await act_on(device_id, "lock", "Locked device was authorised again")
-    from .analysis import refresh_findings
+    from .analysis import ONE_AT_A_TIME, refresh_findings
 
-    refresh_findings(db)
-    db.commit()
+    with ONE_AT_A_TIME:
+        refresh_findings(db)
+        db.commit()
     return count
 
 

@@ -23,7 +23,7 @@ from sqlalchemy import select, update
 
 from . import schedule
 from .access import OPEN, BeingEnded, clear_stale_reviews, end_lease
-from .collection import after_collection, collect_integration, off_loop
+from .collection import analyse, collect_integration, off_loop
 from .guests import enforce
 from .models import Integration, Lease, utcnow
 from .security import audit
@@ -93,13 +93,9 @@ async def collect_all(factory, settings, actor: str | None = None, *, plan=None,
 
 async def _analyse(factory, settings) -> None:
     """Run analysis on the stored evidence and apply the guest rule once."""
+    due = await off_loop(lambda: analyse(factory, settings))
     with factory() as db:
-        def analyse():
-            """Blocking database work over everything stored, kept off the server's loop."""
-            due = after_collection(db, settings)
-            db.commit()
-            return due
-        await enforce(db, settings, await off_loop(analyse))
+        await enforce(db, settings, due)
 
 
 async def retry_due(factory, settings, plan, clock) -> None:

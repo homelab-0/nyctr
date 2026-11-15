@@ -7,10 +7,15 @@ updated and resolved by re-running the rules after every collection.
 
 from __future__ import annotations
 
+import threading
+
 from sqlalchemy import select
 
 from .integrations import registry
 from .models import Finding, GuestAction, Integration, Lease, Resource, utc
+
+# Held from the start of an analysis to its commit, so two in one process never add the same finding.
+ONE_AT_A_TIME = threading.Lock()
 
 
 def _workload_firewall(resources: list[Resource]) -> list[dict]:
