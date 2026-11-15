@@ -55,9 +55,8 @@ A store is one transaction that begins by checking the lease on the source: it
 is stored whole or not at all. A scheduled pass or a person's Collect that is
 stopped during a store waits for the store to end, however often it is
 cancelled. A collection started by the nudge address is not waited for when the
-server stops. If it is still reading its source, it ends as if killed, with
-nothing stored and its lease left to run out. If its store has already begun,
-that store still commits. A store reads what is already stored in a fixed number of statements
+server stops: it ends as if killed, with nothing stored and its lease left to
+run out, whether or not its store had begun. A store reads what is already stored in a fixed number of statements
 plus one per 500 new identifiers, never one per item. On SQLite, which allows
 one writer, a request that writes waits for a store in progress and fails if
 the wait passes five seconds. On PostgreSQL a request waits only if it locks
