@@ -4,14 +4,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../api';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
-import type { CollectionSchedule, Rules } from '../types';
-import Setup from './Setup';
+import type { AddressSeen, CollectionSchedule, Rules } from '../types';
+import Setup, { addressText } from './Setup';
 
 const rules: Rules = {
   access: { enabled: false, max_score: 25, max_minutes: 60, per_day: 4 },
   guest: { enabled: false, hits: 3, minutes: 5 },
   writes: { access: 'none', guests: 'none' },
   sources: [],
+};
+
+/** What the address check answers behind one listed proxy that passed on a forged entry and the real one. */
+const seen: AddressSeen = {
+  address: '198.51.100.21',
+  peer: '10.42.0.10',
+  via_proxy: true,
+  why: 'forwarded',
+  entry: 1,
+  entries: 2,
+  unlisted: null,
+  address_is_proxy: false,
+  proxy_hops: 1,
+  old_name: false,
 };
 
 /** Opens the installation tab over a fabricated schedule that a save replaces. */
@@ -21,6 +35,7 @@ function open(first: CollectionSchedule, mode: 'live' | 'demo' = 'live') {
     'GET /rules': rules,
     'GET /auth/config': { mode, local_enabled: true, oidc_enabled: false },
     'GET /assistant': { provider: 'off', model: null },
+    'GET /me/address': seen,
     'GET /collection': () => current,
     'PUT /collection': (body: unknown) => {
       const sent = body as { enabled: boolean; minutes: number };
@@ -44,6 +59,7 @@ const system = {
   'GET /rules': rules,
   'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
   'GET /assistant': { provider: 'off', model: null },
+  'GET /me/address': seen,
 };
 
 /** Holds back every later request of one kind until `release` is called. */
@@ -293,5 +309,124 @@ describe('collection schedule in Setup', () => {
     expect(await screen.findByText('NYCTR_MODE')).toBeDefined();
     expect(screen.queryByText('Automatic collection')).toBeNull();
     expect(screen.queryByText('NYCTR_COLLECT_INTERVAL_SECONDS')).toBeNull();
+  });
+});
+
+describe('the address Nyctr sees for you, in Setup', () => {
+  /** Opens the installation tab over one fabricated answer of the address check. */
+  const check = (answer: unknown) => {
+    mockApi({ ...system, 'GET /collection': scheduleFixture(), 'GET /me/address': answer });
+    render(<Setup params={new URLSearchParams('tab=system')} />);
+  };
+  /** Waits for the answer to be on screen for as long as a busy machine may need. */
+  const shown = (text: string) => screen.findByText(text, undefined, { timeout: 20_000 });
+  const patient = 30_000;
+
+  it(
+    'shows the address, the proxy the connection came from and which passed-on address was read',
+    async () => {
+      check(seen);
+      expect(await shown('198.51.100.21')).toBeDefined();
+      expect(
+        screen.getByText(
+          'The connection came from 10.42.0.10, which is on your list of proxies. Nyctr read address 1 of the 2 it passed on, counted from the right: the one your proxy wrote.',
+        ),
+      ).toBeDefined();
+      expect(
+        screen.getByText(/something in front of your proxy is hiding your address/),
+      ).toBeDefined();
+    },
+    patient,
+  );
+
+  it(
+    'says so when it cannot tell the address, and never shows the proxy as if it were you',
+    async () => {
+      check({ ...seen, address: null, why: 'missing', entry: null, entries: 0 });
+      expect(await shown('Nyctr cannot tell your address')).toBeDefined();
+      // The line that states the address never holds the proxy's, and the sentence under it
+      // names the proxy only as where the connection came from.
+      expect(document.querySelector('p.rule')?.textContent).toBe('Nyctr cannot tell your address');
+      expect(
+        screen.getByText(
+          'The connection came from 10.42.0.10, which is on your list of proxies, but it passed no address on. Set the proxy to add the address it saw (X-Forwarded-For).',
+        ),
+      ).toBeDefined();
+      expect(screen.getByText(/counted together, and no device is recognised/)).toBeDefined();
+      expect(screen.queryByText(/hiding your address/)).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'says to raise the number of proxies counted when the address shown is on the list of proxies',
+    async () => {
+      check({ ...seen, address: '10.42.0.11', address_is_proxy: true });
+      expect(await shown('10.42.0.11')).toBeDefined();
+      expect(
+        screen.getByText(
+          /^This address is on your list of proxies\. If it is one of your proxies and not your device, something in front of your proxy is hiding your address, or raise the number of proxies Nyctr counts\./,
+        ),
+      ).toBeDefined();
+      cleanup();
+      check(seen);
+      expect(await shown('198.51.100.21')).toBeDefined();
+      expect(screen.queryByText(/raise the number of proxies Nyctr counts/)).toBeNull();
+      expect(screen.getByText(/^If this is a router or load balancer/)).toBeDefined();
+    },
+    patient,
+  );
+
+  it(
+    'warns that the list of proxies is under the old name only while it is',
+    async () => {
+      check({ ...seen, old_name: true });
+      expect(await shown('Your list of proxies is set under an old name.')).toBeDefined();
+      expect(screen.getByText(/That name will\s+stop working in a later release/)).toBeDefined();
+      expect(screen.getByText('FORWARDED_ALLOW_IPS')).toBeDefined();
+      cleanup();
+      check(seen);
+      expect(await shown('198.51.100.21')).toBeDefined();
+      expect(screen.queryByText('Your list of proxies is set under an old name.')).toBeNull();
+      expect(screen.queryByText('FORWARDED_ALLOW_IPS')).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'shows a refusal instead of an address',
+    async () => {
+      check({ __status: 403, detail: 'Administrator access required' });
+      expect(await shown('Administrator access required')).toBeDefined();
+      expect(screen.queryByText('Nyctr cannot tell your address')).toBeNull();
+    },
+    patient,
+  );
+
+  it('explains every way an address is or is not worked out', () => {
+    const say = (change: Partial<AddressSeen>) => addressText({ ...seen, ...change });
+    expect(say({ why: 'peer', via_proxy: false, entry: null })).toMatch(
+      /^The connection came straight from this address\. It is not on your list of proxies/,
+    );
+    expect(say({ why: 'short', entry: null, entries: 1, proxy_hops: 2 })).toMatch(
+      /passed on 1 and Nyctr is set to read number 2 from the right/,
+    );
+    expect(
+      say({ why: 'unlisted', address: null, entry: 1, unlisted: '10.42.0.11', proxy_hops: 2 }),
+    ).toMatch(
+      /but 10\.42\.0\.11, at position 1 from the right of what it passed on, is not on the list\. Nyctr is set to count 2 proxies, and every one of them must be on the list/,
+    );
+    expect(say({ why: 'zone', address: null, peer: 'fe80::1%eth0', via_proxy: false })).toMatch(
+      /^The connection came from fe80::1%eth0, an address that only works on one network link/,
+    );
+    expect(say({ why: 'hops', address: null, proxy_hops: 0 })).toMatch(
+      /Nyctr is set to count 0 proxies\. The number must be 1 or more\.$/,
+    );
+    expect(say({ why: 'malformed', entry: 1 })).toMatch(
+      /position 1 from the right is not an address/,
+    );
+    expect(say({ why: 'no_peer', peer: null })).toBe(
+      'The server did not say where the connection came from.',
+    );
   });
 });

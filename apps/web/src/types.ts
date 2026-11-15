@@ -428,6 +428,33 @@ export interface AssistantAnswer {
   provider: 'model' | 'sample';
   model: string;
 }
+/** The address Nyctr sees for the administrator's own request, and how it was worked out. */
+export interface AddressSeen {
+  address: string | null;
+  /** Where the connection itself came from: the client, or the proxy in front of Nyctr. */
+  peer: string | null;
+  via_proxy: boolean;
+  why:
+    | 'peer'
+    | 'forwarded'
+    | 'no_peer'
+    | 'zone'
+    | 'missing'
+    | 'short'
+    | 'hops'
+    | 'malformed'
+    | 'unlisted';
+  /** Which passed-on address was read or refused, counted from the right, out of `entries`. */
+  entry: number | null;
+  entries: number;
+  /** The passed-on address that should be one of the operator's proxies and is not on the list. */
+  unlisted: string | null;
+  /** The address read is itself on the list of proxies: too few proxies may be counted. */
+  address_is_proxy: boolean;
+  /** The list of proxies still comes from the variable name that will stop working. */
+  old_name: boolean;
+  proxy_hops: number;
+}
 export interface AssistantConfig {
   provider: 'model' | 'sample' | 'off';
   model: string;
