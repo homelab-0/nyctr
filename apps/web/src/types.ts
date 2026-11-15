@@ -428,6 +428,18 @@ export interface AssistantAnswer {
   provider: 'model' | 'sample';
   model: string;
 }
+/** The address Nyctr sees for the administrator's own request, and how it was worked out. */
+export interface AddressSeen {
+  address: string | null;
+  /** Where the connection itself came from: the client, or the proxy in front of Nyctr. */
+  peer: string | null;
+  via_proxy: boolean;
+  why: 'peer' | 'forwarded' | 'no_peer' | 'missing' | 'short' | 'malformed';
+  /** Which passed-on address was read, counted from the right, out of `entries`. */
+  entry: number | null;
+  entries: number;
+  proxy_hops: number;
+}
 export interface AssistantConfig {
   provider: 'model' | 'sample' | 'off';
   model: string;

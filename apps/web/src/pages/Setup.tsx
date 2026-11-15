@@ -14,6 +14,7 @@ import { span, useNow, writeText } from '../lib/format';
 import { UNREACHABLE, nextCollection, useSchedule } from '../lib/schedule';
 import type {
   AccessRule,
+  AddressSeen,
   AssistantConfig,
   AuthConfig,
   CollectionSchedule,
@@ -484,6 +485,55 @@ function SystemPanel({ rules }: { rules: Rules }) {
   );
 }
 
+/** How Nyctr worked out the address, or why it has none, in words an operator can act on. */
+export function addressText(seen: AddressSeen): string {
+  const proxy = `The connection came from ${seen.peer}, which is on your list of proxies`;
+  switch (seen.why) {
+    case 'peer':
+      return `The connection came straight from this address. It is not on your list of proxies, so nothing it said about another address was read. If one of your proxies sits at this address, add it to the list.`;
+    case 'forwarded':
+      return `${proxy}. Nyctr read address ${seen.entry} of the ${seen.entries} it passed on, counted from the right: the one your proxy wrote.`;
+    case 'missing':
+      return `${proxy}, but it passed no address on. Set the proxy to add the address it saw (X-Forwarded-For).`;
+    case 'short':
+      return `${proxy}, but it passed on ${seen.entries} and Nyctr is set to read number ${seen.proxy_hops} from the right. Lower the number of proxies Nyctr counts, or check that each proxy adds the address it saw.`;
+    case 'malformed':
+      return `${proxy}, but what it passed on at position ${seen.entry} from the right is not an address.`;
+    default:
+      return 'The server did not say where the connection came from.';
+  }
+}
+
+/** The operator's check that a proxy passes the right address on, before members rely on it. */
+function AddressPanel() {
+  const seen = useApi<AddressSeen>('/me/address');
+  return (
+    <Panel
+      title="The address Nyctr sees for you"
+      hint="Use this to check your proxy. It should be the address of the device you are on now."
+    >
+      {seen.error ? (
+        <InlineError message={seen.error} />
+      ) : !seen.data ? (
+        <p className="aside">Checking…</p>
+      ) : (
+        <div className="stack">
+          <p className="rule mono">{seen.data.address || 'Nyctr cannot tell your address'}</p>
+          <p>{addressText(seen.data)}</p>
+          <p className="aside">
+            {seen.data.address
+              ? 'If this is a router or load balancer and not your device, something in front of your proxy is hiding your address.'
+              : 'Sign-in attempts from every request like this one are counted together, and no device is recognised.'}{' '}
+            Set with <span className="mono">FORWARDED_ALLOW_IPS</span> (your proxies) and{' '}
+            <span className="mono">NYCTR_PROXY_HOPS</span> (how many a request passes, now{' '}
+            {seen.data.proxy_hops}).
+          </p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 /** Rules Nyctr acts on, who owns which device, and how the server is configured. */
 export default function Setup({ params }: { params: URLSearchParams }) {
   const rules = useApi<Rules>('/rules');
@@ -517,6 +567,7 @@ export default function Setup({ params }: { params: URLSearchParams }) {
         <div className="stack">
           <SchedulePanel />
           <SystemPanel rules={rules.data} />
+          <AddressPanel />
         </div>
       )}
     </div>
