@@ -71,7 +71,9 @@ gaps". Its card says what could not be read and what that means, and the
 Briefing lists it under "Needs you" until a later collection reads everything. A
 collection that fails stores nothing, so the gaps of the last stored collection
 stay on the card beside the error. A partly collected source is listed there
-too, with a link to its Edit form, where a shorter time window is the cure.
+too, with a link to its Edit form. It clears by itself once the lookups that
+were left out are older than the time window; a shorter time window clears it
+sooner.
 
 A source of blocked lookups is read from where its last stored collection
 ended, ten minutes earlier to be safe, so a collection every 15 minutes reads
@@ -83,18 +85,22 @@ stored. A failed collection stored nothing, so the one after it picks up from
 the last stored one.
 
 The ten minutes are a limit. A lookup the source adds to its log more than ten
-minutes after it happened, when a later lookup has already been read, is never
-read, and nothing on the source's card says so: the card still says connected.
-Nyctr cannot see such a lookup, so it cannot count them. If a source is known
+minutes after it happened may be missed: it is read only if the next read
+still starts before it, which it does not once a later lookup has been stored
+more than ten minutes after it. Nothing on the source's card says so: the card
+still says connected. Nyctr cannot see such a lookup, so it cannot count them. If a source is known
 to list lookups that late, its blocked lookups in Nyctr are not complete.
 
 A source is partly collected when lookups inside what a collection set out to
 read were left unread: typically the first collection on a busy source, which
-keeps the most recent 4,000. The collections after it pick up from there and
-leave nothing more unread, but the older lookups that first read left out are
-not gone back for. The source therefore stays partly collected until the
-stretch that was left out has passed out of its time window, at most the
-length of the window, and then says connected again.
+keeps the most recent 4,000. The collections after it pick up from there, and
+on most sources they leave nothing more unread, but the older lookups that
+first read left out are not gone back for. The source therefore stays partly
+collected until the stretch that was left out has passed out of its time
+window, and then says connected again: one window's length after the last read
+that left lookups out. A source with more than 4,000 new blocked lookups
+between two collections leaves some unread each time, and stays partly
+collected for as long as that goes on.
 
 Where the source's answer says why, the card says it: the source refused the
 read (this key may not read it), or the source had an error of its own (the next

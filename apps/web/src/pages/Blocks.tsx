@@ -203,8 +203,8 @@ export default function Blocks() {
           {partial.map((source) => (
             <div className="note yellow" key={source.id}>
               <span>
-                <b>{source.name}</b>: only the most recent blocked lookups were read at its last
-                collection, so older ones are missing.
+                <b>{source.name}</b>: only the most recent blocked lookups were read, so older ones
+                in its time window are missing.
               </span>
             </div>
           ))}

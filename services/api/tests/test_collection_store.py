@@ -18,7 +18,17 @@ from nyctr.assistant import attention
 from nyctr.collection import collect_integration
 from nyctr.guests import enforce
 from nyctr.integrations import Snapshot, core, registry
-from nyctr.models import Audit, Finding, GuestAction, Integration, Observation, Relationship, Resource, Sighting, utcnow
+from nyctr.models import (
+    Audit,
+    Finding,
+    GuestAction,
+    Integration,
+    Observation,
+    Relationship,
+    Resource,
+    Sighting,
+    utcnow,
+)
 
 KEY = "fabricated-key-never-logged"
 NAME = 'Office "DNS"\nsecond line'

@@ -43,16 +43,21 @@ answer into a snapshot. Storing what was read is blocking database work and
 runs on a worker thread, in a database session of its own, so the API goes on
 answering meanwhile. The analysis after a collection runs the same way, whether
 the schedule, a person or a nudge started it, and one analysis runs at a time
-in a process. One step is still on the loop: after the analysis the guest rule
-is applied, and it ends by refreshing the findings over every stored item. The
-loop is held for as long as that takes, which grows with what is stored.
+in a process. After the analysis the guest rule is applied on the loop, one
+call to the source per device it acts on, each committed as it is made. The
+refresh of findings that ends it, and the one after an administrator's guest
+action, run on a worker thread in a session of their own and take their turn
+behind any analysis that is running, so the loop does not wait for either. A
+guest action is committed before that refresh, so it is on record whatever the
+refresh meets.
 
 A store is one transaction that begins by checking the lease on the source: it
 is stored whole or not at all. A scheduled pass or a person's Collect that is
 stopped during a store waits for the store to end, however often it is
 cancelled. A collection started by the nudge address is not waited for when the
-server stops: it ends as if killed, with nothing stored and its lease left to
-run out. A store reads what is already stored in a fixed number of statements
+server stops. If it is still reading its source, it ends as if killed, with
+nothing stored and its lease left to run out. If its store has already begun,
+that store still commits. A store reads what is already stored in a fixed number of statements
 plus one per 500 new identifiers, never one per item. On SQLite, which allows
 one writer, a request that writes waits for a store in progress and fails if
 the wait passes five seconds. On PostgreSQL a request waits only if it locks

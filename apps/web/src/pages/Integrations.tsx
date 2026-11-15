@@ -45,6 +45,10 @@ const FIXED_SOURCE =
 const PARTIAL_NOTE =
   "Only the most recent blocked lookups were read. Older ones in this source's time window were not.";
 
+/** Added on the card, so nobody is asked to act where waiting is enough. */
+const PARTIAL_CLEARS =
+  'This clears by itself once the missing ones are older than the time window. A shorter time window clears it sooner.';
+
 /**
  * Collects configuration for one integration and a server secret reference.
  * The fields come from the integration's own declaration, so a new integration gets a form
@@ -608,7 +612,11 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <strong>{nextCollection(schedule.data, now)}</strong>
                   </div>
                 )}
-                {integration.status === 'partial' && <Notice tone="amber">{PARTIAL_NOTE}</Notice>}
+                {integration.status === 'partial' && (
+                  <Notice tone="amber">
+                    {PARTIAL_NOTE} {PARTIAL_CLEARS}
+                  </Notice>
+                )}
                 {integration.last_error && (
                   <div className="inline-error small-text">
                     <span>

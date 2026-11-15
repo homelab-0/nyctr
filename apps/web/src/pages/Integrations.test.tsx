@@ -669,6 +669,12 @@ describe('integrations add capabilities', () => {
         /Only the most recent blocked lookups were read\. Older ones in this source's time window were not\./,
       ),
     ).toBeTruthy();
+    // Nobody is asked to act where waiting is enough.
+    expect(
+      screen.getByText(
+        /This clears by itself once the missing ones are older than the time window\./,
+      ),
+    ).toBeTruthy();
     expect(screen.getByText('Partial')).toBeTruthy();
     expect(screen.queryByText('Error')).toBeNull();
     expect(screen.queryByText('Connected')).toBeNull();
