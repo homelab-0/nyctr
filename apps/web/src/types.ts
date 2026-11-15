@@ -459,6 +459,36 @@ export interface AssistantConfig {
   provider: 'model' | 'sample' | 'off';
   model: string;
 }
+/** How much a call to the model says about itself to a tracing proxy. */
+export type TraceStyle = 'off' | 'standard' | 'proxy' | 'proxy_body';
+/** The model connection in force, as an administrator sees it. The key is never part of it. */
+export interface ModelConnection {
+  connected: boolean;
+  endpoint: string;
+  model: string;
+  /** The name of the server secret that holds the key; empty when none is named. */
+  secret_ref: string;
+  /** Where the key comes from: a named secret, the server's own setting, or no key at all. */
+  key: 'reference' | 'server' | 'none';
+  trace: TraceStyle;
+  timeout_seconds: number;
+  /** Where the value came from: saved in the Console, the server's settings, or nowhere. */
+  source: 'console' | 'deployment' | 'none';
+  /** Why a saved connection cannot be used now, in plain words; null when it can. */
+  problem: string | null;
+  /** False in the demo workspace, where a model cannot be connected. */
+  editable: boolean;
+  /** Host names the operator allows an endpoint on. */
+  hosts: string[];
+  styles: TraceStyle[];
+  /** The shortest and longest time limit, in seconds. */
+  seconds: [number, number];
+}
+/** What one test of the model found. Nothing the endpoint said is included. */
+export interface ModelTest {
+  outcome: 'reachable' | 'refused' | 'not_reachable' | 'wrong_shape' | 'too_slow';
+  status: number | null;
+}
 export interface Insight {
   take: string;
   reasoning: string[];

@@ -332,6 +332,18 @@ assistant:
   # Optional, when the endpoint needs a key.
   existingSecret: nyctr-model
   apiKeyKey: api-key      # the key inside that Secret; this is the default
+  # Optional. off (the default) sends no trace header to baseUrl; standard,
+  # proxy and proxy_body are described in docs/model.md.
+  trace: proxy
+  # Optional. An administrator can also connect the model in the Console, on
+  # these servers (besides baseUrl's own) and with these keys, named there by
+  # envName. A bare name allows HTTPS on port 443 only; plain HTTP or another
+  # port is written in full. Empty lists allow no other server and no other key.
+  hosts: ["http://model-gateway.ai.svc.cluster.local:4000", llm.example.org]
+  secrets:
+    - envName: NYCTR_MODEL_SECRET_GATEWAY
+      existingSecret: nyctr-model
+      key: api-key
 ```
 
 The pod cannot start if a referenced Secret lacks the named key, so set

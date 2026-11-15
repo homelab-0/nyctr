@@ -103,7 +103,7 @@ These screenshots show the running application with synthetic demonstration data
 | Proxmox VE | Read-only nodes, bridges, guests, network cards and firewall switches | Experimental; never run against a cluster | Firewall rules, SDN |
 | Pi-hole | Read-only blocked lookups from a Pi-hole v6 resolver with its client labels. Reports blocks; does not open them, so its requests always wait for a person | Experimental; sign-in follows the published contract, query-log fields unverified against a live Pi-hole | Opening an address, list names |
 | Graph queries | Read-only GraphQL endpoint with length, depth and result limits; schema browser | Implemented | Saved queries, pagination |
-| Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint you configure | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
+| Assistant | Attention list (rules only); questions and finding insights through an OpenAI-compatible endpoint an administrator connects in the console or the operator sets on the server, with trace headers for a proxy in front ([the model](docs/model.md)) | Implemented. Demo without a model returns labelled sample answers; live without a model is off | External MCP read tools |
 | Packaging | Dockerfile, PostgreSQL Compose, Helm chart, acceptance stack, release workflow | Implemented. The release workflow publishes images from `v0.1.0-alpha.1` and the chart from `v0.1.0-alpha.2` | Upgrade tooling |
 
 Synthetic findings in demo mode demonstrate the workflow. The initial live
@@ -181,7 +181,9 @@ that can change their source are accepted there (today `nextdns` and
 | `NYCTR_PROVIDER_WRITES=unifi_network` | Administrators may issue and end guest passes and cut off, restore or lock out a guest device; the cut-off rule may unauthorise a guest. |
 | `NYCTR_COLLECT_INTERVAL_SECONDS=300` | Optional starting interval for scheduled collection. The schedule itself is set in the console (Setup, This installation), is on by default at 15 minutes, and a value saved there replaces this one. The cut-off rule and lock-out act at every collection, so with the schedule on a written rule can act with nobody at the console. |
 | `NYCTR_NUDGE_TOKEN=<32+ characters>` | Lets the UniFi console call `/api/hooks/collect/<token>` (for example from an Alarm Manager webhook) so Nyctr collects straight away when a client connects. |
-| `NYCTR_AI_BASE_URL`, `NYCTR_AI_MODEL`, `NYCTR_AI_API_KEY` | An OpenAI-compatible chat endpoint for the assistant, such as a LiteLLM proxy. The model receives a bounded, redacted evidence pack and no credentials. |
+| `NYCTR_AI_BASE_URL`, `NYCTR_AI_MODEL`, `NYCTR_AI_API_KEY` | An OpenAI-compatible chat endpoint for the assistant, such as a LiteLLM proxy. The model receives a bounded, redacted evidence pack and no credentials. An administrator can replace this starting value in the console (Setup, This installation). |
+| `NYCTR_AI_TRACE=proxy` | Optional. Sends trace headers with each call to that endpoint, for a tracing proxy in front of it (`standard` sends only the W3C header, `proxy_body` also writes the fields into the request). The default, `off`, sends none. A model connected in the console carries its own choice. |
+| `NYCTR_MODEL_HOSTS`, `NYCTR_MODEL_SECRET_<NAME>` | Where an administrator may connect the model in the console: the servers an endpoint may be on (besides the one in `NYCTR_AI_BASE_URL`), and the keys the console can name. A bare name allows HTTPS on port 443 only; another port, or plain HTTP, is written in full (`https://name:8443`, `http://name:4000`). Empty allows no other server and no other key. See [the model](docs/model.md). |
 
 Leave `NYCTR_PROVIDER_WRITES` empty to keep every source read only; requests are
 still scored and shown, and approvals are recorded as not applied. Use the

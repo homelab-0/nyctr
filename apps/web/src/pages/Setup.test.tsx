@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../api';
 import { mockApi } from '../test/mock-api';
+import { modelFixture } from '../test/model';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
 import type { AddressSeen, CollectionSchedule, Rules } from '../types';
 import Setup, { addressText } from './Setup';
@@ -34,7 +35,7 @@ function open(first: CollectionSchedule, mode: 'live' | 'demo' = 'live') {
   const calls = mockApi({
     'GET /rules': rules,
     'GET /auth/config': { mode, local_enabled: true, oidc_enabled: false },
-    'GET /assistant': { provider: 'off', model: null },
+    'GET /model': modelFixture(),
     'GET /me/address': seen,
     'GET /collection': () => current,
     'PUT /collection': (body: unknown) => {
@@ -58,7 +59,7 @@ const interval = () => screen.getByLabelText('How often to collect') as HTMLSele
 const system = {
   'GET /rules': rules,
   'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
-  'GET /assistant': { provider: 'off', model: null },
+  'GET /model': modelFixture(),
   'GET /me/address': seen,
 };
 
@@ -138,7 +139,7 @@ describe('collection schedule in Setup', () => {
     mockApi({
       'GET /rules': rules,
       'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
-      'GET /assistant': { provider: 'off', model: null },
+      'GET /model': modelFixture(),
       'GET /collection': scheduleFixture(),
       'PUT /collection': { __status: 403, detail: 'Administrator access required' },
     });
