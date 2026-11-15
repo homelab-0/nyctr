@@ -5,9 +5,11 @@ it changes no device's owner or classification. It is made on a person's first
 portal request after signing in, never inside sign-in, and only once an
 administrator has switched recognition on. The address comes from `peer`, the
 device that holds it from the gateway's own client list, read through the
-`devices.lookup` capability its integration declares. What a tie lets a member
-see is decided in `deps` and nowhere else; this module makes, lists and ends
-ties, and records a conflict where one must not be made.
+`devices.lookup` capability its integration declares, asked only of the site
+whose network holds the address. What a tie lets a member see is decided in
+`deps` and nowhere else; this module makes, lists and ends ties, and records a
+conflict where one must not be made. Its record keeping runs in the worker
+(`keep`), so that a member's page writes nothing unless a tie is made.
 """
 
 from __future__ import annotations
@@ -19,15 +21,17 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 
+from anyio import from_thread
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .collection import SECRET_REF
 from .deps import TIE_DAYS, admin, columns, get_db, identity, live_ties
 from .integrations import IntegrationError, core, registry
-from .models import DevicePresence, Integration, Resource, Setting, User, utc, utcnow
+from .models import Audit, DevicePresence, Integration, Resource, Setting, User, utc, utcnow
 from .retention import is_missing
 from .security import audit, digest
 from .sites import PORTAL
@@ -43,7 +47,7 @@ STORED_MINUTES = 15
 # An ended tie, and a conflict, stay on record this long.
 KEPT_DAYS = 90
 monotonic = time.monotonic
-_answers: dict[tuple[str, str], tuple[float, list | None]] = {}
+_answers: dict[tuple[str, str | None, str], tuple[float, list | None]] = {}
 
 # Why no device was tied, in the words the person reads. Nothing here says whose a device is.
 WHY = {
@@ -53,6 +57,9 @@ WHY = {
     "proxy": "This request reached Nyctr from an address your device shares with other people, so Nyctr cannot "
              "tell which device this is.",
     "outside": "This request did not come from your network, so Nyctr cannot tell which device this is.",
+    "two_networks": "More than one of your networks uses the address this request came from, so Nyctr cannot "
+                    "tell which device this is.",
+    "busy": "Nyctr was busy and has not worked out which device this is. Open this page again in a minute.",
     "ipv6": "This request reached Nyctr over IPv6, a kind of address Nyctr cannot yet match to a device, so it "
             "cannot tell which device this is.",
     "not_answering": "Nyctr could not ask your network which device this is just now. Open this page again in a "
@@ -92,50 +99,84 @@ def settings(db: Session) -> Recognition:
         return Recognition()
 
 
-def _sweep(db: Session, now) -> None:
-    """Close the ties whose 30 days ran out and drop what has been on record for 90 days. Record keeping only."""
-    for tie in db.scalars(select(DevicePresence).where(
-            DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
-            DevicePresence.last_at <= now - timedelta(days=TIE_DAYS))):
-        tie.ended_at, tie.ended_by = utc(tie.last_at) + timedelta(days=TIE_DAYS), "expired"
-    old = now - timedelta(days=KEPT_DAYS)
-    db.execute(delete(DevicePresence).where(or_(
-        DevicePresence.ended_at <= old, (DevicePresence.kind == "conflict") & (DevicePresence.last_at <= old))))
+def _ended(row: DevicePresence, now):
+    """When a tie ended: as recorded, or 30 days after its last sign-in if nothing has recorded that yet."""
+    lapsed = utc(row.last_at) + timedelta(days=TIE_DAYS)
+    return utc(row.ended_at) if row.ended_at else lapsed if row.kind == "tie" and lapsed <= now else None
 
 
-def _sources(db: Session, address) -> list[Integration]:
-    """The sources that collected a network whose range holds this address."""
+def keep(factory, now) -> None:
+    """Record keeping, run by the worker and by no page: close the ties whose 30 days ran out, drop the old records.
+
+    Each tie that lapsed gets its ending written down, with one audit record that says whose it
+    was. A record that ended 90 days ago, and a conflict last seen 90 days ago, is deleted, with
+    the addresses it held. What a tie shows never waits for this: `deps` counts the days itself.
+    """
+    with factory() as db:
+        for tie in db.scalars(select(DevicePresence).where(
+                DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
+                DevicePresence.last_at <= now - timedelta(days=TIE_DAYS))):
+            tie.ended_at, tie.ended_by = _ended(tie, now), "expired"
+            audit(db, None, "presence.ended", tie.device_id, user_id=tie.user_id, because="lapsed")
+        old = now - timedelta(days=KEPT_DAYS)
+        db.execute(delete(DevicePresence).where(or_(
+            DevicePresence.ended_at <= old, (DevicePresence.kind == "conflict") & (DevicePresence.last_at <= old))))
+        db.commit()
+
+
+def gone(db: Session, ids: list[str], by: str | None) -> None:
+    """Take the ties and conflicts on these devices off record, because the devices are going. The caller commits.
+
+    Each tie still in force is ended on record first, so the audit trail says whose it was.
+    """
+    for tie in db.scalars(select(DevicePresence).where(*live_ties(), DevicePresence.device_id.in_(ids))):
+        audit(db, by, "presence.ended", tie.device_id, user_id=tie.user_id, because="device_removed")
+    db.execute(delete(DevicePresence).where(DevicePresence.device_id.in_(ids)))
+
+
+def _places(db: Session, address) -> list[tuple[Integration, Resource | None]]:
+    """Each source, and site of it, that collected a network whose range holds this address."""
     found = set()
     for network in db.scalars(select(Resource).where(Resource.kind == "network")):
         for subnet in network.attributes.get("subnets") or []:
             try:
                 if address in ipaddress.ip_network(subnet):
-                    found.add(network.integration_id)
+                    found.add((network.integration_id, network.site_id or ""))
             except (TypeError, ValueError):
                 continue
-    return [row for id_ in sorted(found) if (row := db.get(Integration, id_)) is not None]
+    places = []
+    for source, site_id in sorted(found):
+        site = db.get(Resource, site_id) if site_id else None
+        if (integration := db.get(Integration, source)) is not None:
+            places.append((integration, site))
+    return places
 
 
-async def _holders(db: Session, integration: Integration, address, now) -> tuple[list | None, str]:
-    """Say which clients hold the address now: the gateway's answer, or fresh stored inventory if it gave none.
+async def _ask(provider, integration_id: str, config: dict, secret: str, address: str, site: str | None) -> list:
+    """One read of the gateway's client list for one site, with a time limit of its own."""
+    async with asyncio.timeout(READ_SECONDS):
+        with core.patience(READ_SECONDS):
+            return await provider.client_at(integration_id, provider.validate(config), secret, address, site)
+
+
+def _holders(db: Session, integration: Integration, site: Resource | None, address, now) -> tuple[list | None, str]:
+    """Say which clients of that site hold the address now: the gateway's answer, or fresh stored inventory.
 
     One paced, read-only call with a time limit, remembered for a minute whatever it
-    answered. None means nobody can say: the read failed and the inventory is old.
+    answered. It runs on the server's loop while this thread waits, so the server goes on
+    answering. None means nobody can say: the read failed and the inventory is old.
     """
     provider = registry.find(integration.provider)
     secret = os.environ.get(integration.secret_ref) if SECRET_REF.fullmatch(integration.secret_ref or "") else None
     answer = None
     if provider and provider.client_at and secret:
-        key = (integration.id, str(address))
+        key = (integration.id, site.source_id if site is not None else None, str(address))
         cached = _answers.get(key)
         if cached and monotonic() - cached[0] < REMEMBER_SECONDS:
             answer = cached[1]
         else:
             try:
-                async with asyncio.timeout(READ_SECONDS):
-                    with core.patience(READ_SECONDS):
-                        answer = await provider.client_at(
-                            integration.id, provider.validate(integration.config), secret, str(address))
+                answer = from_thread.run(_ask, provider, integration.id, integration.config, secret, key[2], key[1])
             except (IntegrationError, TimeoutError):
                 answer = None
             if len(_answers) >= 512:
@@ -147,8 +188,24 @@ async def _holders(db: Session, integration: Integration, address, now) -> tuple
         return None, "stored"
     clients = db.scalars(select(Resource).where(Resource.integration_id == integration.id, Resource.kind == "client"))
     return [{"id": row.id, "mac": row.attributes.get("mac")} for row in clients
-            if core.plain_address(row.attributes.get("ip")) == address
-            and not is_missing(row)], "stored"
+            if core.plain_address(row.attributes.get("ip")) == address and not is_missing(row)
+            and (site is None or row.site_id == site.id)], "stored"
+
+
+def _own_from(db: Session, device: Resource, user, now):
+    """The latest time Nyctr's own record says the device was, or may have been, someone else's: None if never.
+
+    That is the last time an administrator said whose it is, saved again unchanged or not, and,
+    on a device that is not shared, the end of the last tie anyone else held on it. A new tie
+    reaches back no further: what was looked up before then was not this person's.
+    """
+    times = [utc(at) for at in (db.scalar(select(func.max(Audit.created_at)).where(
+        Audit.action == "device.assignment_changed", Audit.target_id == device.id)),) if at is not None]
+    if device.classification != "shared":
+        times += [_ended(tie, now) or now for tie in db.scalars(select(DevicePresence).where(
+            DevicePresence.kind == "tie", DevicePresence.device_id == device.id,
+            DevicePresence.user_id != user.id))]
+    return max(times, default=None)
 
 
 def _record(db: Session, kind: str, user, device: Resource, holder: dict, basis: str, mark: str, now,
@@ -158,7 +215,10 @@ def _record(db: Session, kind: str, user, device: Resource, holder: dict, basis:
     row = db.scalar(select(DevicePresence).where(
         *live, DevicePresence.user_id == user.id, DevicePresence.device_id == device.id).limit(1))
     if row is None:
-        reach = now - timedelta(hours=settings(db).reach_back_hours) if kind == "tie" else None
+        reach = None
+        if kind == "tie":
+            reach = now - timedelta(hours=settings(db).reach_back_hours)
+            reach = max(reach, _own_from(db, device, user, now) or reach)
         row = DevicePresence(kind=kind, user_id=user.id, device_id=device.id, first_at=now, reach_from=reach)
         db.add(row)
         if kind == "tie":
@@ -178,25 +238,34 @@ def _barred(device: Resource, user) -> str | None:
     return "other_person" if device.classification == "personal" and device.owner_id != user.id else None
 
 
-async def recognise(db: Session, app_settings, user, session, seen, site: str) -> Found:
+def recognise(db: Session, app_settings, user, session, seen, site: str) -> Found:
     """Find the device this signed-in request came from and tie the person to it, or say why not.
 
     Each step fails to no tie. A tie this sign-in already made, or was told to
-    forget, is answered from the record, so the gateway is read once a sign-in.
+    forget, is answered from the record, so the gateway is read once a sign-in
+    and nothing is written after that. A database too busy to write the tie is
+    a reason like the others, not an error.
     """
+    try:
+        return _recognise(db, app_settings, user, session, seen, site)
+    except OperationalError:
+        db.rollback()
+        return Found(why="busy")
+
+
+def _recognise(db: Session, app_settings, user, session, seen, site: str) -> Found:
+    """The steps of `recognise`, in order."""
     if not settings(db).enabled:
         return Found(why="off")
     if app_settings.portal_url and site != PORTAL:
         return Found(why="console")
     now, mark = utcnow(), digest("presence:" + session.token_hash)
-    _sweep(db, now)
-    db.commit()
     known = db.scalar(select(DevicePresence).where(
         DevicePresence.kind == "tie", DevicePresence.user_id == user.id, DevicePresence.session == mark)
         .order_by(DevicePresence.last_at.desc()).limit(1))
     if known is not None:
         device = db.get(Resource, known.device_id)
-        if known.ended_at is not None or device is None:
+        if _ended(known, now) is not None or device is None:
             return Found(why="forgotten")
         return Found(why=barred) if (barred := _barred(device, user)) else Found(device, known)
     if seen.address is None:
@@ -209,22 +278,21 @@ async def recognise(db: Session, app_settings, user, session, seen, site: str) -
             db.commit()
         return Found(why="proxy")
     address = core.plain_address(seen.address)
-    sources = _sources(db, address) if address is not None else []
-    if not sources:
-        # No source collects a network's IPv6 range yet, so such a request is said to be that, not "outside".
-        return Found(why="ipv6" if address is not None and address.version == 6 else "outside")
-    holders, basis = [], "live"
-    for integration in sources:
-        answer, how = await _holders(db, integration, address, now)
-        if answer is None:
-            return Found(why="not_answering")
-        holders += [{**holder, "source": integration.id} for holder in answer]
-        basis = "stored" if how == "stored" else basis
+    if address is not None and address.version == 6:
+        return Found(why="ipv6")  # by rule, whatever a source collects: IPv4 carried inside IPv6 is IPv4 by now
+    places = _places(db, address) if address is not None else []
+    if len(places) != 1:
+        # Two sites, or two sources, that use one range: nothing says which of them the request came from.
+        return Found(why="two_networks" if places else "outside")
+    integration, where = places[0]
+    holders, basis = _holders(db, integration, where, address, now)
+    if holders is None:
+        return Found(why="not_answering")
     if len(holders) != 1:
         return Found(why="several" if holders else "nobody")
     # The row is held while the tie is made, so two people cannot both be the first on one device.
     device = db.scalar(select(Resource).where(Resource.id == holders[0]["id"]).with_for_update())
-    if device is None or device.kind != "client" or device.integration_id != holders[0]["source"]:
+    if device is None or device.kind != "client" or device.integration_id != integration.id:
         return Found(why="not_collected")
     barred = _barred(device, user)
     if barred == "infrastructure":
@@ -249,19 +317,17 @@ def attention(db: Session) -> list[dict]:
                        "Nyctr sees for you under Setup, This installation."}]
 
 
-def release(db: Session, device: Resource, by: str, now) -> int:
-    """End at once every tie on a device held by anyone but its owner, and say how many. The caller commits.
+def release(db: Session, device: Resource, named: list[str], by: str, now) -> int:
+    """End at once every tie on a device held by anyone its new assignment does not name. The caller commits.
 
-    For when an administrator changes whose a device is, so that it never stays
-    listed under people it no longer belongs to. A device that is shared now
-    keeps its ties: several people may hold one there.
+    For when an administrator changes whose a device is or who shares it: their
+    word replaces what sign-ins suggested, so the device never stays listed under
+    people it is no longer for. Someone else who does use a shared device is tied
+    again the next time they sign in on it.
     """
-    if device.classification == "shared":
-        return 0
     ended = 0
     for tie in db.scalars(select(DevicePresence).where(
-            *live_ties(now), DevicePresence.device_id == device.id,
-            DevicePresence.user_id != (device.owner_id or ""))):
+            *live_ties(now), DevicePresence.device_id == device.id, DevicePresence.user_id.not_in(named))):
         tie.ended_at, tie.ended_by, ended = now, by, ended + 1
         audit(db, by, "presence.ended", device.id, user_id=tie.user_id, because="assignment")
     return ended
@@ -283,15 +349,13 @@ def listed(auth=Depends(identity), db: Session = Depends(get_db)):
     Only an administrator is shown the address a person signed in from and the device's hardware address.
     """
     user, now = auth[0], utcnow()
-    _sweep(db, now)
-    db.commit()
     mine = [] if user.role == "admin" else [*live_ties(now), DevicePresence.user_id == user.id]
     rows = db.scalars(select(DevicePresence).where(*mine).order_by(DevicePresence.last_at.desc()))
     names = {row.id: row.name for row in db.scalars(select(User))}
     items = []
     for row in rows:
         device = db.get(Resource, row.device_id)
-        items.append({**columns(row, "id kind user_id device_id basis first_at last_at ended_at"),
+        items.append({**columns(row, "id kind user_id device_id basis first_at last_at"), "ended_at": _ended(row, now),
                       **(columns(row, "address mac") if user.role == "admin" else {}),
                       "user_name": names.get(row.user_id, ""), "device_name": device.name if device else ""})
     return {"items": items, **(settings(db).model_dump() if user.role == "admin" else {})}
@@ -301,13 +365,14 @@ def listed(auth=Depends(identity), db: Session = Depends(get_db)):
 def switch(body: Recognition, user=Depends(admin), db: Session = Depends(get_db)):
     """Switch recognition on or off and set how far back a tie reaches.
 
-    Switching it off ends every tie at once. A shorter reach applies to ties
-    already made; a longer one never widens them.
+    Switching it off ends every tie at once, each with its own audit record.
+    A shorter reach applies to ties already made; a longer one never widens them.
     """
     now, ended = utcnow(), 0
     for tie in db.scalars(select(DevicePresence).where(*live_ties(now))):
         if not body.enabled:
             tie.ended_at, tie.ended_by, ended = now, user.id, ended + 1
+            audit(db, user.id, "presence.ended", tie.device_id, user_id=tie.user_id, because="switched_off")
         tie.reach_from = max(utc(tie.reach_from), utc(tie.first_at) - timedelta(hours=body.reach_back_hours))
     row = db.get(Setting, KEY) or Setting(key=KEY)
     row.value, row.updated_at, row.updated_by = body.model_dump(), now, user.id

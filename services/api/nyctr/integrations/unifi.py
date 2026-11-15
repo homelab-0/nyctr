@@ -440,24 +440,25 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
     return snapshot
 
 
-async def client_at(integration_id: str, config: dict[str, Any], api_key: str, address: str) -> list[dict[str, Any]]:
-    """Say which connected clients hold an address now: the documented client list, read and nothing else.
+async def client_at(integration_id: str, config: dict[str, Any], api_key: str, address: str,
+                    site: str | None) -> list[dict[str, Any]]:
+    """Say which connected clients of one site hold an address now: its documented client list, read and nothing else.
 
-    The list is read whole and compared here, as addresses, so no spelling of
-    an address is left to the source to match. Paced like every other read.
+    Sites often use the same private range, so only the site whose network holds the address
+    is read, never every site's list. No site named, or one other than the site this source
+    is set to read, names nobody and sends nothing. The list is read whole and compared here,
+    as addresses, so no spelling of an address is left to the source to match. Paced like
+    every other read.
     """
     wanted, found = core.plain_address(address), []
-    if wanted is None:
+    if wanted is None or not site or config.get("site_id") not in (None, "", site):
         return found
     async with core.make_http_client(api_key) as client:
         reader = ReadClient(client, config["base_url"], pace(config["base_url"]))
-        sites = [config["site_id"]] if config.get("site_id") else [
-            source_id(site.get("id")) for site in (await offset_pages(reader, "/v1/sites"))[:16]]
-        for site in sites:
-            for row in await offset_pages(reader, f"/v1/sites/{site}/clients"):
-                if core.plain_address(row.get("ipAddress")) == wanted:
-                    found.append({"id": core.object_id(integration_id, "client", row.get("id")),
-                                  "mac": row["macAddress"] if isinstance(row.get("macAddress"), str) else None})
+        for row in await offset_pages(reader, f"/v1/sites/{source_id(site)}/clients"):
+            if core.plain_address(row.get("ipAddress")) == wanted:
+                found.append({"id": core.object_id(integration_id, "client", row.get("id")),
+                              "mac": row["macAddress"] if isinstance(row.get("macAddress"), str) else None})
     return found
 
 

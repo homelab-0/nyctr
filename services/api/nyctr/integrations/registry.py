@@ -138,9 +138,11 @@ class Provider:
     # Optional read: domain_listed(config, key, domain) -> bool, whether the address is already allowed
     # there. With it, Nyctr removes by itself what an opening that failed or was interrupted left behind.
     domain_listed: Callable[..., Awaitable[bool]] | None = None
-    # The read behind "devices.lookup": client_at(integration_id, config, key, address) -> the clients that
-    # hold that address now, as [{"id": <the resource id collection gives that client>, "mac": ...}].
-    # Read only. An address is compared with `core.plain_address`, never as text.
+    # The read behind "devices.lookup": client_at(integration_id, config, key, address, site) -> the clients
+    # of that site that hold that address now, as [{"id": <the resource id collection gives that client>,
+    # "mac": ...}]. `site` is the source's own id of the site whose network holds the address (the `source_id`
+    # of its site item), or None where the network was collected under no site. Read only, and only that
+    # site's list. An address is compared with `core.plain_address`, never as text.
     client_at: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None
     # issue_pass(config, key, scope, *, name, minutes, guest_limit, data_limit_mb, allowed) -> {"id", "code"}
     issue_pass: Callable[..., Awaitable[dict[str, Any]]] | None = None

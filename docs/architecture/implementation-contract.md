@@ -80,8 +80,9 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   caller's devices. `how` is `assigned` or `signed_in`. With recognition at sign-in switched on,
   the first request after signing in ties the caller to the one device the gateway says holds
   the request's address; when no device is recognised, `reason` is a code and `message` the
-  sentence to show (never whose a device is). A request over IPv6 has its own reason, `ipv6`:
-  no source collects IPv6 ranges, so it is never tied.
+  sentence to show (never whose a device is). A request over IPv6 is refused by rule with the
+  reason `ipv6`, an address that two sites or two sources both use with `two_networks`, and a
+  tie the database was too busy to write with `busy`; none is an error.
 - `GET /api/presence` -> `{items}`: a member's own ties in force; for an administrator every
   tie and conflict on record, with `enabled` and `reach_back_hours`. An item is
   `{id,kind,user_id,user_name,device_id,device_name,basis,first_at,last_at,ended_at}`, `kind`
@@ -91,9 +92,15 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 - `PUT /api/presence` with `{enabled,reach_back_hours}` (0 to 24) is admin-only. Switching it
   off ends every tie; a shorter reach applies to ties already made.
 - `DELETE /api/presence/{id}` ends a tie at once: a member their own, an administrator any.
-  Changing whose a device is (`PUT /api/devices/{id}/assignment`) also ends, in the same
-  transaction and audited, every tie on it held by anyone but the new owner, unless the device
-  is shared afterwards.
+  An assignment that changes a device's classification, owner or named people
+  (`PUT /api/devices/{id}/assignment`) also ends, in the same transaction, every tie on it
+  held by anyone it does not name. Each ending writes one `presence.ended` audit record with
+  the device, `user_id` and, unless a person ended that one tie, `because`: `assignment`,
+  `switched_off`, `lapsed` (written by the worker) or `device_removed`. `ended_at` in the
+  list is the recorded ending or, until the worker records it, 30 days after `last_at`.
+  A new tie's reach starts at the later of `first_at` minus `reach_back_hours`, the device's
+  last `device.assignment_changed` record and, unless the device is shared, the end of the
+  last tie another person held on it.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as

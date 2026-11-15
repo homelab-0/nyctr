@@ -338,19 +338,27 @@ the member workflow unless intentionally classified and assigned.
 With recognition at sign-in switched on, a member also sees the device they
 signed in on. On the first portal request after signing in (never inside
 sign-in) `nyctr/presence.py` takes the request's address from `nyctr/peer.py`,
-requires it to lie inside a network a source collected and not to be a listed
-proxy's, and asks that source's integration, through its `devices.lookup`
-capability, which client holds it now: one read with a five-second limit,
-paced, its answer remembered for a minute. If the read fails, the stored
-inventory stands in while the last collection is under 15 minutes old.
-Exactly one client must hold the address, and only an IPv4 address can be
-matched: a request over IPv6 is tied to nothing and the member is told why.
+requires it to be an IPv4 address inside exactly one collected network (one
+source, one site) and not a listed proxy's, and asks that source's
+integration, through its `devices.lookup` capability, which client of that
+site holds it now: one read with a five-second limit, paced, its answer
+remembered for a minute. If the read fails, that site's stored inventory
+stands in while the last collection is under 15 minutes old. Exactly one
+client must hold the address. A request over IPv6 is refused by rule, and an
+address two sites both use is tied to nothing; the member is told why. The
+route does its database work on a worker thread and writes only when a tie
+is made, so a busy database holds up that one request and answers it with a
+reason, never an error.
 A tie ends when its person or an administrator ends it, 30 days after the
-last sign-in, and when the device is given to someone else, to nobody or to
-infrastructure. The tie reaches back a set time
-before the first sign-in and assumes the person signing in was the one using
-the device in that time; `nyctr/deps.py` alone turns a tie or an assignment
-into what a member may see.
+last sign-in, when recognition is switched off, when an assignment no longer
+names its person, and when the device is dropped or its source removed; each
+ending is audited. The worker closes lapsed ties and deletes records 90 days
+old (`presence.keep`). The tie reaches back a set time before the first
+sign-in, never past the last time an administrator said whose the device is
+or, unless it is shared, past the end of another person's tie on it, and
+assumes the person signing in was the one using the device in that time;
+`nyctr/deps.py` alone turns a tie or an assignment into what a member may
+see.
 
 Inbox freshness and durable history are separate. Expired entries disappear
 from the requestable inbox; existing requests retain their evidence snapshot and

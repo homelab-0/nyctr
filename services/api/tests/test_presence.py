@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import dataclasses
+import inspect
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -11,13 +12,15 @@ import httpx
 import pytest
 from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
-from nyctr import peer, presence
+from nyctr import access, peer, presence, retention
 from nyctr.deps import observation_permitted, observations_permitted
-from nyctr.integrations import IntegrationError, core, registry
-from nyctr.models import Audit, DevicePresence, Integration, Observation, Resource, Setting, User, utcnow
+from nyctr.integrations import IntegrationError, core, registry, unifi
+from nyctr.models import Audit, DevicePresence, Integration, Observation, Resource, Setting, User, utc, utcnow
 from nyctr.security import hash_password
+from nyctr.worker import Upkeep
 
 KIM = ("kim@example.net", "a third secure password")
 LAPTOP, PHONE, TABLET, PRINTER, SHARED = (f"192.0.2.{n}" for n in (10, 11, 12, 20, 30))
@@ -32,16 +35,19 @@ def home(tmp_path, monkeypatch, switched_on=True, **settings):
     """A live installation whose gateway source collected one network and five devices.
 
     Returns the app and the fabricated client list its gateway answers from: which device
-    holds which address now, how often it was read, and whether it answers at all.
+    holds which address now, how often it was read and for which site, and whether it answers at all.
     """
     monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_GW", "fabricated-key")
     monkeypatch.setenv("NYCTR_CONNECTOR_HOSTS", "gateway.example")
-    gateway = {"holds": {name: row[0] for name, row in DEVICES.items()}, "reads": 0, "down": False}
+    gateway = {"holds": {name: row[0] for name, row in DEVICES.items()}, "reads": 0, "down": False, "sites": []}
 
-    async def client_at(integration_id, config, key, address):
+    async def client_at(integration_id, config, key, address, site):
         gateway["reads"] += 1
+        gateway["sites"].append(site)
         if gateway["down"]:
             raise IntegrationError("The source did not answer in time.", category="timeout")
+        if "answer" in gateway:
+            return gateway["answer"]
         return [{"id": f"{integration_id}:client:{name}", "mac": "00:00:5e:00:53:01"}
                 for name, held in gateway["holds"].items() if held == address]
 
@@ -102,7 +108,7 @@ def refused(app, address, code, says, **options):
     return told
 
 
-# --- AC-1: every way a tie is not made ---------------------------------------------------------------------------
+# --- Every way a tie is not made ---------------------------------------------------------------------------------
 
 
 def test_no_session_gets_no_answer_and_no_address_gets_no_tie(tmp_path, monkeypatch):
@@ -143,6 +149,96 @@ def test_an_address_that_names_no_one_device_of_a_person_is_tied_to_nothing(tmp_
     assert gateway["reads"] == (0 if code in {"outside", "ipv6"} else 1)
 
 
+def test_a_request_over_ipv6_is_refused_by_rule_even_where_a_network_lists_its_range(tmp_path, monkeypatch):
+    """IPv6 is never tied, whatever a source collects. IPv4 carried inside IPv6 is the IPv4 address and is tied as one."""
+    app, gateway = home(tmp_path, monkeypatch)
+    change(app, Resource, "gw:network:lan", attributes={"subnets": ["192.0.2.0/24", "2001:db8::/64"]})
+    change(app, Resource, "gw:client:phone", attributes={"ip": "2001:db8::10"})
+    gateway["holds"]["phone"] = "2001:db8::10"
+    refused(app, "2001:db8::10", "ipv6", "over IPv6")
+    assert gateway["reads"] == 0
+    with browser(app, "::ffff:" + LAPTOP) as client:
+        assert client.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
+
+
+def two_sites(app, cabin):
+    """Give the gateway two sites: what it collected so far is the home site's, and a cabin has a network and a boat."""
+    with app.state.session_factory() as db:
+        made = {"integration_id": "gw", "provider": "unifi_network", "observed_at": utcnow()}
+        for row in db.scalars(select(Resource).where(Resource.kind.in_(("network", "client")))):
+            row.site_id = "gw:site:home"
+        for name in ("home", "cabin"):
+            db.add(Resource(id=f"gw:site:{name}", name=name.title(), kind="site", source_id=name,
+                            site_id=f"gw:site:{name}", evidence_kind="observed", attributes={}, **made))
+        db.add(Resource(id="gw:network:cabin", name="Cabin", kind="network", source_id="cabin-lan",
+                        site_id="gw:site:cabin", evidence_kind="configured", attributes={"subnets": [cabin]}, **made))
+        db.add(Resource(id="gw:client:boat", name="Boat", kind="client", source_id="boat", site_id="gw:site:cabin",
+                        evidence_kind="observed", attributes={"ip": "198.51.100.7"}, **made))
+        db.commit()
+
+
+def test_an_address_two_sites_both_use_is_tied_to_nothing(tmp_path, monkeypatch):
+    """Home does not list the device yet, the cabin lists another at that address: nobody is asked, nobody is tied."""
+    app, gateway = home(tmp_path, monkeypatch)
+    two_sites(app, cabin="192.0.2.0/24")
+    gateway["holds"].update(phone=None, boat=PHONE)
+    refused(app, PHONE, "two_networks", "More than one of your networks")
+    assert gateway["reads"] == 0
+
+
+def test_an_address_is_asked_of_the_site_whose_network_holds_it(tmp_path, monkeypatch):
+    """Each site's own client list answers for its own range, and so does its own stored inventory."""
+    app, gateway = home(tmp_path, monkeypatch)
+    two_sites(app, cabin="198.51.100.0/24")
+    gateway["holds"]["boat"] = "198.51.100.7"
+    with browser(app, "198.51.100.7") as sam, browser(app, LAPTOP, KIM) as kim:
+        assert sam.get("/api/me/device").json()["device_id"] == "gw:client:boat"
+        assert kim.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
+    assert gateway["sites"] == ["cabin", "home"]
+    # The gateway is silent and the cabin's stored boat still shows the phone's address: only home's inventory counts.
+    gateway["down"] = True
+    change(app, Resource, "gw:client:boat", attributes={"ip": PHONE})
+    with browser(app, PHONE, KIM) as kim:
+        assert kim.get("/api/me/device").json()["device_id"] == "gw:client:phone"
+    assert [(tie.device_id, tie.basis) for tie in stored(app)][-1] == ("gw:client:phone", "stored")
+
+
+@pytest.mark.parametrize("answer", ["gw:network:lan", "other:client:laptop", "gw:client:nobody"])
+def test_a_holder_that_is_no_client_of_the_source_that_answered_is_tied_to_nothing(tmp_path, monkeypatch, answer):
+    """The gateway names something that is not a device, another source's device, or one Nyctr has not read."""
+    app, gateway = home(tmp_path, monkeypatch)
+    with app.state.session_factory() as db:
+        db.add(Integration(id="other", provider="unifi_network", name="Other", status="connected", config={}))
+        db.flush()
+        db.add(Resource(id="other:client:laptop", integration_id="other", name="Other laptop", kind="client",
+                        provider="unifi_network", source_id="laptop", observed_at=utcnow(), evidence_kind="observed",
+                        attributes={"ip": LAPTOP}))
+        db.commit()
+    gateway["answer"] = [{"id": answer, "mac": None}]
+    refused(app, LAPTOP, "not_collected", "has not read this device")
+
+
+def test_the_stored_inventory_leaves_out_a_device_that_has_left(tmp_path, monkeypatch):
+    """The gateway is silent and the laptop is marked as gone from its latest whole read: its old address names nobody."""
+    app, gateway = home(tmp_path, monkeypatch)
+    gateway["down"] = True
+    change(app, Resource, "gw:client:laptop", attributes={"ip": LAPTOP, retention.MISSING: True})
+    refused(app, LAPTOP, "nobody", "lists no device")
+
+
+def test_a_busy_database_is_a_reason_not_an_error_and_the_work_is_off_the_servers_loop(tmp_path, monkeypatch):
+    """A tie that cannot be written just now is not made, and the member is asked to open the page again."""
+    app, _gateway = home(tmp_path, monkeypatch)
+
+    def locked(*_args, **_more):
+        raise OperationalError("INSERT INTO device_presence", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(presence, "_record", locked)
+    refused(app, LAPTOP, "busy", "Open this page again")
+    # A blocking wait for the database must hold up this request only: neither runs on the loop.
+    assert not inspect.iscoroutinefunction(access.this_device) and not inspect.iscoroutinefunction(presence.recognise)
+
+
 def test_a_listed_proxys_address_is_tied_to_nothing_and_administrators_are_told(tmp_path, monkeypatch):
     """Everyone behind a proxy that hides them arrives from its address, which may itself be in the inventory."""
     app, gateway = home(tmp_path, monkeypatch, trusted_proxies=LAPTOP)
@@ -161,7 +257,7 @@ def test_a_gateway_that_does_not_answer_and_an_old_inventory_tie_nothing(tmp_pat
     change(app, Integration, "gw", last_sync=utcnow() - timedelta(minutes=16))
     refused(app, LAPTOP, "not_answering", "could not ask your network")
     monkeypatch.setattr(presence, "_answers", {})
-    change(app, Integration, "gw", last_sync=utcnow() - timedelta(minutes=14))
+    change(app, Integration, "gw", last_sync=utcnow())
     with browser(app, LAPTOP) as client:
         assert client.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
     assert [(tie.device_id, tie.basis) for tie in stored(app)] == [("gw:client:laptop", "stored")]
@@ -210,7 +306,7 @@ def test_a_member_on_the_console_address_is_tied_to_nothing(tmp_path, monkeypatc
         assert client.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
 
 
-# --- AC-2: the tie and its life ----------------------------------------------------------------------------------
+# --- The tie and its life ----------------------------------------------------------------------------------------
 
 
 def test_the_first_portal_request_ties_the_person_and_a_later_sign_in_moves_its_time(tmp_path, monkeypatch):
@@ -223,9 +319,13 @@ def test_the_first_portal_request_ties_the_person_and_a_later_sign_in_moves_its_
         told = sam.get("/api/me/device", headers={"X-Forwarded-For": PHONE}).json()
         assert told == {"device_id": "gw:client:laptop", "name": "Laptop", "simulated": False, "how": "signed_in",
                         "reason": None, "message": None}
+        written = []
+        event.listen(app.state.engine, "before_cursor_execute", lambda _c, _cursor, statement, *_rest: written.append(
+            statement) if statement.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} else None)
         assert sam.get("/api/me/device").json() == told and gateway["reads"] == 1
         assert [row["id"] for row in sam.get("/api/devices").json()] == ["gw:client:laptop"]
         mine = sam.get("/api/presence").json()
+        assert written == []  # once tied, a member's page reads only: record keeping is the worker's
         assert [(row["kind"], row["device_name"]) for row in mine["items"]] == [("tie", "Laptop")] and "enabled" not in mine
         assert "address" not in mine["items"][0] and "mac" not in mine["items"][0]  # for administrators only
     first, = stored(app)
@@ -248,21 +348,35 @@ def test_the_first_portal_request_ties_the_person_and_a_later_sign_in_moves_its_
 
 
 def test_a_tie_ends_30_days_after_the_last_sign_in_and_stays_on_record_90_days(tmp_path, monkeypatch):
-    """Past 30 days it shows nothing, whether or not anything has swept it yet; 90 days after ending it is dropped."""
+    """Past 30 days it shows nothing at once. The worker records the ending, once, and drops the record 90 days on."""
     app, _gateway = home(tmp_path, monkeypatch)
-    with browser(app, LAPTOP) as sam:
+    with browser(app, LAPTOP) as sam, browser(app, TABLET) as elsewhere:
         sam.get("/api/me/device")
+        elsewhere.get("/api/me/device")
     tie, = stored(app)
     change(app, DevicePresence, tie.id, last_at=utcnow() - timedelta(days=30, minutes=1))
     with browser(app, "testclient") as sam:  # signed in from nowhere, so nothing is tied again
-        assert sam.get("/api/devices").json() == []
-        assert stored(app)[0].ended_at is None  # nothing swept it yet, and it already shows nothing
-        assert sam.get("/api/presence").json()["items"] == []
-        ended, = stored(app)
-        assert ended.ended_by == "expired" and ended.ended_at == ended.last_at + timedelta(days=30)
-        change(app, DevicePresence, tie.id, ended_at=utcnow() - timedelta(days=90, minutes=1))
-        sam.get("/api/presence")
-    assert stored(app) == []
+        assert sam.get("/api/devices").json() == [] and sam.get("/api/presence").json()["items"] == []
+    with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        shown = {row["kind"]: row["ended_at"] for row in admin.get("/api/presence").json()["items"]}
+        assert shown["tie"] is not None and shown["conflict"] is None  # listed as ended before anything recorded it
+    assert stored(app)[0].ended_at is None  # no page wrote that down
+    upkeep = Upkeep(app.state.session_factory, app.state.settings)
+    for _ in range(2):  # the worker's clearing out, twice: one ending, recorded once
+        asyncio.run(upkeep._clear(utcnow()))
+    ended, = stored(app)
+    assert ended.ended_by == "expired" and ended.ended_at == ended.last_at + timedelta(days=30)
+    with app.state.session_factory() as db:
+        assert [(row.actor_id, row.target_id, row.details) for row in db.scalars(
+            select(Audit).where(Audit.action == "presence.ended"))] == [
+                (None, "gw:client:laptop", {"user_id": "sam", "because": "lapsed"})]
+    change(app, DevicePresence, tie.id, ended_at=utcnow() - timedelta(days=90, minutes=1))
+    change(app, DevicePresence, stored(app, "conflict")[0].id, last_at=utcnow() - timedelta(days=89))
+    asyncio.run(upkeep._clear(utcnow()))
+    assert stored(app) == [] and len(stored(app, "conflict")) == 1
+    change(app, DevicePresence, stored(app, "conflict")[0].id, last_at=utcnow() - timedelta(days=90, minutes=1))
+    presence.keep(app.state.session_factory, utcnow())
+    assert stored(app, "conflict") == []
 
 
 def test_a_member_ends_only_their_own_tie_and_an_administrator_any_at_once(tmp_path, monkeypatch):
@@ -288,7 +402,7 @@ def test_a_member_ends_only_their_own_tie_and_an_administrator_any_at_once(tmp_p
         ("sam", False), ("kim", False), ("sam", True)]
 
 
-# --- AC-3: who sees what, decided in one place -------------------------------------------------------------------
+# --- Who sees what, decided in one place -------------------------------------------------------------------------
 
 
 def blocked(app, **ages):
@@ -346,12 +460,101 @@ def test_a_tie_shows_its_devices_blocks_from_the_reach_back_on_and_nothing_once_
         assert seen_by(sam) == [] and seen_by(kim) == ["phones"]
 
 
+@pytest.mark.parametrize("values", [{"classification": "infrastructure"}, {"kind": "gateway"}])
+def test_a_tie_shows_nothing_of_a_device_that_became_infrastructure_or_is_no_device(tmp_path, monkeypatch, values):
+    """However the record came to say so, a tie in force shows neither such a device nor a lookup on it."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    blocked(app, recent=("laptop", 10))
+    with browser(app, LAPTOP) as sam:
+        sam.get("/api/me/device")
+        assert seen_by(sam) == ["recent"] and len(sam.get("/api/devices").json()) == 1
+        change(app, Resource, "gw:client:laptop", **values)
+        assert seen_by(sam) == [] and sam.get("/api/devices").json() == []
+
+
+def earlier(app, action, *minutes):
+    """Move the records of an action into the past, oldest first, and say when the newest now says it happened."""
+    with app.state.session_factory() as db:
+        rows = db.scalars(select(Audit).where(Audit.action == action).order_by(Audit.created_at)).all()
+        assert len(rows) == len(minutes)
+        for row, ago in zip(rows, minutes, strict=True):
+            row.created_at = utcnow() - timedelta(minutes=ago)
+        db.commit()
+        return utc(rows[-1].created_at)
+
+
+@pytest.mark.parametrize("device, steps, who", [
+    ("laptop", [("personal", ["kim"])], KIM),                                # given to the person who then signs in
+    ("tablet", [("unassigned", [])], LIVE_MEMBER),                           # taken from its owner
+    ("laptop", [("infrastructure", []), ("unassigned", [])], LIVE_MEMBER),   # its classification changed, twice
+    ("tablet", [("shared", ["sam", "kim"])], LIVE_MEMBER),                   # one person's device made shared
+])
+def test_a_new_tie_reaches_back_no_further_than_the_last_change_of_whose_the_device_is(tmp_path, monkeypatch, device,
+                                                                                         steps, who):
+    """What was looked up on a device before an administrator last said whose it is belongs to that earlier time."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    blocked(app, recent=(device, 10), early=(device, 60))
+    with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        for classification, owners in steps:
+            assigned(admin, device, classification, *owners)
+    changed = earlier(app, "device.assignment_changed", *(50, 30)[-len(steps):])
+    with browser(app, DEVICES[device][0], who) as person:
+        assert person.get("/api/me/device").json()["device_id"] == f"gw:client:{device}"
+        assert seen_by(person) == ["recent"]
+    tie, = stored(app)
+    assert utc(tie.reach_from) == changed and tie.first_at - timedelta(hours=2) < tie.reach_from
+
+
+@pytest.mark.parametrize("ending", ["forgotten", "ended by an administrator", "lapsed", "lapsed and recorded"])
+def test_a_new_tie_reaches_back_no_further_than_the_end_of_another_persons_tie(tmp_path, monkeypatch, ending):
+    """While Sam was the one tied to the laptop, its lookups were Sam's. Kim, tied afterwards, starts where Sam ended."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    blocked(app, recent=("laptop", 10), early=("laptop", 60))
+    with browser(app, LAPTOP) as sam:
+        sam.get("/api/me/device")
+        theirs, = stored(app)
+        if ending == "forgotten":
+            assert sam.delete(f"/api/presence/{theirs.id}").status_code == 200
+    if ending == "ended by an administrator":
+        with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+            assert admin.delete(f"/api/presence/{theirs.id}").status_code == 200
+    half = utcnow() - timedelta(minutes=30)
+    if ending.startswith("lapsed"):
+        change(app, DevicePresence, theirs.id, last_at=half - timedelta(days=30))
+        if ending == "lapsed and recorded":
+            presence.keep(app.state.session_factory, utcnow())
+    else:
+        change(app, DevicePresence, theirs.id, ended_at=half)
+    with browser(app, LAPTOP, KIM) as kim:
+        assert kim.get("/api/me/device").json()["how"] == "signed_in"
+        assert seen_by(kim) == ["recent"]
+    mine = stored(app)[-1]
+    assert mine.user_id == "kim" and utc(mine.reach_from) == half
+
+
+def test_on_a_shared_device_and_after_a_persons_own_tie_the_reach_is_the_setting(tmp_path, monkeypatch):
+    """Several people hold a shared device at once, and a person's own earlier tie takes nothing from their next."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    for address in (SHARED, LAPTOP):
+        with browser(app, address) as sam:
+            sam.get("/api/me/device")
+            assert sam.delete(f"/api/presence/{stored(app)[-1].id}").status_code == 200
+    with browser(app, SHARED, KIM) as kim, browser(app, LAPTOP) as sam:
+        assert [client.get("/api/me/device").json()["how"] for client in (kim, sam)] == ["signed_in", "signed_in"]
+    live = [tie for tie in stored(app) if tie.ended_at is None]
+    assert sorted((tie.user_id, tie.device_id) for tie in live) == [("kim", "gw:client:shared"), ("sam", "gw:client:laptop")]
+    assert all(tie.reach_from == tie.first_at - timedelta(hours=2) for tie in live)
+
+
 def test_only_deps_decides_which_device_a_member_may_see():
-    """Structural. A module that reads a grant's or a tie's window, or queries either, has grown a rule of its own."""
-    allowed = {"DeviceGrant": {"deps", "models", "main", "removal", "seed"},
-               "DevicePresence": {"deps", "models", "presence", "removal", "seed"},
+    """Structural. A module that reads a grant's or a tie's window, or queries either, has grown a rule of its own.
+
+    `retention` reads grants to keep an assigned device from being dropped, which shows nobody anything.
+    """
+    allowed = {"DeviceGrant": {"deps", "models", "main", "removal", "retention", "seed"},
+               "DevicePresence": {"deps", "models", "presence", "seed"},
                "valid_from": {"deps", "models", "main", "seed"},
-               "valid_until": {"deps", "models", "main", "removal", "seed"},
+               "valid_until": {"deps", "models", "main", "removal", "retention", "seed"},
                "reach_from": {"deps", "models", "presence", "seed"},
                "grant_at": {"deps", "main"}, "live_ties": {"deps", "presence"},
                "_assigned": {"deps"}, "_tied": {"deps"}, "_tie_allowed": {"deps"}}
@@ -367,7 +570,7 @@ def test_only_deps_decides_which_device_a_member_may_see():
     assert set(used) == set(allowed)  # every name is still there to be watched
 
 
-# --- AC-4: several people, and what an administrator sees --------------------------------------------------------
+# --- Several people, and what an administrator sees --------------------------------------------------------------
 
 
 def test_a_shared_device_holds_several_ties_and_an_administrator_sees_and_ends_them(tmp_path, monkeypatch):
@@ -390,12 +593,19 @@ def test_a_shared_device_holds_several_ties_and_an_administrator_sees_and_ends_t
             kims = next(row for row in told["items"] if row["kind"] == "tie" and row["user_name"] == "Kim")
             assert admin.delete(f"/api/presence/{kims['id']}").json() == {"ok": True}
             assert kim.get("/api/devices").json() == [] and len(sam.get("/api/devices").json()) == 1
-            # Switching recognition off ends every tie at once.
+            # Switching recognition off ends every tie at once, with a record for each that says whose.
+            with browser(app, PHONE, KIM) as again:
+                assert again.get("/api/me/device").json()["device_id"] == "gw:client:phone"
             assert admin.put("/api/presence", json={"enabled": False, "reach_back_hours": 2}).json()["enabled"] is False
             assert sam.get("/api/devices").json() == [] and all(tie.ended_at for tie in stored(app))
     with app.state.session_factory() as db:
         changed = db.scalars(select(Audit).where(Audit.action == "presence.setting_changed")).all()[-1]
-        assert changed.details == {"enabled": False, "reach_back_hours": 2, "ties_ended": 1}
+        assert changed.details == {"enabled": False, "reach_back_hours": 2, "ties_ended": 2}
+        ended = db.scalars(select(Audit).where(Audit.action == "presence.ended")).all()
+        assert sorted((row.target_id, row.details["user_id"], row.details.get("because")) for row in ended) == [
+            ("gw:client:phone", "kim", "switched_off"), ("gw:client:shared", "kim", None),
+            ("gw:client:shared", "sam", "switched_off")]
+        assert {row.actor_id for row in ended} == {changed.actor_id}
 
 
 def assigned(admin, device, classification, *owners):
@@ -412,13 +622,15 @@ def assigned(admin, device, classification, *owners):
     ("personal", "personal", ["sam"], []),         # its owner changes: the old owner's tie ends
     ("personal", "unassigned", [], []),            # its owner goes
     ("unassigned", "personal", ["kim"], []),       # nobody's, then someone else's than the one tied
-    ("unassigned", "shared", ["sam", "kim"], ["sam"]),  # becoming shared ends nothing
-    ("shared", "shared", ["sam"], ["kim", "sam"]),      # still shared, other people listed: nothing ends
+    ("unassigned", "shared", ["sam", "kim"], ["sam"]),  # made shared with the one tied among those named
+    ("unassigned", "shared", ["kim"], []),              # made shared between other people than the one tied
+    ("personal", "shared", ["sam"], []),                # one person's device made shared between others
+    ("shared", "shared", ["sam"], ["sam"]),             # still shared, between other people than before
     ("unassigned", "unassigned", [], ["sam"]),          # saved again with nothing changed: nothing ends
 ])
 def test_a_device_that_changes_hands_keeps_no_tie_but_its_new_owners(tmp_path, monkeypatch, was, becomes, owners,
                                                                        keeps):
-    """Whoever a device no longer belongs to is no longer listed under it: their ties end at once, audited."""
+    """An administrator's word replaces what sign-ins suggested: the ties of people it does not name end, audited."""
     app, _gateway = home(tmp_path, monkeypatch)
     device = {"shared": "shared", "personal": "tablet", "unassigned": "laptop"}[was]
     people = {"shared": [LIVE_MEMBER, KIM], "personal": [KIM], "unassigned": [LIVE_MEMBER]}[was]
@@ -444,7 +656,51 @@ def test_a_device_that_changes_hands_keeps_no_tie_but_its_new_owners(tmp_path, m
         assert (f"gw:client:{device}" in mine) == may, (name, mine)
 
 
-# --- AC-5: the gateway lookup ------------------------------------------------------------------------------------
+def test_saving_a_shared_device_again_with_the_same_people_ends_nobodys_tie(tmp_path, monkeypatch):
+    """Someone not named who signed in on it afterwards stays tied until the administrator changes who it is for."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        assigned(admin, "shared", "shared", "sam")
+        with browser(app, SHARED) as sam, browser(app, SHARED, KIM) as kim:
+            assert [client.get("/api/me/device").json()["device_id"] for client in (sam, kim)] == ["gw:client:shared"] * 2
+        assigned(admin, "shared", "shared", "sam")
+        assert [tie.ended_at for tie in stored(app)] == [None, None]
+        assigned(admin, "shared", "shared", "kim")
+    assert [(tie.user_id, tie.ended_at is None) for tie in stored(app)] == [("sam", False), ("kim", True)]
+
+
+def test_a_device_that_is_dropped_or_whose_source_is_removed_takes_its_ties_with_it_on_record(tmp_path, monkeypatch):
+    """A tie and a conflict name a device. When the device goes, each tie in force ends on record and both rows go."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    with browser(app, LAPTOP) as sam, browser(app, PHONE, KIM) as kim, browser(app, LAPTOP, KIM) as second:
+        assert [client.get("/api/me/device").json()["reason"] for client in (sam, kim, second)] == [
+            None, None, "other_person"]
+    # The laptop left the gateway eight days ago and whole reads on seven days since have not listed it.
+    days = [(utcnow() - timedelta(days=ago)).date().isoformat() for ago in range(8, 1, -1)]
+    change(app, Resource, "gw:client:laptop", attributes={
+        "ip": LAPTOP, retention.MISSING: True, retention.SINCE: (utcnow() - timedelta(days=8)).isoformat(),
+        retention.DAYS: days})
+    with app.state.session_factory() as db:
+        db.add(Audit(actor_id=None, action="integration.collected", target_id="gw", details={"unread": []}))
+        db.commit()
+    assert retention.drop(app.state.session_factory, utcnow()) == 1
+    assert [(tie.user_id, tie.device_id) for tie in stored(app)] == [("kim", "gw:client:phone")]
+    assert stored(app, "conflict") == []
+    with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        assert admin.request("DELETE", "/api/integrations/gw", json={"name": "Gateway"}).status_code == 200
+    assert stored(app) == []
+    with app.state.session_factory() as db:
+        admin_id = db.scalar(select(User.id).where(User.email == LIVE_ADMIN[0]))
+        assert [(row.actor_id, row.target_id, row.details) for row in db.scalars(
+            select(Audit).where(Audit.action == "presence.ended").order_by(Audit.created_at))] == [
+                (None, "gw:client:laptop", {"user_id": "sam", "because": "device_removed"}),
+                (admin_id, "gw:client:phone", {"user_id": "kim", "because": "device_removed"})]
+    for who in (LIVE_MEMBER, KIM):
+        with browser(app, "testclient", who) as person:
+            assert person.get("/api/devices").json() == [] and person.get("/api/presence").json() == {"items": []}
+
+
+# --- The gateway lookup ------------------------------------------------------------------------------------------
 
 
 def test_the_gateway_lookup_only_reads_is_paced_and_compares_addresses_as_addresses(monkeypatch):
@@ -465,15 +721,19 @@ def test_the_gateway_lookup_only_reads_is_paced_and_compares_addresses_as_addres
     assert "devices.lookup" in provider.provides and "devices.lookup" not in registry.WRITES
     cloud = {"base_url": "https://api.ui.com/v1/connector/consoles/abc/proxy/network/integration"}
 
-    def ask(address, config=cloud):
-        return asyncio.run(provider.client_at("gw", config, "fabricated-key", address))
+    def ask(address, site="site-one", config=cloud):
+        return asyncio.run(provider.client_at("gw", config, "fabricated-key", address, site))
 
     assert ask("::ffff:192.0.2.10") == [{"id": "gw:client:c1", "mac": "00:00:5e:00:53:10"}]
     assert ask("2001:db8:0:0:0:0:0:10") == [{"id": "gw:client:c2", "mac": None}]
     assert ask("192.0.2.010") == [] and ask("not an address") == []  # leading zeros are no address, as for `peer`
-    assert ask("192.0.2.10", {**cloud, "site_id": "site-two"})[0]["id"] == "gw:client:c1"
-    assert {method for method, _path in sent} == {"GET"} and len(sent) == 5
-    assert sent[-1] == ("GET", "/v1/sites/site-two/clients") and len(core._turns["unifi_network:abc"]) == 5
+    assert ask("192.0.2.10", "site-two")[0]["id"] == "gw:client:c1"
+    # Only the site named is read, and only if it is the one the source is set to read: never every site's list.
+    assert ask("192.0.2.10", None) == [] and ask("192.0.2.10", "site-two", {**cloud, "site_id": "site-one"}) == []
+    with pytest.raises(IntegrationError):
+        ask("192.0.2.10", "site-one/../site-two")
+    assert sent == [("GET", "/v1/sites/site-one/clients")] * 2 + [("GET", "/v1/sites/site-two/clients")]
+    assert len(core._turns["unifi_network:abc"]) == 3
     for text in ("192.0.2.10", "::ffff:192.0.2.10", "2001:DB8::10", "192.0.2.010", "fe80::1%eth0", "a name", ""):
         assert core.plain_address(text) == peer._ip(text)
 
@@ -497,7 +757,7 @@ def test_a_gateway_that_never_answers_is_given_up_on_and_said_in_plain_words(tmp
     assert gateway["reads"] == 1 and stored(app) == []
 
 
-# --- AC-8: the demonstration -------------------------------------------------------------------------------------
+# --- The demonstration -------------------------------------------------------------------------------------------
 
 
 def test_the_demo_shows_one_tie_and_one_conflict_and_its_simulated_device_is_as_before(client, admin_headers):
@@ -511,3 +771,28 @@ def test_the_demo_shows_one_tie_and_one_conflict_and_its_simulated_device_is_as_
         "device_id": "laptop-jamie", "name": "Jamie's MacBook", "simulated": True, "how": "assigned",
         "reason": None, "message": None}
     assert client.get("/api/presence").json() == {"items": []}  # a conflict is never listed to the member
+
+
+def test_the_demonstration_ties_nobody_whatever_address_a_request_comes_from(app):
+    """Its network is fabricated. A request from a fabricated device's own address is not looked up and not recorded."""
+    with TestClient(app, client=("192.0.2.62", 50000)) as client:
+        with app.state.session_factory() as db:
+            db.add(Resource(id="demo-lan", integration_id="demo-unifi", name="LAN", kind="network",
+                            provider="unifi_network", source_id="demo-lan", observed_at=utcnow(),
+                            evidence_kind="configured", attributes={"subnets": ["192.0.2.0/24"]}))
+            db.commit()
+            before = len(db.scalars(select(DevicePresence)).all())
+        live_signin(client, ("jamie@nyctr.demo", "nyctr-demo"))
+        told = client.get("/api/me/device").json()
+        assert (told["device_id"], told["simulated"], told["how"]) == ("laptop-jamie", True, "assigned")
+        with app.state.session_factory() as db:
+            assert len(db.scalars(select(DevicePresence)).all()) == before == 2
+
+
+@pytest.mark.parametrize("values", [{"client_at": None}, {"provides": unifi.PROVIDER.provides - {"devices.lookup"}}])
+def test_an_integration_declares_the_lookup_and_its_read_together_or_not_at_all(monkeypatch, values):
+    """Start-up refuses an integration that offers the capability with no read behind it, or a read nobody declared."""
+    monkeypatch.setattr(registry, "_cache", None)
+    monkeypatch.setattr(unifi, "PROVIDER", dataclasses.replace(unifi.PROVIDER, **values))
+    with pytest.raises(RuntimeError, match="declares devices.lookup without its actions"):
+        registry.providers()

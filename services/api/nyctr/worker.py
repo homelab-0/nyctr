@@ -8,8 +8,9 @@ pass is still going: the pass claims the scheduled run if one is due, collects
 each source in turn, then runs the retries that are due. The schedule is read
 from the database at every pass, so a change an administrator saves applies at
 the next pass on every running copy, and it never runs in demo mode. And it
-clears out, on a worker thread, the lookups whose time is up and, once an hour
-for each source, what has left it (`retention`).
+clears out, on a worker thread, the lookups whose time is up, the sign-in ties
+whose time is up (`presence.keep`) and, once an hour for each source, what has
+left it (`retention`).
 
 A scheduled collection that fails for a reason that may pass is retried up to
 three times before the source is shown as failed (see `schedule.plan_retry`).
@@ -23,7 +24,7 @@ import logging
 
 from sqlalchemy import select, update
 
-from . import retention, schedule
+from . import presence, retention, schedule
 from .access import OPEN, BeingEnded, clear_stale_reviews, end_lease
 from .collection import analyse, collect_integration, off_loop
 from .guests import enforce
@@ -226,7 +227,7 @@ class Upkeep:
             self.clearing = asyncio.create_task(self._clear(self.clock()))
 
     async def _clear(self, now) -> None:
-        """Remove the lookups whose time is up and go through each source whose hour has come for what has left it.
+        """Remove the lookups and close the sign-in ties whose time is up, and go through each source whose hour has come.
 
         Off the server's loop, as a collection's store is. Each source has its own hour, counted
         from when it was last gone through. One that a collection had at that moment is tried
@@ -235,6 +236,7 @@ class Upkeep:
         """
         try:
             await off_loop(lambda: retention.expire_lookups(self.factory, now))
+            await off_loop(lambda: presence.keep(self.factory, now))
             await off_loop(lambda: retention.drop(self.factory, now, self.dropped))
         except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
             log.warning("Background upkeep failed: %s", type(error).__name__)

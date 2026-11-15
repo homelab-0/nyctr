@@ -1094,21 +1094,22 @@ def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(
 
 
 @router.get("/me/device")
-async def this_device(request: Request, auth=Depends(identity), db: Session = Depends(get_db)):
+def this_device(request: Request, auth=Depends(identity), db: Session = Depends(get_db)):
     """Recognise the device this browser is on, only among devices the caller is allowed to see.
 
     With recognition switched on, `presence` asks the gateway which device
     holds the connecting address and ties the signed-in caller to it, or says
     why not. Otherwise, and when that finds nothing, the address is matched to
     the stored inventory among devices the caller may already see. An address
-    alone never grants anything.
+    alone never grants anything. Not a coroutine on purpose: its database work
+    may wait for a lock, and must hold up this request only, not the server.
     """
     user, session = auth
     settings: Settings = request.app.state.settings
     seen = peer.seen(request)
     found = presence.Found()
     if settings.mode != "demo":
-        found = await presence.recognise(db, settings, user, session, seen, site_of(request))
+        found = presence.recognise(db, settings, user, session, seen, site_of(request))
     match = found.device
     rows = [] if match else [r for r in db.scalars(select(Resource).where(Resource.kind == "client")
                                                    .order_by(Resource.name)) if device_permitted(db, r, user)]

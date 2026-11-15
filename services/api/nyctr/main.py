@@ -540,7 +540,7 @@ def create_app(settings: Settings | None = None):
         if refusal:
             db.rollback()
             raise HTTPException(409, refusal)
-        removal.remove(db, row)
+        removal.remove(db, row, user.id)
         audit(db, user.id, "integration.removed", integration_id, name=counts["name"], provider=counts["provider"],
               removed=counts["remove"])
         db.commit()
@@ -648,9 +648,10 @@ def create_app(settings: Settings | None = None):
 
         Validate classification and active users, close existing grants at the current
         time, and open the new grants without backdating visibility. Record the
-        classification change in the same committed transaction. When the device
-        stops being shared or its owner changes, every sign-in tie on it held by
-        anyone but the new owner ends in that transaction too.
+        classification change in the same committed transaction. When the
+        classification, the owner or the people named change, every sign-in tie on
+        the device held by anyone the new assignment does not name ends in that
+        transaction too.
         """
         row = db.scalar(select(Resource).where(Resource.id == device_id).with_for_update())
         if not row or row.kind != "client":
@@ -664,18 +665,19 @@ def create_app(settings: Settings | None = None):
             if not owner or not owner.active:
                 raise HTTPException(422, "Assigned user does not exist or is disabled")
         now = utcnow()
+        before = (row.classification, row.owner_id, set(db.scalars(select(DeviceGrant.user_id).where(
+            DeviceGrant.device_id == device_id, DeviceGrant.valid_until.is_(None)))))
         db.execute(update(DeviceGrant).where(DeviceGrant.device_id == device_id,
                                               DeviceGrant.valid_until.is_(None)).values(valid_until=now))
         for id_ in body.user_ids:
             db.add(DeviceGrant(device_id=device_id, user_id=id_, valid_from=now))
-        before = (row.classification, row.owner_id)
         row.classification = body.classification
         row.owner_id = body.user_ids[0] if body.classification == "personal" else None
         audit(db, user.id, "device.assignment_changed", device_id, classification=body.classification,
               user_ids=body.user_ids)
-        if (row.classification, row.owner_id) != before:
-            # A device that changed hands is no longer listed under people who signed in on it before.
-            presence.release(db, row, user.id, now)
+        if (row.classification, row.owner_id, set(body.user_ids)) != before:
+            # The administrator's word replaces what sign-ins suggested: nobody it does not name stays tied.
+            presence.release(db, row, body.user_ids, user.id, now)
         db.commit()
         return resource_json(row)
 
