@@ -294,6 +294,63 @@ describe('Activity for an ending that could not ask the source', () => {
   });
 });
 
+describe('Activity rows about the model', () => {
+  it('says the model was changed or tested and how the test went, never a setting key', async () => {
+    const about = (id: string, action: string, details: Record<string, unknown>) => ({
+      ...event(id, action, details),
+      target_id: 'model_connection',
+    });
+    mockApi({
+      'GET /audit': [
+        about('a', 'model.changed', {
+          old: { endpoint: '', model: '', secret_ref: '', source: 'none' },
+          new: {
+            endpoint: 'https://llm.example:8443/private/v1',
+            model: 'local/reasoner',
+            secret_ref: 'NYCTR_MODEL_SECRET_MAIN',
+            trace: 'proxy_body',
+            timeout_seconds: 30,
+          },
+        }),
+        about('g', 'model.changed', { new: { endpoint: 'not an address', model: 'local/other' } }),
+        about('b', 'model.tested', { outcome: 'reachable', status: null }),
+        about('c', 'model.tested', { outcome: 'refused', status: 401 }),
+        about('d', 'model.tested', { outcome: 'not_reachable', status: null }),
+        about('e', 'model.tested', { outcome: 'wrong_shape', status: null }),
+        about('f', 'model.tested', { outcome: 'too_slow', status: null }),
+      ],
+      'GET /users': [],
+      'GET /integrations': [],
+    });
+    // A browser from before late 2023 has no URL.canParse: the page must draw without it.
+    const canParse = URL.canParse;
+    Object.defineProperty(URL, 'canParse', { value: undefined, configurable: true });
+    try {
+      render(<Activity />);
+      const [changed, unread] = (await screen.findAllByText('Changed the model connection')).map(
+        (row) => row.closest('tr')!.textContent,
+      );
+      expect(changed).toContain('now local/reasoner at llm.example:8443');
+      // An address that cannot be read names no server, and breaks nothing.
+      expect(unread).toContain('now local/other');
+      expect(unread).not.toContain(' at ');
+    } finally {
+      Object.defineProperty(URL, 'canParse', { value: canParse, configurable: true });
+    }
+    const tests = screen
+      .getAllByText('Tested the model')
+      .map((row) => row.closest('tr')!.textContent);
+    expect(tests[0]).toContain('the model answered');
+    expect(tests[1]).toContain('the endpoint refused (HTTP 401)');
+    expect(tests[2]).toContain('the endpoint could not be reached');
+    expect(tests[3]).toContain('the answer was not what a chat endpoint gives');
+    expect(tests[4]).toContain('no answer came within the time limit');
+    expect(document.body.textContent).not.toMatch(
+      /[a-z]_[a-z]|NYCTR_|private|https:|not an address/,
+    );
+  });
+});
+
 describe('Activity when source names are unavailable', () => {
   it('never calls a source removed until the list loads, and offers to try again', async () => {
     let fail = true;

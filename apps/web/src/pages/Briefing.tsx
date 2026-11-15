@@ -16,6 +16,7 @@ const KIND: Record<AttentionItem['kind'], string> = {
   finding: 'Finding',
   source: 'Source',
   suggestion: 'Suggestion',
+  model: 'Model',
 };
 
 /**

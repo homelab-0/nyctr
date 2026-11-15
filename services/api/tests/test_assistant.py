@@ -65,7 +65,7 @@ def model_app(tmp_path, monkeypatch, reply):
 
     seen = {}
 
-    async def fake(settings, system, user):
+    async def fake(settings, system, user, **_trace):
         seen.update(system=system, user=user)
         return reply(user) if callable(reply) else reply
 
