@@ -6,6 +6,7 @@ import dataclasses
 import inspect
 import itertools
 import threading
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -14,7 +15,8 @@ import httpx
 import pytest
 from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin
 from fastapi.testclient import TestClient
-from sqlalchemy import event, select
+from sqlalchemy import create_engine, event, select
+from sqlalchemy import text as sql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from test_collection_store import POSTGRES, postgres_database
@@ -251,14 +253,27 @@ BOTH_ENGINES = pytest.mark.parametrize("engine", ["sqlite", "postgresql"])
 # a request that had nothing to wait for look like one that waited. SQLite itself gives up on a lock after
 # five seconds, so there the bound has to stay well inside that, or the waiter would fail before its turn.
 WAIT = {"sqlite": 0.5, "postgresql": 5.0}
-# How long the second writer gets to finish once the first is done. Only a writer that never finishes reaches it.
-FINISH = 60.0
+# The hard bounds, so that a fault in the locks fails a test within seconds and never hangs the run. On
+# PostgreSQL no wait for a lock outlasts LOCK_SECONDS: the test's database is set to give up then. And however
+# a test ends, every thread it started is waited for, FINISH seconds at most, before a browser closes.
+LOCK_SECONDS = 20
+FINISH = 30.0
 
 
-def finished(other):
-    """Wait for the second writer's thread and require that it ended, so a stuck one fails the test, not the run."""
-    other.join(FINISH)
-    assert not other.is_alive(), "the second writer never finished"
+@contextmanager
+def others_finish():
+    """Give a test the list it puts its threads in, and wait for each of them when the test leaves, however it leaves.
+
+    A browser that closes while a request of its own is still under way never returns, so nothing may
+    be left running when one does. A thread still alive after FINISH seconds fails the test.
+    """
+    started = []
+    try:
+        yield started
+    finally:
+        for other in started:
+            other.join(FINISH)
+    assert not any(other.is_alive() for other in started), "a second writer never finished"
 
 
 def on(engine, request):
@@ -268,6 +283,11 @@ def on(engine, request):
     place = postgres_database(request)
     if not place:
         pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    server, _, name = place["database_url"].rpartition("/")
+    admin = create_engine(server + "/postgres", isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:  # every connection the test opens from here on gives up on a lock in time
+        connection.execute(sql(f"alter database {name} set lock_timeout = '{LOCK_SECONDS}s'"))
+    admin.dispose()
     return place
 
 
@@ -303,16 +323,17 @@ def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_i
     def record(*args):
         # The tie is about to be written. An administrator switches off now, on another connection.
         other = threading.Thread(target=lambda: answers.append(switch_off(app)), daemon=True)
+        others.append(other)
         other.start()
         other.join(WAIT[engine])  # with the lock it is still waiting when this gives up, however long that takes
         waiting.append(other.is_alive())
-        others.append(other)
         return write(*args)
 
     monkeypatch.setattr(presence, "_record", record)
     with browser(app, LAPTOP) as sam:
-        sam.get("/api/me/device")
-        finished(others[0])
+        with others_finish() as started:
+            others = started
+            sam.get("/api/me/device")
         assert waiting == [True] and answers == [{"enabled": False, "reach_back_hours": 2}]
         assert sam.get("/api/devices").json() == []
     tie, = stored(app)
@@ -341,8 +362,9 @@ def test_two_people_signing_in_on_one_unshared_device_at_the_same_moment_are_not
             return write(*args)
 
         monkeypatch.setattr(presence, "_record", record)
-        assert sam.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
-        finished(others[0])
+        with others_finish() as started:
+            others = started
+            assert sam.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
         assert waiting == [True] and answers[0]["reason"] == "other_person" and answers[0]["device_id"] is None
         assert kim.get("/api/devices").json() == [] and len(sam.get("/api/devices").json()) == 1
     assert [(tie.user_id, tie.ended_at) for tie in stored(app)] == [("sam", None)]
@@ -383,17 +405,20 @@ def stopped_before_it_writes(second, wait, at=1):
         else:
             return
         if not seen["armed"]:
-            seen["other"] = threading.Thread(target=run, daemon=True)
-            seen["other"].start()
-            seen["other"].join(wait)  # under the locks it is still waiting, however long this machine takes
-            seen["waiting"].append(seen["other"].is_alive())
+            other = threading.Thread(target=run, daemon=True)
+            seen["started"].append(other)
+            other.start()
+            other.join(wait)  # under the locks it is still waiting, however long this machine takes
+            seen["waiting"].append(other.is_alive())
 
     event.listen(Session, "before_flush", before_flush)
     try:
-        yield seen
-        finished(seen["other"])
+        with others_finish() as started:
+            seen["started"] = started
+            yield seen
     finally:
         event.remove(Session, "before_flush", before_flush)
+    assert started, "the writer was never stopped, so the second never ran"
 
 
 @BOTH_ENGINES
@@ -476,15 +501,16 @@ def test_a_collection_being_stored_and_a_change_of_the_setting_never_wait_for_ea
         def change_the_setting():
             answers.append(chief.put("/api/presence", json={"enabled": True, "reach_back_hours": 1}).status_code)
 
-        with app.state.session_factory() as db:
+        # The session closes inside the stop, so its locks are gone before the second writer is waited for.
+        with stopped_before_it_writes(change_the_setting, WAIT[engine], at=2) as seen, \
+                app.state.session_factory() as db:
             listed = [{key: getattr(row, key) for key in ("id", "name", "kind", "provider", "source_id", "site_id",
                                                           "evidence_kind", "attributes")}
                       for row in db.scalars(select(Resource).where(Resource.integration_id == "gw"))
                       if row.id != "gw:client:laptop"]
-            with stopped_before_it_writes(change_the_setting, WAIT[engine], at=2) as seen:
-                collection.apply_snapshot(db, db.get(Integration, "gw"), core.Snapshot(resources=listed),
-                                          app.state.settings)
-                db.commit()
+            collection.apply_snapshot(db, db.get(Integration, "gw"), core.Snapshot(resources=listed),
+                                      app.state.settings)
+            db.commit()
         assert seen["raised"] == [] and answers == [200]  # neither was ended for the other's sake
         if engine == "postgresql":
             assert seen["waiting"] == [False]  # the switch had no row of the store's to wait for
@@ -514,12 +540,12 @@ def test_removing_many_devices_and_a_change_of_the_setting_never_wait_for_each_o
         def change_the_setting():
             answers.append(chief.put("/api/presence", json={"enabled": True, "reach_back_hours": 1}).status_code)
 
-        with app.state.session_factory() as db:
+        # The session closes inside the stop, so its locks are gone before the second writer is waited for.
+        with stopped_before_it_writes(change_the_setting, WAIT[engine]) as seen, app.state.session_factory() as db:
             # As the removal route does: the devices' rows first, in id order, then everything that hangs on them.
             db.scalars(select(Resource.id).where(Resource.id.in_(going)).order_by(Resource.id).with_for_update()).all()
-            with stopped_before_it_writes(change_the_setting, WAIT[engine]) as seen:
-                removal.forget(db, going)
-                db.commit()
+            removal.forget(db, going)
+            db.commit()
         assert seen["raised"] == [] and answers == [200]  # neither was ended for the other's sake
         if engine == "postgresql":
             assert seen["waiting"] == [True]  # the switch waited for the ties removal held, all of them
@@ -527,6 +553,71 @@ def test_removing_many_devices_and_a_change_of_the_setting_never_wait_for_each_o
     with app.state.session_factory() as db:
         assert sorted(row.details["user_id"] for row in db.scalars(select(Audit).where(
             Audit.action == "presence.ended"))) == ["kim", "sam"]
+
+
+def waiting_for_a_lock(app):
+    """How many of this database's connections are waiting for a lock right now, as PostgreSQL itself reports it."""
+    with app.state.engine.connect() as connection:
+        return connection.scalar(sql("select count(*) from pg_stat_activity "
+                                      "where datname = current_database() and wait_event_type = 'Lock'"))
+
+
+def until(reached):
+    """Wait for something the database reports, FINISH seconds at most, and fail if it never comes."""
+    end = time.monotonic() + FINISH
+    while not reached():
+        assert time.monotonic() < end, "what the test waited for never happened"
+        time.sleep(0.05)
+
+
+@pytest.mark.parametrize("records", ["two old records", "a lapsed tie and an old record"])
+def test_the_workers_record_keeping_and_a_removal_never_wait_for_each_other(tmp_path, monkeypatch, request, records):
+    """PostgreSQL only: it takes two rows held by two transactions, which SQLite's one write lock cannot show.
+
+    A device that is going has two records the worker is about to deal with. Removal takes a device's
+    records in id order. The worker must take them in that order too, one pass to a transaction, or each
+    could hold a record the other wants. The earlier record is held here until both are waiting for it,
+    removal first, so that when it is let go removal has it and wants the later one.
+    """
+    app, _gateway = home(tmp_path, monkeypatch, **on("postgresql", request))
+    old, gone_quiet = utcnow() - timedelta(days=91), utcnow() - timedelta(days=31)
+    later = {"two old records": {"kind": "conflict", "first_at": old, "last_at": old},
+             "a lapsed tie and an old record": {"kind": "tie", "first_at": gone_quiet, "last_at": gone_quiet,
+                                                "reach_from": gone_quiet}}[records]
+    with app.state.session_factory() as db:
+        # The later id is stored first, so a delete that takes rows as it finds them meets that one first.
+        for id_, user, values in (("b-later", "kim", later),
+                                  ("a-earlier", "sam", {"kind": "conflict", "first_at": old, "last_at": old})):
+            db.add(DevicePresence(id=id_, user_id=user, device_id="gw:client:laptop", basis="live", session="s",
+                                  address=LAPTOP, **values))
+            db.commit()
+    raised = []
+
+    def run(work):
+        try:
+            work()
+        except Exception as error:  # noqa: BLE001 - reported to the test, which fails on it
+            raised.append(error)
+
+    def remove():
+        with app.state.session_factory() as db:
+            db.scalars(select(Resource.id).where(Resource.id == "gw:client:laptop").with_for_update()).all()
+            removal.forget(db, ["gw:client:laptop"])
+            db.commit()
+
+    def keep():
+        presence.keep(app.state.session_factory, utcnow())
+
+    with others_finish() as started, app.state.session_factory() as holder:
+        holder.scalars(select(DevicePresence.id).where(DevicePresence.id == "a-earlier").with_for_update()).all()
+        for work in (remove, keep):
+            started.append(threading.Thread(target=run, args=(work,), daemon=True))
+            started[-1].start()
+            until(lambda: waiting_for_a_lock(app) >= len(started))
+        holder.rollback()  # removal, which asked first, now has the earlier record
+    assert raised == []
+    with app.state.session_factory() as db:
+        assert db.scalars(select(DevicePresence)).all() == [] and db.get(Resource, "gw:client:laptop") is None
 
 
 def test_a_source_that_declares_no_lookup_takes_no_part_in_finding_a_device(tmp_path, monkeypatch):

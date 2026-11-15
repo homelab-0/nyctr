@@ -21,11 +21,13 @@ Which write takes which locks, always in this order and before it reads a tie:
   store while the store waits for it.
 - Removing a source or dropping a device holds the devices' rows and then
   every tie on them, taken in one pass in id order, without the setting's row.
-- The worker's delete of records 90 days old takes none of these, by design:
-  nothing else changes a record that old.
+- The worker's delete of records 90 days old takes those records and nothing
+  else, in a transaction of its own: nothing else changes a record that old,
+  but removal deletes one with its device.
 Every writer in the first two lines waits on the setting's row, so only one of
-them runs at a time and none works from a tie another is changing. Ties are
-always taken in id order. Reads that write nothing take no lock.
+them runs at a time and none works from a tie another is changing. Whatever
+takes more than one tie or conflict takes them in id order, in one pass to a
+transaction. Reads that write nothing take no lock.
 """
 
 from __future__ import annotations
@@ -166,6 +168,10 @@ def keep(factory, now) -> None:
     Each tie that lapsed gets its ending written down, with one audit record that says whose it
     was. A record that ended 90 days ago, and a conflict last seen 90 days ago, is deleted, with
     the addresses it held. What a tie shows never waits for this: `deps` counts the days itself.
+
+    Two transactions, each taking its records in one pass in id order, as removal takes a
+    device's. Taken as a delete finds them, or in two passes of one transaction, the worker
+    could hold a record removal wants while removal holds one the worker wants.
     """
     with factory() as db:
         lapsed = (DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
@@ -176,9 +182,13 @@ def keep(factory, now) -> None:
             for tie in _ties(db, *lapsed):
                 tie.ended_at, tie.ended_by = _ended(tie, now), "expired"
                 _said(db, None, tie, "lapsed")
+        db.commit()
+    with factory() as db:
         old = now - timedelta(days=KEPT_DAYS)
-        db.execute(delete(DevicePresence).where(or_(
-            DevicePresence.ended_at <= old, (DevicePresence.kind == "conflict") & (DevicePresence.last_at <= old))))
+        due = [row.id for row in _ties(db, or_(
+            DevicePresence.ended_at <= old, (DevicePresence.kind == "conflict") & (DevicePresence.last_at <= old)))]
+        for start in range(0, len(due), 500):
+            db.execute(delete(DevicePresence).where(DevicePresence.id.in_(due[start:start + 500])))
         db.commit()
 
 
