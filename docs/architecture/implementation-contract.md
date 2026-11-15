@@ -147,7 +147,15 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   or demo. `PUT /api/collection` (admin) with
   `{enabled,minutes}` where minutes is one of `choices`; 409 in demo mode.
   `writes` maps `nextdns` and `unifi_network` to simulated, enabled or disabled.
-- `PUT /api/rules/access` with `{enabled,max_score 0–60,max_minutes 15–240,per_day 1–20}`.
+- `PUT /api/rules/access` with `{enabled,per_day 1–20,daily_total 1–100,
+  ad_tracker:{mode,max_score 0–60,max_minutes 15–240},
+  threat_feed:{mode,max_minutes 15–240,min_registered_days 30–3650}}`. `mode` is
+  off, shadow (record only) or on for `ad_tracker`, and only off for
+  `threat_feed`, whose `max_minutes` cannot be above `ad_tracker`'s. No other
+  tier can be named. The form before tiers (`{enabled,max_score,max_minutes,
+  per_day}`) is read from storage and refused here. Each request the rule looks
+  at leaves an audit record `access.rule_checked` with
+  `{domain,tier,outcome: opens|would_open|waits,checks,limits,minutes?,why?}`.
 - `PUT /api/rules/guest` with `{enabled,hits 1–50,minutes 1–120}`.
 - `GET /api/leases` -> Lease[]; members see their own. Reading reconciles expiry.
 - `POST /api/leases/{id}/end` (admin). 502 if the provider entry could not be

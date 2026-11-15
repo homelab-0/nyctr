@@ -209,7 +209,10 @@ the exception and both claims are stored together; every failure gives the
 claims back and leaves the request waiting with a note. A claim left by a
 killed copy is cleared by the tick after five minutes. Automatic openings for
 one person go one at a time, so the daily limit holds for requests sent at
-the same moment.
+the same moment. The daily total for everyone is counted then too, and once
+more with the rule's row locked as the opening is stored, so two people's
+requests at the same moment cannot both pass it: the one stored second is not
+stored, and the entry it added stays on record to be removed.
 
 Every change at a source (opening or removing an exception, issuing or ending
 a pass, letting a guest on or cutting one off, and each undo) has an overall
@@ -305,6 +308,13 @@ authorization → execution → verification. Each step has an explicit owner.
   (rule-based findings) and `nyctr/links.py` (inferred links between sources).
   No model.
 - Authorization: an administrator's decision, or a rule in `nyctr/policy.py`.
+  For the access rule that is `policy.may_open`: a pure function of the stored
+  rule and of facts `nyctr/access.py` gathers, with no database, network or
+  model in reach. `nyctr/layers.py` holds the words it works in: the layers a
+  block can live at and the descriptor of what blocked it. An integration
+  states the kind and origin of each reason; the core places the tier and works
+  out whether the block is deliberate. The tiers and the order of the checks
+  are in [the security model](../security-model.md#the-access-rule-in-tiers).
 - Execution: `nyctr/integrations/actions.py`, gated by `NYCTR_PROVIDER_WRITES`,
   called from `nyctr/access.py` (leases) and `nyctr/guests.py`.
 - Verification: DNS exceptions and guest authorisation read back the provider
@@ -336,7 +346,7 @@ successful provider response and verified restoration of user access remain
 separate outcomes.
 
 Preauthorized temporary grants require the deterministic administrator rule with
-its limits. AI cannot author or broaden that rule. Leases are durable, track
+its limits, tier by tier. AI cannot author or broaden that rule. Leases are durable, track
 whether Nyctr owns the provider entry, tolerate overlapping requests, are
 reconciled after restart, and stay open and visible when a removal fails.
 

@@ -118,14 +118,78 @@ as not applied and the administrator is told to make the change by hand.
 Nyctr acts without a person only under two administrator-written rules, both off
 until switched on:
 
-- The access rule may open a request when the score is at or below the written
-  limit (which the code caps at 60), the block came from a privacy list, the
-  member is under the daily cap, and no administrator denied that address before.
-  An unknown score, a security or content-rule block, a source whose integration cannot open addresses, a missing DNS source, disabled
-  writes or a provider failure all leave the request waiting for a person.
+- The access rule may open a request by itself only for a kind of block the
+  administrator switched on, within the limits written for that kind. What
+  kinds exist, which can ever be switched on and the order of the checks are
+  set out under [The access rule in tiers](#the-access-rule-in-tiers). An
+  unknown score, a block of a kind that is never automatic, a source whose
+  integration cannot open addresses, a missing DNS source, disabled writes or a
+  provider failure all leave the request waiting for a person.
 - The guest cut-off rule unauthorises a guest device after a written number of
   threat-list lookups within a written number of minutes. It counts stored
   observations. No model output is an input to either rule.
+
+## The access rule in tiers
+
+Every block says where it lives and what refused the address there, in words
+no vendor owns (`nyctr/layers.py`). The layers, in the order traffic meets
+them, are the gateway's own DNS filter, upstream DNS, the firewall and
+intrusion prevention. Today only upstream DNS carries data. For each reason it
+reports, an integration states two facts: the kind of thing that refused the
+address (a list of advertising or tracking addresses, a feed of addresses
+reported as threats, a category, a deny entry, a firewall policy, a region, a
+signature) and its origin (the administrator, the source's maker, a third
+party). A reason whose kind the source does not state is unknown.
+
+From those two facts the core, never the integration, places a block in a tier
+by a fixed table in `nyctr/policy.py`:
+
+| Tier | What blocked it | Can it open by itself |
+| --- | --- | --- |
+| Advertising and tracker lists | A list of advert or tracker addresses, a third party's or the source maker's | Yes, when switched on |
+| Threat feeds | A feed of addresses reported as threats | Not yet: this tier cannot be switched on until Nyctr can analyse an address. Its conditions are stored and shown |
+| Categories | A kind of site, or safe search, that someone chose to block | Never: deliberate |
+| Deny entries | An address someone put on a deny list | Never: deliberate |
+| Firewall policies | Anything at the firewall, region blocking included | Never |
+| Intrusion prevention | A recognised attack pattern | Never |
+| Unknown | Anything not recognised or not stated | Never |
+
+A block is **deliberate** when it exists because an administrator chose it: a
+category, a deny entry, or anything an administrator wrote. A hit on someone
+else's list or feed is not deliberate. A block with several reasons takes the
+strictest tier of all of them, because opening the address lifts every reason
+at once, and one reason that is not recognised makes the whole block unknown.
+
+The rule that is stored names only the two tiers that can ever be automatic. A
+rule that sets anything for another tier, or any mode but off for threat
+feeds, does not validate and is not stored. The advertising tier has three
+positions: off, record only (nothing is opened; the request waits for a person
+and its record says the rule would have opened it) and on. A rule stored by an
+earlier version is read as the advertising tier on with its old limits and
+everything else off, so it opens exactly what it opened before.
+
+Whether one request may be opened is decided by one function,
+`policy.may_open`, from the stored rule and plain facts. It reads no database,
+calls nothing and holds no model. Its checks run in this order, the first that
+fails ends them, and each one run is kept with its result in the request's
+audit record (`access.rule_checked`):
+
+1. The rule is switched on.
+2. No reason on the block is in a tier that is never automatic. This comes
+   before anything else about the block is looked at.
+3. The tier is switched on (record only goes on, and opens nothing).
+4. Nyctr can open the address where it is blocked, and changes are allowed there.
+5. The block is tied to the device by an assignment or an administrator's link.
+6. The tier's own conditions hold: for advertising lists, a score at or below
+   the written limit (never above 60). An unknown score fails.
+7. No administrator said no to that address before.
+8. The analysis of the address, once there is one. For advertising lists it
+   will only ever be able to stop an opening. No analysis exists yet, so this
+   check always passes and no model output reaches the rule.
+9. The person's openings in the last day are under the limit for each person,
+   and everyone's are under the daily total. Both are counted again when the
+   person's turn is held, and the total once more as the opening is stored.
+10. The time is the shorter of what was asked and the tier's limit.
 
 ## Two addresses
 

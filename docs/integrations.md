@@ -396,8 +396,9 @@ What this integration deliberately does not do:
   capability, so the access rule never acts on a Pi-hole block and an approved
   request is recorded as not applied for you to carry out in Pi-hole.
 - It does not score a block from a subscribed list. Pi-hole does not say whether
-  a list is about adverts or threats, so those blocks stay unknown. Blocks from
-  the deny list or a deny pattern are scored as an administrator's rule.
+  a list is about adverts or threats, so those blocks stay unknown, in score
+  and in kind. Blocks from the deny list or a deny pattern are scored as an
+  administrator's rule and stated as deny entries.
 - It does not treat a client name as identity. Names come from Pi-hole's own
   network table; a block stays unassigned until an administrator links the label
   to a device under Setup.
