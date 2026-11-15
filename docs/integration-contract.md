@@ -27,7 +27,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `provides` | The capabilities below |
 | `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell |
 | `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gaps` also travel in the catalog as `limits`, and the Briefing lists them under "Keep in mind" for each connected source. A source whose blocked lookups arrive without a device declares that under the gap id `upstream_identity`; Blocks quotes it when every stored lookup from the source is unattributed. `gap_notes` are also shown on the source's card after a collection that recorded their code. A note says what is missing and what follows from it, not why the read was not made: the core adds that sentence (refused, or an error at the source) from what happened |
-| `detail_gaps` | Optional. The codes among `gap_notes` that miss a detail, a setting or a side read and leave every list of items whole. After a collection that recorded any other gap, Nyctr marks nothing of the source as missing, because the gap may be why an item was not listed. Leave a code out when in doubt |
+| `detail_gaps` | Optional. The codes among `gap_notes` that miss a detail, a setting or a side read and leave every list of items whole, apart from the kinds the same read names in `Snapshot.unread`. After a collection that recorded any other gap, Nyctr marks nothing of the source as missing, because the gap may be why an item was not listed. Leave a code out when in doubt. `tests/test_whole_lists.py` provokes every code at the adapter and fails when a declaration does not match what was read: add a case there with each new code |
 | `not_collected` | Optional. What a source of this kind never collects, each a few plain words ("DNS lookups that were allowed"). It travels in the catalog, and the Briefing lists it under "Not collected" for each connected source. A caution about evidence that is collected belongs in `gaps` |
 | `resumes` | Optional. `True` when the source's log can be read from a given time on. See "A log read from where the last one ended" below |
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
@@ -104,8 +104,12 @@ data_limit_mb, guest_count, created_at, activated_at, expires_at, expired}`. Lea
 are left alone; a list is treated as the complete current set.
 
 A collection that returns is taken as having listed every kind of item in full,
-and what it did not list is marked missing and dropped after 7 days (see the
-upkeep loop in docs/architecture/overview.md). Where that is not so, say it:
+and what it did not list is marked missing, and dropped once whole reads on 7
+separate days have left it out (see the upkeep loop in
+docs/architecture/overview.md). That holds for an empty list too: a source
+that answers a list with nothing has every stored item of that kind marked
+missing at once, so raise when an empty answer cannot be told from a failure.
+Where a list was not read in full, say it:
 put the kinds that were not listed in full in `Snapshot.unread` (a log read
 that was cut short or is switched off leaves `domain` and the `client` labels
 taken from it unread), and raise instead of returning when a list could not be
@@ -192,7 +196,10 @@ statement.
   complete current set, while its `observed` items are only those the newly
   read rows name: the core keeps the stored `observed` items and links of that
   source whose `observed_at` is inside the window, as a read of the whole
-  window would find them, and treats older ones as missing. Set
+  window would find them, and treats older ones as missing. So date every
+  item taken from the log by its newest row, never by the time of the read:
+  an item dated "now" would count as listed for a whole window after its last
+  row. Set
   `partial_rows` only when rows inside what this read set out to read were left
   unread. The core then takes the stored log to be whole only from the oldest
   row that read kept, records that time with the collection, and shows the

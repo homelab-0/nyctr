@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useApi } from '../api';
 import { Empty, ErrorState, Loading, Panel, SearchInput } from '../components/ui';
-import { counted } from '../lib/counts';
+import { counted, namedCounts } from '../lib/counts';
 import { REMOVAL, clock } from '../lib/format';
 import type { AuditEvent, Integration, Person } from '../types';
 
@@ -204,7 +204,12 @@ function summary(event: AuditEvent) {
     parts.push(
       `settled ${d.looked < 90 ? counted(d.looked, 'second') : counted(Math.round(d.looked / 60), 'minute')} after the attempt`,
     );
-  if (typeof d.resources === 'number') parts.push(counted(d.resources, 'item'));
+  // What was dropped is said by kind; an item of a kind with no plain name is still counted.
+  const kinds =
+    event.action === 'inventory.dropped' && d.kinds && typeof d.kinds === 'object'
+      ? namedCounts(d.kinds as Record<string, number>)
+      : '';
+  if (typeof d.resources === 'number') parts.push(kinds || counted(d.resources, 'item'));
   if (typeof d.observations === 'number') parts.push(counted(d.observations, 'blocked lookup'));
   if (d.partial === true) parts.push('most recent only');
   // Only the count: the codes are for the record, and the source's card says what each means.

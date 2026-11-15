@@ -151,8 +151,10 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   source parsing and member visibility.
 - End-to-end validation against supported real provider versions, including
   missing telemetry and asymmetric routing.
-- Documented retention/deletion jobs and backup/restore exercises. Hiding stale
-  inbox events is not equivalent to deleting stored observations.
+- Backup/restore exercises, and retention of anything but lookups and
+  inventory. Blocked lookups are deleted when their time is up, and items a
+  source has stopped reporting are dropped as docs/architecture/overview.md
+  describes; requests, exceptions and the audit table are kept without limit.
 - Multi-process-safe throttling and job concurrency if scaling beyond one process.
   Lease reconciliation, scheduled collection and the assistant's rate limit run
   inside the API process. A scheduled run, and each retry of a source that

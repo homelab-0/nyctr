@@ -25,6 +25,12 @@ export const counted = (value: number, one: string, many = `${one}s`) =>
 export const isMissing = (row: { attributes: Record<string, unknown> }) =>
   Boolean(row.attributes.missing_from_latest_snapshot);
 
+/** The mark on a missing item, with how long ago a collection first missed it when that is on record. */
+export const missingFor = (row: { attributes: Record<string, unknown> }, now = Date.now()) =>
+  typeof row.attributes.missing_since === 'string'
+    ? `Missing, first missed ${ago(row.attributes.missing_since, now)}`
+    : 'Missing from last collection';
+
 /** How many stored items were not in the latest collection, said wherever the present ones are counted. */
 export const notSeen = (missing: number) =>
   missing ? `${number(missing)} not seen at the last collection` : '';

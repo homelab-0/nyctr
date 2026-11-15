@@ -10,13 +10,15 @@ import Inventory from './Inventory';
 import MapPage from './MapPage';
 import Setup from './Setup';
 
-const gone = (row: Resource): Resource => ({
+const DAY = 86400000;
+const gone = (row: Resource, since?: string): Resource => ({
   ...row,
-  attributes: { missing_from_latest_snapshot: true, missing_since: '2026-11-13T00:00:00Z' },
+  attributes: { missing_from_latest_snapshot: true, ...(since ? { missing_since: since } : {}) },
 });
 const items = [
   thing('laptop', 'client', 'Laptop'),
-  gone(thing('tablet', 'client', 'Tablet')),
+  gone(thing('tablet', 'client', 'Tablet'), new Date(Date.now() - 9 * DAY - 60000).toISOString()),
+  // Marked by an earlier release, which kept no time.
   gone(thing('phone', 'client', 'Phone')),
   thing('lan', 'network', 'Office LAN'),
 ];
@@ -61,7 +63,7 @@ describe('what a source no longer reports', () => {
     expect(screen.getByText('Tablet')).toBeDefined();
   });
 
-  it('is marked in the table that says whose device is whose', async () => {
+  it('is marked, with how long it has been missing, in the table that says whose device is whose', async () => {
     mockApi({
       'GET /rules': { sources: [] },
       'GET /devices': items.filter((row) => row.kind === 'client'),
@@ -71,7 +73,7 @@ describe('what a source no longer reports', () => {
     render(<Setup params={new URLSearchParams('tab=people')} />);
     const row = (name: string) => screen.getByText(name).closest('tr')!;
     await screen.findByText('Tablet');
-    expect(row('Tablet').textContent).toContain('Missing from last collection');
+    expect(row('Tablet').textContent).toContain('Missing, first missed 9 days ago');
     expect(row('Phone').textContent).toContain('Missing from last collection');
     expect(row('Laptop').textContent).not.toContain('Missing');
   });
@@ -84,7 +86,7 @@ describe('what a source no longer reports', () => {
     expect(within(note).getByRole('link', { name: 'Inventory' })).toBeDefined();
   });
 
-  it('is recorded in Activity by source and count when it is dropped', async () => {
+  it('is recorded in Activity by source and by how many of each kind went', async () => {
     const dropped: AuditEvent = {
       id: 'a',
       created_at: new Date().toISOString(),
@@ -94,15 +96,14 @@ describe('what a source no longer reports', () => {
       target_id: 'dns',
       details: {
         name: 'Office DNS',
-        resources: 1183,
-        kinds: { domain: 1183 },
-        assignments: 0,
-        links: 0,
+        resources: 1186,
+        kinds: { domain: 1183, client: 2, network: 1 },
       },
     };
     mockApi({ 'GET /audit': [dropped], 'GET /users': [], 'GET /integrations': [] });
     render(<Activity />);
     const row = (await screen.findByText('Dropped what has left Office DNS')).closest('tr')!;
-    expect(row.textContent).toContain('1,183 items');
+    expect(row.textContent).toContain('2 devices, 1 network and 1,183 blocked addresses');
+    expect(row.textContent).not.toContain('items');
   });
 });
