@@ -76,7 +76,18 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 - `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
   missing, expired or not visible to the caller answers the same 404.
-- `GET /api/me/device` -> `{device_id,name,simulated}`; only among the caller's devices.
+- `GET /api/me/device` -> `{device_id,name,simulated,how,reason,message}`; only among the
+  caller's devices. `how` is `assigned` or `signed_in`. With recognition at sign-in switched on,
+  the first request after signing in ties the caller to the one device the gateway says holds
+  the request's address; when no device is recognised, `reason` is a code and `message` the
+  sentence to show (never whose a device is).
+- `GET /api/presence` -> `{items}`: a member's own ties in force; for an administrator every
+  tie and conflict on record, with `enabled` and `reach_back_hours`. An item is
+  `{id,kind,user_id,user_name,device_id,device_name,basis,first_at,last_at,ended_at}`, `kind`
+  being `tie` or `conflict`.
+- `PUT /api/presence` with `{enabled,reach_back_hours}` (0 to 24) is admin-only. Switching it
+  off ends every tie; a shorter reach applies to ties already made.
+- `DELETE /api/presence/{id}` ends a tie at once: a member their own, an administrator any.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as
@@ -89,7 +100,8 @@ Block: `{id,device_id,device_name,domain,source,reason,reason_codes,observed_at,
 expires_at,evidence_kind,attribution,risk_score,risk_band,risk_category,
 risk_factors,risk_explanation}`. `risk_score` is computed by `nyctr.risk` from the
 stored reason; unknown risk is null with band `unknown`. `attribution`: assigned,
-inferred, unverified or unattributed. Members see only `assigned`.
+inferred, unverified or unattributed. Members see only `assigned`, on a device assigned to
+them or one they are tied to by signing in on it (`nyctr/deps.py` decides, nowhere else).
 AccessRequest: `{id,block_id,domain,device_name,requester_id,reason,duration_minutes,
 status,created_at,review_note,risk_score,risk_category,risk_factors,decided_by,
 decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
@@ -178,7 +190,11 @@ taking an explicit `allowed` flag derived from `NYCTR_PROVIDER_WRITES`.
 
 ## Schema
 
-Schema version 2. `migrate` upgrades a version-1 database in place by creating
+Schema version 2: `migrate` upgrades a version-1 database in place by creating
 the new tables (settings, leases, device_links, guest_passes, guest_actions,
 sightings, insights) and adding nullable columns to observations and
 access_requests. No existing row is rewritten.
+
+Schema version 3 adds one table, `device_presence` (sign-in ties and conflicts), and alters
+nothing else. The upgrade from version 2 is tested on SQLite and PostgreSQL 17 with every
+stored row compared before and after.
