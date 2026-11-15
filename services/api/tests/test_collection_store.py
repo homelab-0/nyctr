@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,10 +12,10 @@ from conftest import live_app, live_signin
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
 
-from nyctr import collection
+from nyctr import collection, integrations
 from nyctr.assistant import attention
 from nyctr.collection import collect_integration
-from nyctr.integrations import Snapshot, core
+from nyctr.integrations import Snapshot, core, registry
 from nyctr.models import Audit, Integration, Observation, Relationship, Resource, utcnow
 
 KEY = "fabricated-key-never-logged"
@@ -363,3 +364,26 @@ def test_requests_and_time_waited_at_a_request_limit_are_counted_for_the_log(mon
             return evidence
     evidence = asyncio.run(read_twice())
     assert (evidence.requests, evidence.waited) == (2, 30.0)
+
+
+def test_only_a_source_that_declares_it_is_asked_to_read_its_log_from_a_time(monkeypatch):
+    """Every source of blocked lookups declares `resumes`; `since` reaches those and no other, inside the window."""
+    assert {source.id for source in registry.providers().values() if source.resumes} == set(
+        registry.with_capability("dns.blocks"))
+    got = []
+
+    async def collect(integration_id, config, secret, **since):
+        got.append(since)
+        return Snapshot()
+    now = utcnow()
+    for resumes in (True, False):
+        monkeypatch.setattr(registry, "get", lambda provider, resumes=resumes: SimpleNamespace(
+            validate=dict, collect=collect, resumes=resumes))
+        asyncio.run(integrations.collect("fabricated", "id", {}, KEY, since=now))
+        asyncio.run(integrations.collect("fabricated", "id", {}, KEY))
+    assert got == [{"since": now}, {}, {}, {}]
+    window = now - timedelta(hours=24)
+    assert [core.log_read(window, since, now)[0] for since in (None, window - timedelta(hours=1),
+            now - timedelta(minutes=25), now + timedelta(hours=1))] == [window, window, now - timedelta(minutes=25), now]
+    assert core.log_read(window, None, now)[1] == {
+        "window_from": window.isoformat(), "read_from": window.isoformat(), "read_to": now.isoformat()}
