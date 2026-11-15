@@ -21,8 +21,10 @@ allowed only where the operator wrote it in full. The list exists so that a
 stolen administrator session cannot send a key to another server, aim Nyctr at
 an internal address, or probe the ports of a listed host. The key set directly
 on the server (`NYCTR_AI_API_KEY`) goes only to the server set beside it, on
-that scheme and port. No redirect is followed, and both checks run again before
-every call. A saved value that cannot be read turns the model off: it never
+that scheme and port. A cloud metadata or link-local address is refused for a
+connection made in the console, listed or not; the server's own
+`NYCTR_AI_BASE_URL` is the operator's choice and is not checked that way. No
+redirect is followed, and both checks run again before every call. A saved value that cannot be read turns the model off: it never
 falls back to the server's own endpoint and key. The key is never in an API
 answer, an audit record or a log, and a refusal never repeats what was typed.
 See [the model](model.md).
@@ -148,6 +150,7 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | A listed model host is reached in clear text, or on another of its ports | A bare name in the list is HTTPS on port 443 only; anything else must be written in full by the operator |
 | A saved model setting cannot be read after an upgrade or a rollback | The model is off and says so; the server's own endpoint and key, which an administrator replaced, are not used in its place |
 | A trace of a model call says who asked or which device it was about | Trace fields are fixed words, versions, a new random id and a digest of the subject's id keyed with 32 random bytes only this installation holds (never the model's key, never sent or shown), so the digest cannot be matched against guessed ids; the `user` field is never sent |
+| SQL statement logging is on, and its log is read by someone who also reads the traces | That log then holds the trace key, like every other stored value, and a reader with the key could test guessed ids against a session. Statement logging is off by default and cannot be turned on from the console; leave it off, or treat its output as a secret |
 | Model is told to act by text in a log or request | The model has no tools or credentials; evidence is passed as data in a bounded pack with addresses, emails, codes and identifiers removed |
 | Model cites something it was not shown | Citations are resolved against the pack on the server and dropped when they do not match |
 | Graph query exhausts the server | Administrator-only, query-only, with length, depth and returned-object limits |

@@ -48,8 +48,11 @@ Whoever runs the server decides this, not the administrator in the browser:
 - The same holds for the server's own endpoint: its scheme and port are part
   of where `NYCTR_AI_API_KEY` may go, and of what the console may save without
   a list entry.
-- An endpoint with a sign-in name, a password, a question mark or a `#` is
-  refused, and so is a cloud metadata or link-local address, listed or not.
+- An endpoint saved in the console with a sign-in name, a password, a question
+  mark or a `#` is refused, and so is a cloud metadata or link-local address,
+  listed or not. That refusal applies to connections made in the console. The
+  server's own `NYCTR_AI_BASE_URL` is the operator's choice and is not checked
+  that way.
 - No redirect is followed. An endpoint that answers with one is reported as
   refused, and the key goes nowhere else.
 - Both lists are checked when a value is saved and again before every call, so

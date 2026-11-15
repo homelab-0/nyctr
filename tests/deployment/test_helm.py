@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -221,6 +222,45 @@ def test_the_console_can_connect_a_model_only_within_the_hosts_and_secrets_the_c
     assert env["NYCTR_MODEL_SECRET_SPARE"]["valueFrom"]["secretKeyRef"] == {"name": "nyctr-spare", "key": "key"}
     assert not any(name.startswith("NYCTR_AI_") for name in env)
     assert "Secret" not in manifests and "envFrom" not in container(manifests)
+
+
+def test_the_chart_takes_a_model_server_or_a_secret_name_only_if_the_application_does(helm_binary, tmp_path):
+    """A value the chart accepts must never stop the application at start, or name a key the Console cannot use.
+
+    Each entry is put to the chart, through its schema, and to the application's own rule, and the two must
+    agree. Known gaps the other way, where the application takes an entry and the chart does not: an IPv6
+    literal, a trailing slash, a port left empty after its colon, and a port written with leading zeros.
+    """
+    sys.path.insert(0, str(ROOT / "services" / "api"))
+    from nyctr.config import _model_origin
+    from nyctr.model import SECRET_REF
+
+    def chart_takes(assistant):
+        result = run_helm(helm_binary, tmp_path, merge(fixture("live-values.yaml"), {"assistant": assistant}))
+        return result.returncode == 0
+
+    def application_takes(entry):
+        try:
+            return bool(_model_origin(entry))
+        except ValueError:
+            return False
+
+    good = ["llm.example.test", "LLM.Example.Test", "model_gateway", "http://model_gateway:4000", "http://gateway:1",
+            "https://llm.example.test:65535", "https://llm.example.test:8443", "192.0.2.10", "http://192.0.2.10:4000",
+            "a" * 63 + ".example.test", "a.b"]
+    assert all(application_takes(entry) for entry in good) and chart_takes({"hosts": good})
+    for entry in ("a..b", "https://a..b:8443", ".a", "a.", "-a.example.test", "a-.example.test", "_a.example.test",
+                  "http://gateway:0", "http://gateway:65536", "https://gateway:99999",
+                  "a" * 64 + ".example.test", "https://*.example.test", "*.example.test", "gateway:4000"):
+        assert not application_takes(entry), entry
+        assert not chart_takes({"hosts": [entry]}), entry
+    # The other direction is never unsafe: the chart refuses these, so they cannot reach the application.
+    for entry in ("https://[2001:db8::9]:8443", "http://gateway:4000/", "http://gateway:", "http://gateway:04000"):
+        assert application_takes(entry) and not chart_takes({"hosts": [entry]}), entry
+    for suffix, taken in (("A" * 100, True), ("A" * 101, False), ("MAIN_2", True), ("", False), ("main", False)):
+        name = "NYCTR_MODEL_SECRET_" + suffix
+        assert bool(SECRET_REF.fullmatch(name)) is taken, name
+        assert chart_takes({"secrets": [{"envName": name, "existingSecret": "nyctr-model", "key": "key"}]}) is taken, name
 
 
 @pytest.mark.parametrize("trusted", [["10.42.0.0/16"], ["10.42.7.0/24", "10.42.0.10"], ["2001:db8:42::/56"]])
