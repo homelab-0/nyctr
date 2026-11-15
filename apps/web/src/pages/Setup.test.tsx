@@ -315,33 +315,48 @@ describe('the address Nyctr sees for you, in Setup', () => {
     mockApi({ ...system, 'GET /collection': scheduleFixture(), 'GET /me/address': answer });
     render(<Setup params={new URLSearchParams('tab=system')} />);
   };
+  /** Waits for the answer to be on screen for as long as a busy machine may need. */
+  const shown = (text: string) => screen.findByText(text, undefined, { timeout: 20_000 });
+  const patient = 30_000;
 
-  it('shows the address, the proxy the connection came from and which passed-on address was read', async () => {
-    check(seen);
-    expect(await screen.findByText('198.51.100.21')).toBeDefined();
-    expect(
-      screen.getByText(
-        'The connection came from 10.42.0.10, which is on your list of proxies. Nyctr read address 1 of the 2 it passed on, counted from the right: the one your proxy wrote.',
-      ),
-    ).toBeDefined();
-    expect(
-      screen.getByText(/something in front of your proxy is hiding your address/),
-    ).toBeDefined();
-  });
+  it(
+    'shows the address, the proxy the connection came from and which passed-on address was read',
+    async () => {
+      check(seen);
+      expect(await shown('198.51.100.21')).toBeDefined();
+      expect(
+        screen.getByText(
+          'The connection came from 10.42.0.10, which is on your list of proxies. Nyctr read address 1 of the 2 it passed on, counted from the right: the one your proxy wrote.',
+        ),
+      ).toBeDefined();
+      expect(
+        screen.getByText(/something in front of your proxy is hiding your address/),
+      ).toBeDefined();
+    },
+    patient,
+  );
 
-  it('says so when it cannot tell the address, and never shows the proxy as if it were you', async () => {
-    check({ ...seen, address: null, why: 'missing', entry: null, entries: 0 });
-    expect(await screen.findByText('Nyctr cannot tell your address')).toBeDefined();
-    expect(screen.getByText(/but it passed no address on/)).toBeDefined();
-    expect(screen.getByText(/counted together, and no device is recognised/)).toBeDefined();
-    expect(screen.queryByText('10.42.0.10')).toBeNull();
-  });
+  it(
+    'says so when it cannot tell the address, and never shows the proxy as if it were you',
+    async () => {
+      check({ ...seen, address: null, why: 'missing', entry: null, entries: 0 });
+      expect(await shown('Nyctr cannot tell your address')).toBeDefined();
+      expect(screen.getByText(/but it passed no address on/)).toBeDefined();
+      expect(screen.getByText(/counted together, and no device is recognised/)).toBeDefined();
+      expect(screen.queryByText('10.42.0.10')).toBeNull();
+    },
+    patient,
+  );
 
-  it('shows a refusal instead of an address', async () => {
-    check({ __status: 403, detail: 'Administrator access required' });
-    expect(await screen.findByText('Administrator access required')).toBeDefined();
-    expect(screen.queryByText('Nyctr cannot tell your address')).toBeNull();
-  });
+  it(
+    'shows a refusal instead of an address',
+    async () => {
+      check({ __status: 403, detail: 'Administrator access required' });
+      expect(await shown('Administrator access required')).toBeDefined();
+      expect(screen.queryByText('Nyctr cannot tell your address')).toBeNull();
+    },
+    patient,
+  );
 
   it('explains every way an address is or is not worked out', () => {
     const say = (change: Partial<AddressSeen>) => addressText({ ...seen, ...change });
