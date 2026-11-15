@@ -407,7 +407,7 @@ export interface GuestOverview {
   not_collected: string[];
 }
 export interface AttentionItem {
-  kind: 'guest' | 'lease' | 'request' | 'finding' | 'source' | 'suggestion' | 'model';
+  kind: 'guest' | 'lease' | 'request' | 'finding' | 'source' | 'suggestion' | 'model' | 'presence';
   id: string;
   /** For a source that stored only part: open its Edit form, or go to its card. */
   action?: 'edit' | 'card';
@@ -518,6 +518,29 @@ export interface ThisDevice {
   device_id: string | null;
   name: string | null;
   simulated: boolean;
+  /** How it was recognised: an administrator assigned it, or this person signed in on it. */
+  how?: 'assigned' | 'signed_in' | null;
+  /** Why no device was recognised, as a code and as a sentence to show. */
+  reason?: string | null;
+  message?: string | null;
+}
+/** A sign-in on a device: a tie, or a conflict where the device was someone else's. */
+export interface PresenceRow {
+  id: string;
+  kind: 'tie' | 'conflict';
+  user_id: string;
+  user_name: string;
+  device_id: string;
+  device_name: string;
+  first_at: string;
+  last_at: string;
+  ended_at: string | null;
+}
+/** A member's own ties, or for an administrator every tie and conflict with the setting. */
+export interface Presence {
+  items: PresenceRow[];
+  enabled?: boolean;
+  reach_back_hours?: number;
 }
 export interface AuditEvent {
   id: string;

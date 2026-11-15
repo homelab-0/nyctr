@@ -769,3 +769,115 @@ describe('an opening that was not confirmed, if a member were ever sent one', ()
     expect(document.body.textContent).not.toMatch(/not on yet|not switched on|It's open/);
   });
 });
+
+describe('the device a member signed in on', () => {
+  const wait = { timeout: 20_000 };
+  const patient = 30_000;
+  const tie = {
+    id: 't1',
+    kind: 'tie',
+    device_id: 'laptop',
+    device_name: "Sam's laptop",
+    ended_at: null,
+  };
+
+  it(
+    'says how the device was recognised and forgets it with one plain button',
+    async () => {
+      let tied = true;
+      const { calls } = open({
+        'GET /me/device': () =>
+          tied
+            ? { device_id: 'laptop', name: "Sam's laptop", simulated: false, how: 'signed_in' }
+            : {
+                device_id: null,
+                name: null,
+                simulated: false,
+                how: null,
+                reason: 'forgotten',
+                message:
+                  'Nyctr was asked to forget this device. Sign in again to have it recognised.',
+              },
+        'GET /devices': () =>
+          tied ? [{ id: 'laptop', name: "Sam's laptop", classification: 'unassigned' }] : [],
+        'GET /presence': () => ({ items: tied ? [tie] : [] }),
+        'DELETE /presence/t1': () => {
+          tied = false;
+          return { ok: true };
+        },
+      });
+      const forget = await screen.findByRole('button', { name: 'Forget this device' }, wait);
+      expect(document.body.textContent).toContain(
+        "You're on Sam's laptop, recognised because you signed in on it.",
+      );
+      await act(async () => forget.click());
+      expect(
+        await screen.findByText(
+          /Nyctr was asked to forget this device\. Sign in again/,
+          undefined,
+          wait,
+        ),
+      ).toBeDefined();
+      expect(calls.map((call) => `${call.method} ${call.path}`)).toContain('DELETE /presence/t1');
+      expect(screen.queryByRole('button', { name: 'Forget this device' })).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'says in the words it was given why this device is not recognised, and offers nothing to forget',
+    async () => {
+      const message =
+        'This request did not come from your network, so Nyctr cannot tell which device this is.';
+      open({
+        'GET /me/device': {
+          device_id: null,
+          name: null,
+          simulated: false,
+          how: null,
+          reason: 'outside',
+          message,
+        },
+        'GET /presence': { items: [] },
+      });
+      expect(
+        await screen.findByText(
+          `${message} Nyctr is showing all of your devices.`,
+          undefined,
+          wait,
+        ),
+      ).toBeDefined();
+      expect(document.body.textContent).not.toContain('could not tell which of your devices');
+      expect(screen.queryByRole('button', { name: /^Forget/ })).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'tells an assigned device from one signed in on under My devices, and only a tie can be forgotten',
+    async () => {
+      open(
+        {
+          'GET /me/device': {
+            device_id: 'laptop',
+            name: "Sam's laptop",
+            simulated: false,
+            how: 'signed_in',
+          },
+          'GET /devices': [
+            { id: 'laptop', name: "Sam's laptop", classification: 'unassigned' },
+            { id: 'desk', name: 'Desk computer', classification: 'personal' },
+          ],
+          'GET /presence': { items: [tie] },
+        },
+        '/devices',
+      );
+      expect(await screen.findByText('You signed in on it', undefined, wait)).toBeDefined();
+      expect(screen.getByText('Yours')).toBeDefined();
+      expect(
+        screen.getAllByRole('button', { name: /^Forget/ }).map((button) => button.textContent),
+      ).toEqual(["Forget Sam's laptop"]);
+    },
+    patient,
+  );
+});

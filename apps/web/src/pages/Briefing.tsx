@@ -17,6 +17,7 @@ const KIND: Record<AttentionItem['kind'], string> = {
   source: 'Source',
   suggestion: 'Suggestion',
   model: 'Model',
+  presence: 'Sign-in',
 };
 
 /**

@@ -37,6 +37,7 @@ function open(first: CollectionSchedule, mode: 'live' | 'demo' = 'live') {
     'GET /auth/config': { mode, local_enabled: true, oidc_enabled: false },
     'GET /model': modelFixture(),
     'GET /me/address': seen,
+    'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
     'GET /collection': () => current,
     'PUT /collection': (body: unknown) => {
       const sent = body as { enabled: boolean; minutes: number };
@@ -61,6 +62,7 @@ const system = {
   'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
   'GET /model': modelFixture(),
   'GET /me/address': seen,
+  'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
 };
 
 /** Holds back every later request of one kind until `release` is called. */
@@ -430,4 +432,97 @@ describe('the address Nyctr sees for you, in Setup', () => {
       'The server did not say where the connection came from.',
     );
   });
+});
+
+describe('recognising devices at sign-in, in Setup', () => {
+  const wait = { timeout: 20_000 };
+  const patient = 30_000;
+  const signIn = (id: string, kind: string, who: string, ended_at: string | null = null) => ({
+    id,
+    kind,
+    user_id: who.toLowerCase(),
+    user_name: who,
+    device_id: 'laptop',
+    device_name: 'Laptop',
+    first_at: '2026-11-14T09:00:00Z',
+    last_at: '2026-11-15T09:00:00Z',
+    ended_at,
+  });
+
+  it(
+    'is off until switched on, sits before the address check it points at, and saves the reach',
+    async () => {
+      let current = { items: [], enabled: false, reach_back_hours: 2 };
+      const calls = mockApi({
+        ...system,
+        'GET /collection': scheduleFixture(),
+        'GET /presence': () => current,
+        'PUT /presence': (body: unknown) => (current = { ...current, ...(body as object) }),
+      });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const name = "Recognise members' devices when they sign in";
+      const toggle = await screen.findByRole('switch', { name }, wait);
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(document.body.textContent).toContain(
+        'check that the panel below shows the address of the device you are on now',
+      );
+      const below = await screen.findByText('The address Nyctr sees for you', undefined, wait);
+      expect(toggle.compareDocumentPosition(below) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+      fireEvent.click(toggle);
+      await waitFor(() => expect(saved()).toEqual([{ enabled: true, reach_back_hours: 2 }]), wait);
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'), wait);
+      fireEvent.click(screen.getByRole('button', { name: 'Raise hours before the first sign-in' }));
+      await waitFor(() => expect(saved()[1]).toEqual({ enabled: true, reach_back_hours: 3 }), wait);
+    },
+    patient,
+  );
+
+  it(
+    'lists who signed in on a device under it, and an administrator ends a tie there',
+    async () => {
+      const calls = mockApi({
+        'GET /rules': rules,
+        'GET /users': [{ id: 'sam', name: 'Sam', active: true }],
+        'GET /device-links': [],
+        'GET /devices': [
+          {
+            id: 'laptop',
+            name: 'Laptop',
+            kind: 'client',
+            classification: 'unassigned',
+            attributes: {},
+          },
+        ],
+        'GET /presence': {
+          items: [
+            signIn('t1', 'tie', 'Sam'),
+            signIn('c1', 'conflict', 'Kim'),
+            signIn('t0', 'tie', 'Lee', '2026-11-10T09:00:00Z'),
+          ],
+          enabled: true,
+          reach_back_hours: 2,
+        },
+        'DELETE /presence/t1': { ok: true },
+      });
+      render(<Setup params={new URLSearchParams('tab=people')} />);
+      expect(
+        await screen.findByText(/Sam signed in on it, last on/, undefined, wait),
+      ).toBeDefined();
+      expect(screen.getByText(/Kim signed in on it on .+ and was not tied to it/)).toBeDefined();
+      expect(document.body.textContent).not.toContain('Lee'); // an ended tie is not listed under the device
+      expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
+        "End Sam's tie to Laptop",
+      ]);
+      fireEvent.click(screen.getByRole('button', { name: "End Sam's tie to Laptop" }));
+      await waitFor(
+        () =>
+          expect(calls.map((call) => `${call.method} ${call.path}`)).toContain(
+            'DELETE /presence/t1',
+          ),
+        wait,
+      );
+    },
+    patient,
+  );
 });
