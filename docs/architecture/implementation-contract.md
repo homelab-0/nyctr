@@ -106,7 +106,9 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   `presence.conflict` and `presence.ended` records carry `device_name`. Only a source whose
   integration declares `devices.lookup` is considered when the address is placed. `PUT
   /api/presence` and the write of a tie hold the stored setting's row, so no tie commits after
-  recognition is switched off; a sign-in that lost that race answers `off`.
+  recognition is switched off; a sign-in that lost that race answers `off`. A sign-in takes
+  that row before it reads who is tied to the device, so of two people signing in on one
+  unshared device at the same moment one is tied and the other is answered `other_person`.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as

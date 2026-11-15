@@ -288,6 +288,30 @@ def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_i
             "ties_ended"] == 1
 
 
+def test_two_people_signing_in_on_one_unshared_device_at_the_same_moment_are_not_both_tied(tmp_path, monkeypatch):
+    """Sam has read that nobody is tied to the laptop and is about to write. Kim's request arrives just then."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    write, others, answers, waiting = presence._record, [], [], []
+
+    with browser(app, LAPTOP) as sam, browser(app, LAPTOP, KIM) as kim:
+        def record(*args):
+            if not others:  # Sam's write, the first: Kim asks now, on another thread and another connection
+                other = threading.Thread(target=lambda: answers.append(kim.get("/api/me/device").json()))
+                others.append(other)
+                other.start()
+                other.join(1.0)  # under the lock Kim is still waiting when this gives up, however long that takes
+                waiting.append(other.is_alive())
+            return write(*args)
+
+        monkeypatch.setattr(presence, "_record", record)
+        assert sam.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
+        others[0].join()
+        assert waiting == [True] and answers[0]["reason"] == "other_person" and answers[0]["device_id"] is None
+        assert kim.get("/api/devices").json() == [] and len(sam.get("/api/devices").json()) == 1
+    assert [(tie.user_id, tie.ended_at) for tie in stored(app)] == [("sam", None)]
+    assert [(row.user_id, row.device_id) for row in stored(app, "conflict")] == [("kim", "gw:client:laptop")]
+
+
 def test_a_source_that_declares_no_lookup_takes_no_part_in_finding_a_device(tmp_path, monkeypatch):
     """Its networks and its stored devices tie nobody, and its range does not put another source's in doubt."""
     app, gateway = home(tmp_path, monkeypatch)

@@ -105,7 +105,8 @@ def _held(db: Session) -> Recognition:
 
     The one lock that making a tie and switching recognition off both take. Whichever comes
     second waits for the first to commit, so a tie is never committed after the switch: either
-    the switch finds it and ends it, or the sign-in finds recognition off and makes none.
+    the switch finds it and ends it, or the sign-in finds recognition off and makes none. Two
+    sign-ins wait for each other the same way, so two people cannot both be first on a device.
     Written as an update that changes nothing, which locks the row on PostgreSQL and takes the
     one write lock on SQLite.
     """
@@ -319,8 +320,23 @@ def _recognise(db: Session, app_settings, user, session, seen, site: str) -> Fou
         return Found(why="not_answering")
     if len(holders) != 1:
         return Found(why="several" if holders else "nobody")
-    # The row is held while the tie is made, so two people cannot both be the first on one device.
-    device = db.scalar(select(Resource).where(Resource.id == holders[0]["id"]).with_for_update())
+    found = _tie(db, user, integration, holders[0], basis, mark, now, address)
+    if found.device is None:
+        db.rollback()  # lets the lock go at once where no tie was made; after a commit this does nothing
+    return found
+
+
+def _tie(db: Session, user, integration: Integration, holder: dict, basis: str, mark: str, now, address) -> Found:
+    """Under the one lock: look at the device and at who is tied to it, and write the tie or the conflict.
+
+    The lock comes first, before anything the decision rests on is read. From there to the
+    commit the switch cannot run, and no other sign-in can read "nobody is tied here" and
+    write beside this one. PostgreSQL holds the device's row as well, against an assignment
+    saved at the same moment; SQLite has no row to hold, so there the lock is all of it.
+    """
+    if not _held(db).enabled:
+        return Found(why="off")  # switched off since the first check: nothing is written
+    device = db.scalar(select(Resource).where(Resource.id == holder["id"]).with_for_update())
     if device is None or device.kind != "client" or device.integration_id != integration.id:
         return Found(why="not_collected")
     barred = _barred(device, user)
@@ -329,11 +345,7 @@ def _recognise(db: Session, app_settings, user, session, seen, site: str) -> Fou
     taken = db.scalar(select(DevicePresence.id).where(
         *live_ties(now), DevicePresence.device_id == device.id, DevicePresence.user_id != user.id).limit(1))
     kind = "conflict" if barred or (taken and device.classification != "shared") else "tie"
-    # From here to the commit the switch cannot run, and if it ran since the first check nothing is written.
-    if not _held(db).enabled:
-        db.rollback()
-        return Found(why="off")
-    row = _record(db, kind, user, device, holders[0], basis, mark, now, address)
+    row = _record(db, kind, user, device, holder, basis, mark, now, address)
     db.commit()
     return Found(device, row) if kind == "tie" else Found(why="other_person")
 

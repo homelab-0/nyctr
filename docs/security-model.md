@@ -264,8 +264,11 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   wrong device. Such a tie has `basis: stored` in `GET /api/presence`, which
   is how an administrator finds it, and it does not reach back before its
   own first sign-in, so a wrong match shows nothing from before. Only a
-  source whose integration declares the lookup takes part at all. A tie or
-  conflict record holds the address the request came from
+  source whose integration declares the lookup takes part at all, so by
+  decision a range that a source without the lookup also holds does not cast
+  doubt on a tie; that has to be decided again when a second integration
+  stores ranges, because nothing tells one network described twice from
+  another network with the same range. A tie or conflict record holds the address the request came from
   and the device's hardware address. Only administrators are shown them, and
   they go when the record does, 90 days after a tie ends or after a
   conflict's last attempt. Neither works through NAT, or through a
