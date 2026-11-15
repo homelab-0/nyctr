@@ -234,13 +234,15 @@ HELD_BACK = {
 
 
 @pytest.mark.parametrize("state", HELD_BACK.values(), ids=HELD_BACK.keys())
-def test_nothing_is_dropped_while_the_source_is_collecting_edited_failing_or_never_collected(world, state):
+def test_nothing_is_dropped_while_the_source_is_collecting_edited_failing_or_never_collected(world, state, caplog):
     world.read(LAPTOP)
     world.change(world.gone("old"))
     with world.app.state.session_factory() as db:
         before = {key: getattr(db.get(Integration, "unifi"), key) for key in state}
     world.change(**state)
     assert world.drop() == 0 and "unifi:client:old" in world.stored()
+    # Left alone because of its state, not because going through it failed on the way.
+    assert [record for record in caplog.records if record.name == "nyctr.retention"] == []
     world.change(**before)
     assert world.drop() == 1 and "unifi:client:old" not in world.stored()
 
@@ -250,6 +252,18 @@ def test_a_source_removed_meanwhile_and_one_collected_by_an_earlier_release_lose
     # No collection of this source ever recorded what it read in full: not known, so nothing goes.
     assert world.drop() == 0 and "unifi:client:old" in world.stored()
     assert retention.drop_from(world.app.state.session_factory, "a source that is gone", world.now) == (0, False)
+    # A record an earlier release wrote says nothing of what was read in full: that is not "all of it".
+    world.read(LAPTOP)
+    with world.app.state.session_factory() as db:
+        last = db.scalars(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == "unifi")
+                          .order_by(Audit.created_at.desc())).first()
+        said, last.details = last.details, {key: value for key, value in last.details.items() if key != "unread"}
+        db.commit()
+    assert world.drop() == 0 and "unifi:client:old" in world.stored()
+    with world.app.state.session_factory() as db:
+        db.get(Audit, last.id).details = said
+        db.commit()
+    assert world.drop() == 1 and "unifi:client:old" not in world.stored()
 
 
 def test_an_item_missing_for_seven_days_goes_with_one_record_and_not_a_day_sooner(world):
@@ -604,6 +618,57 @@ def test_an_address_looked_up_after_the_run_read_what_may_go_is_kept(world, monk
     assert "dns:domain:again.example" in world.stored() and "dns:domain:quiet.example" not in world.stored()
 
 
+def test_a_lookup_at_another_source_does_not_keep_an_address(world):
+    world.read(source="dns")
+    elsewhere = lookup()
+    elsewhere.id, elsewhere.integration_id, elsewhere.domain = "unifi:block:same", "unifi", "same.example"
+    world.change(address("same.example"), elsewhere)
+    assert world.drop() == 1 and "dns:domain:same.example" not in world.stored()
+
+
+def test_an_item_whose_mark_was_taken_off_after_the_run_read_what_may_go_is_kept(world, monkeypatch):
+    """A batch looks again at each item's mark, not only at the days noted while it was missing."""
+    world.read(LAPTOP)
+    world.change(world.gone("back"))
+    batch = retention._batch
+
+    def meanwhile(db, integration_id, *args):
+        if integration_id == "unifi":
+            with world.app.state.session_factory() as other:
+                row = other.get(Resource, "unifi:client:back")
+                row.attributes = {**row.attributes, "missing_from_latest_snapshot": False}
+                other.commit()
+        return batch(db, integration_id, *args)
+    monkeypatch.setattr(retention, "_batch", meanwhile)
+    assert world.drop() == 0 and "unifi:client:back" in world.stored()
+
+
+def test_a_device_being_filed_while_a_batch_reads_it_is_kept_on_postgresql(world, monkeypatch):
+    """The batch locks its items before it decides. Without that, a device an administrator is filing
+    at that moment is judged by what it was, and deleted once the filing is saved."""
+    engine = world.app.state.session_factory.kw["bind"]
+    if engine.dialect.name != "postgresql":
+        pytest.skip("SQLite has one writer, so nothing can be filing a device while a batch is open")
+    world.read(LAPTOP)
+    world.change(world.gone("old"))
+    with world.app.state.session_factory() as filing:
+        filing.get(Resource, "unifi:client:old").classification = "personal"
+        filing.flush()  # Written and not saved yet: the row is the administrator's until it is.
+        dropping = threading.Thread(target=world.drop)
+        dropping.start()
+        with engine.connect() as watch:
+            for _ in range(3000):  # Until the drop is waiting for that row, however long that takes.
+                if watch.exec_driver_sql("select count(*) from pg_stat_activity where wait_event_type = 'Lock'"
+                                         " and datname = current_database()").scalar():
+                    break
+                threading.Event().wait(0.01)
+            else:
+                pytest.fail("the drop never waited for the device")
+        filing.commit()
+    dropping.join(30)
+    assert "unifi:client:old" in world.stored() and world.dropped() == []
+
+
 def test_a_collection_that_starts_between_two_batches_stops_the_run_at_what_it_recorded(world, monkeypatch):
     world.read(LAPTOP)
     world.change(*[world.gone(f"old{n}") for n in range(4)])
@@ -659,20 +724,21 @@ def test_a_collection_waits_for_the_batch_that_holds_its_source_and_stores_after
 
 def test_one_source_that_fails_does_not_keep_the_others_from_being_cleared(world, monkeypatch):
     world.read(LAPTOP)
-    world.change(world.gone("old"))
-    batch = retention._batch
+    world.change(world.gone("old"), address("left.example"))  # Something to go at each source.
+    batch, calls = retention._batch, []
 
     def broken(db, integration_id, *args):
+        calls.append(integration_id)
         if integration_id == "dns":
             raise RuntimeError("the first source cannot be cleared")
         return batch(db, integration_id, *args)
     monkeypatch.setattr(retention, "_batch", broken)
-    assert world.drop() == 1 and "unifi:client:old" not in world.stored()
+    assert world.drop() == 1 and calls == ["dns", "unifi"] and "unifi:client:old" not in world.stored()
     # A time first missed that cannot be read is not a time that has passed: the item is kept, the run goes on.
     odd = world.gone("odd")
     odd.attributes = {**odd.attributes, "missing_since": "not a time"}
     world.change(odd, world.gone("other"))
-    assert world.drop() == 1 and {"unifi:client:odd", LAPTOP} == set(world.stored())
+    assert world.drop() == 1 and {"unifi:client:odd", LAPTOP, "dns:domain:left.example"} == set(world.stored())
 
 
 def guest(**grant):
