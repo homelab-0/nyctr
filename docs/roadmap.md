@@ -99,7 +99,8 @@ partial coverage cannot be mistaken for clean posture.
   **(first version: rule-based score from the block reason; no reputation source)**
 - Unknown/insufficient-evidence state distinct from low risk.
 - BYO model provider with LiteLLM-compatible routing and future Spektr support.
-  **(first version: one OpenAI-compatible endpoint from server settings)**
+  **(first version: one OpenAI-compatible endpoint, connected in the console or
+  set on the server, with trace headers for a proxy in front)**
 - Scoped, redacted model context; prompt-injection and output validation tests.
   **(first version)**
 - Authenticated external MCP tools for scoped posture questions and evidence reads.

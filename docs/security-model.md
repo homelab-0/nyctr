@@ -8,6 +8,25 @@ Provider credentials are server environment secrets referenced by a restricted
 name; arbitrary environment variables are not available as credential sources.
 The web client receives evidence and sanitized configuration, not credentials.
 
+The model's key follows the same rule with its own name. An administrator
+connects the model in the console by naming a server secret that matches
+`NYCTR_MODEL_SECRET_*`; a source's secret name is refused there and a model's is
+refused for a source. The endpoint is where Nyctr sends that key and the
+redacted evidence pack, so the operator, not the administrator, says which
+servers it may be on: `NYCTR_MODEL_HOSTS`, plus the server in the server's own
+`NYCTR_AI_BASE_URL`. A server is a scheme, a host and a port. A bare name in the
+list means HTTPS on port 443 and nothing else, so listing a host never lets the
+key go in clear text or to another port of it; plain HTTP or another port is
+allowed only where the operator wrote it in full. The list exists so that a
+stolen administrator session cannot send a key to another server, aim Nyctr at
+an internal address, or probe the ports of a listed host. The key set directly
+on the server (`NYCTR_AI_API_KEY`) goes only to the server set beside it, on
+that scheme and port. No redirect is followed, and both checks run again before
+every call. A saved value that cannot be read turns the model off: it never
+falls back to the server's own endpoint and key. The key is never in an API
+answer, an audit record or a log, and a refusal never repeats what was typed.
+See [the model](model.md).
+
 Collectors only read. They send GET requests, with one stated exception: a source
 that offers only session sign-in (Pi-hole) is sent one sign-in and one sign-out
 request for the collection's own session. There are no firewall mutations and no
@@ -125,6 +144,10 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | A guest device attacks the system that polices it | Nyctr is never the captive portal and nothing on the guest network needs to reach it; a guard test fails if any API route answers without a session ([guest Wi-Fi design](guest-wifi.md)) |
 | A client claims another address in a forwarded header | Only a listed proxy is believed, and only about the entry it wrote itself; entries the client sent are never read |
 | Someone forges the collection nudge | It needs a shared secret, reads nothing from the request, only starts a read-only collection, and runs at most once every 30 seconds |
+| A stolen administrator session points the model somewhere else to collect its key | The endpoint must be on a server the operator allowed, by scheme, host and port; the key is named by a secret with the model's own pattern; an address holding a sign-in name or password is refused; no redirect is followed |
+| A listed model host is reached in clear text, or on another of its ports | A bare name in the list is HTTPS on port 443 only; anything else must be written in full by the operator |
+| A saved model setting cannot be read after an upgrade or a rollback | The model is off and says so; the server's own endpoint and key, which an administrator replaced, are not used in its place |
+| A trace of a model call says who asked or which device it was about | Trace fields are fixed words, versions, a new random id and a digest of the subject's id keyed with 32 random bytes only this installation holds (never the model's key, never sent or shown), so the digest cannot be matched against guessed ids; the `user` field is never sent |
 | Model is told to act by text in a log or request | The model has no tools or credentials; evidence is passed as data in a bounded pack with addresses, emails, codes and identifiers removed |
 | Model cites something it was not shown | Citations are resolved against the pack on the server and dropped when they do not match |
 | Graph query exhausts the server | Administrator-only, query-only, with length, depth and returned-object limits |
