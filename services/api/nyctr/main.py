@@ -8,9 +8,9 @@ import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, or_, select, update
@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, access, assistant, guests, query, removal, worker
+from . import __version__, access, assistant, guests, model, query, removal, worker
 from . import blocks as block_list
 from .collection import after_collection, apply_snapshot, collect_integration, last_gaps, parsed_date  # noqa: F401
 from .config import Settings
@@ -261,6 +261,47 @@ def create_app(settings: Settings | None = None):
     app.include_router(oidc_router)
     for feature in (access, guests, query, assistant):
         app.include_router(feature.router)
+
+    @app.get("/api/model")
+    def model_connection(_user=Depends(admin), db: Session = Depends(get_db)):
+        """Describe the model connection in force and where it comes from. The key is never read out."""
+        return model.describe(db, settings)
+
+    @app.put("/api/model")
+    def connect_model(body: Any = Body(None), user=Depends(admin), db: Session = Depends(get_db)):
+        """Save where the model is, inside the servers and the secret names the operator allows.
+
+        Refused in plain words, with nothing stored, when a rule fails. The body is
+        read here and not by the framework, so that no refusal repeats what was
+        sent: a key typed into the wrong place comes back in no answer. The audit
+        record holds the old and new settings and the secret's name, never a key.
+        """
+        if settings.mode == "demo":
+            raise HTTPException(409, "The model cannot be connected in the demo workspace")
+        try:
+            old, new = model.save(db, settings, model.Connection(**body), user.id)
+        except model.Refused as refusal:
+            raise HTTPException(422, f"Not saved. {refusal}") from None
+        except (ValueError, TypeError):  # not an object, a field too many or too few, or a value of another type
+            raise HTTPException(422, f"Not saved. {model.SHAPE}") from None
+        audit(db, user.id, "model.changed", model.KEY, old=old, new=new)
+        db.commit()
+        return model.describe(db, settings)
+
+    @app.post("/api/model/test")
+    async def test_model(user=Depends(admin), db: Session = Depends(get_db)):
+        """Send the model one tiny fixed question and say how it went: nothing the endpoint said is repeated."""
+        connection = model.in_force(db, settings)
+        if not connection.connected:
+            raise HTTPException(409, connection.unusable or "No model is connected, so there is nothing to test")
+        assistant._throttle(user.id)
+        try:
+            result = await model.probe(connection, settings)
+        except model.Refused as refusal:
+            raise HTTPException(409, f"Not sent. {refusal}") from None
+        audit(db, user.id, "model.tested", model.KEY, **result)
+        db.commit()
+        return result
 
     @app.get("/api/overview")
     def overview(_user=Depends(admin), db: Session = Depends(get_db)):

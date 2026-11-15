@@ -137,6 +137,11 @@ administrator password or configure OIDC. Configure narrowly scoped provider
 credentials where their APIs support it. Never disable TLS verification to make
 a console connection succeed; configure a valid trust chain instead.
 
+Leave SQL statement logging off, as it is by default, or treat its output as a
+secret. Nyctr writes no stored secret to its own logs, but statement logging
+writes stored values as they are saved, and the settings table holds one: the
+key Nyctr makes to name what a traced model call is about.
+
 Demo and live databases must be separate. Demo is for evaluation using known
 accounts and synthetic events. Do not expose demo to an untrusted network.
 

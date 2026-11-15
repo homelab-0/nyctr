@@ -13,6 +13,8 @@ export function hrefFor(kind: string, id: string) {
       return '#/access';
     case 'source':
       return '#/sources';
+    case 'model':
+      return '#/setup?tab=system';
     case 'resource':
       return `#/map?focus=${value}`;
     default:

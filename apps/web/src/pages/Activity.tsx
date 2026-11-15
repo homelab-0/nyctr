@@ -33,6 +33,8 @@ const WORDS: Record<string, string> = {
   'device.assignment_changed': 'Changed who a device belongs to',
   'device.link_changed': 'Linked a DNS device label',
   'collection.schedule_changed': 'Changed the collection schedule',
+  'model.changed': 'Changed the model connection',
+  'model.tested': 'Tested the model',
   'suggestion.dismissed': 'Dismissed a suggestion',
   'graph.queried': 'Ran a graph query',
   'assistant.asked': 'Asked the assistant',
@@ -50,6 +52,15 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
   'integration.removed': (name) => `Removed the source ${name}`,
   'integration.updated': (name) => `Edited the source ${name}`,
   'integration.retries_stopped': (name) => `Stopped retrying ${name} and showed it as failed`,
+};
+
+/** What a test of the model found. Nothing the endpoint said is in the record. */
+const TESTED: Record<string, string> = {
+  reachable: 'the model answered',
+  refused: 'the endpoint refused',
+  not_reachable: 'the endpoint could not be reached',
+  wrong_shape: 'the answer was not what a chat endpoint gives',
+  too_slow: 'no answer came within the time limit',
 };
 
 /**
@@ -163,6 +174,19 @@ function outcome(event: AuditEvent) {
   return event.action === 'access.opened' && d.owned === false ? LEFT_ALONE : APPLIED[event.action];
 }
 
+/**
+ * The server in an address: its name and port. A path, and anything else an address can hold, is
+ * never shown. An address that cannot be read gives nothing; `new URL` throws for one on every
+ * browser, where a newer check for it is missing from older ones.
+ */
+function serverOf(address: unknown) {
+  try {
+    return new URL(String(address)).host;
+  } catch {
+    return '';
+  }
+}
+
 /** Renders the few audit details worth reading, never raw provider text. */
 function summary(event: AuditEvent) {
   const d = event.details || {};
@@ -193,6 +217,17 @@ function summary(event: AuditEvent) {
       next.enabled && typeof next.interval_seconds === 'number'
         ? `now every ${counted(Math.round(next.interval_seconds / 60), 'minute')}`
         : 'now turned off',
+    );
+  // Which model, and the server it is on: that is where the key and the evidence now go.
+  const model = d.new as { model?: unknown; endpoint?: unknown } | undefined;
+  if (event.action === 'model.changed' && typeof model?.model === 'string') {
+    const server = serverOf(model.endpoint);
+    parts.push(`now ${model.model}` + (server ? ` at ${server}` : ''));
+  }
+  if (event.action === 'model.tested' && typeof d.outcome === 'string')
+    parts.push(
+      (TESTED[d.outcome] || 'with a result this version of the page cannot describe') +
+        (typeof d.status === 'number' ? ` (HTTP ${d.status})` : ''),
     );
   // That reason is already the row's own words (see `what`).
   if (typeof d.reason === 'string' && d.reason && d.reason !== 'not_confirmed')
