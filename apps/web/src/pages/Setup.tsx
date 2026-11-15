@@ -563,7 +563,7 @@ function RecognitionPanel() {
             that one address and Nyctr cannot tell their devices apart.
           </span>
         </div>
-        <p className="rule">
+        <div className="rule">
           A member sees what was blocked on that device from
           <Stepper
             label="hours before the first sign-in"
@@ -573,7 +573,7 @@ function RecognitionPanel() {
             onChange={(reach_back_hours) => void save({ ...value, reach_back_hours })}
           />
           hours before they first signed in on it.
-        </p>
+        </div>
         <p className="aside">
           Nyctr takes it that the person signing in was the one using the device in those hours. A
           tie never changes whose a device is. It ends 30 days after the last sign-in from the
