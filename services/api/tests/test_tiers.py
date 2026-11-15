@@ -226,16 +226,18 @@ def test_the_decision_and_the_layers_reach_no_database_network_or_model():
     ("nextdns", "disguised-trackers", "list", "third_party", "ad_tracker"),
     ("nextdns", "threat-intelligence-feeds", "feed", "third_party", "threat_feed"),
     ("nextdns", "google-safe-browsing", "feed", "third_party", "threat_feed"),
-    ("nextdns", "ai-threat-detection", "unknown", "vendor", "unknown"),
-    ("nextdns", "cryptojacking", "unknown", "vendor", "unknown"),
+    ("nextdns", "ai-threat-detection", "feed", "vendor", "threat_feed"),
+    ("nextdns", "AI-Driven Threat Detection", "feed", "vendor", "threat_feed"),
+    ("nextdns", "cryptojacking", "feed", "vendor", "threat_feed"),
+    ("nextdns", "some-other-threat", "unknown", "vendor", "unknown"),
     ("nextdns", "dns-rebinding", "unknown", "vendor", "unknown"),
     ("nextdns", "idn-homograph", "unknown", "vendor", "unknown"),
     ("nextdns", "typosquatting", "unknown", "vendor", "unknown"),
     ("nextdns", "dga", "unknown", "vendor", "unknown"),
     ("nextdns", "csam", "unknown", "third_party", "unknown"),
-    ("nextdns", "nrd", "unknown", "vendor", "unknown"),
-    ("nextdns", "ddns", "unknown", "vendor", "unknown"),
-    ("nextdns", "parking", "unknown", "vendor", "unknown"),
+    ("nextdns", "nrd", "category", "vendor", "category"),
+    ("nextdns", "ddns", "category", "vendor", "category"),
+    ("nextdns", "parking", "category", "vendor", "category"),
     ("nextdns", "denylist", "deny_entry", "administrator", "deny_entry"),
     ("nextdns", "parentalcontrol:category:gambling", "category", "vendor", "category"),
     ("nextdns", "safesearch", "category", "vendor", "category"),
@@ -276,6 +278,20 @@ def test_a_block_takes_its_strictest_tier_and_one_unrecognised_reason_makes_it_u
     assert plain.score == 16 and verdict.failed == "tier"
     assert access._left_to_a_person(verdict, ON, plain, None) \
         == "Nyctr cannot tell what kind of list blocked this, so a person decides."
+
+
+@pytest.mark.parametrize("codes", [["csam"], ["csam", "blocklist:x"], ["threat-intelligence-feeds", "csam"],
+                                   ["nrd"], ["ddns", "blocklist:x"], ["parking", "ai-threat-detection"]])
+def test_a_csam_block_or_a_class_of_address_someone_chose_to_block_never_opens_whatever_the_rule_says(codes):
+    """As the source reports them: no rule the model allows, none forced past it and no analysis opens one."""
+    stated = risk.assess("shop.example", "", codes, "nextdns").policies
+    assert policy.block_tier(stated) in ("unknown", "category")
+    if "csam" not in codes:  # A class of address is someone's choice. What the CSAM list is stays unsaid.
+        assert True in {layers.deliberate(reason) for reason in stated}
+    for rule, said in product(RULES + FORCED, ANALYSES):
+        verdict = may_open(rule, facts(*stated, analysis=said))
+        assert not verdict.allow and not verdict.would and verdict.failed in ("rule_on", "tier")
+    assert may_open(FORCED[1], facts(*stated, analysis=Unread())).failed == "tier"
 
 
 @pytest.mark.parametrize("body", [

@@ -26,21 +26,27 @@ READS = (
 
 # NextDNS block reasons, matched against reason identifiers and names in order:
 # (pattern, category, base score, plain explanation, kind, origin). The core adds name-shape factors.
-# Kind and origin are facts about what refused the address (see `nyctr/layers.py`). They are stated only
-# where NextDNS itself says so: a subscribed advertising or tracker list, its own tracker list, a third
-# party's threat feed, a content category, a deny entry. Its own protections that work some other way
-# (a detection, a class of address such as newly registered) state no kind, which the core keeps as unknown.
-_FEED, _CHECK = "A security feed lists this address as a threat", (None, "vendor")
+# Kind and origin are facts about what refused the address (see `nyctr/layers.py`):
+# - a subscribed advertising or tracker list is a third party's list, and native tracking is NextDNS's own;
+# - threat intelligence feeds and safe browsing are a third party's feed; NextDNS's own threat detection
+#   and its cryptojacking protection are its own feed of addresses it reports as threats;
+# - newly registered, dynamic DNS and parked addresses are each a class of address NextDNS draws up and an
+#   administrator chose to block, like a content category;
+# - a check NextDNS computes on the name itself (rebinding, look-alike names, typosquatting, generated
+#   names) is neither a list nor a feed, and the CSAM list is not a threat feed: no kind is stated for
+#   them, which the core keeps as unknown.
+_FEED, _CHECK, _CLASS = "A security feed lists this address as a threat", (None, "vendor"), ("category", "vendor")
 _REASONS: tuple[tuple[re.Pattern[str], str, int, str, str | None, str | None], ...] = tuple(
     (re.compile(pattern, re.I), category, score, text, kind, origin)
     for pattern, category, score, text, (kind, origin) in (
         (r"threat.?intelligence|safe.?browsing|malware|phish", "security", 92, _FEED, ("feed", "third_party")),
-        (r"threat|cryptojack|rebind|homograph|typosquat|\bdga\b", "security", 92, _FEED, _CHECK),
+        (r"ai.{0,10}threat|threat.?detect|cryptojack", "security", 92, _FEED, ("feed", "vendor")),
+        (r"threat|rebind|homograph|typosquat|\bdga\b", "security", 92, _FEED, _CHECK),
         (r"csam", "security", 92, _FEED, (None, "third_party")),
-        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently", _CHECK),
+        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently", _CLASS),
         (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites",
-         _CHECK),
-        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it", _CHECK),
+         _CLASS),
+        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it", _CLASS),
         (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name",
          ("deny_entry", "administrator")),
         (r"parental|category|service:|safe.?search|bypass", "policy", 60,

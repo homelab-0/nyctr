@@ -147,12 +147,16 @@ by a fixed table in `nyctr/policy.py`:
 | Tier | What blocked it | Can it open by itself |
 | --- | --- | --- |
 | Advertising and tracker lists | A list of advert or tracker addresses, a third party's or the source maker's | Yes, when switched on |
-| Threat feeds | A feed of addresses reported as threats | Not yet: this tier cannot be switched on until Nyctr can analyse an address. Its conditions are stored and shown |
-| Categories | A kind of site, or safe search, that someone chose to block | Never: deliberate |
+| Threat feeds | A feed of addresses reported as threats, a third party's or the source maker's | Not yet: this tier cannot be switched on until Nyctr can analyse an address. Its conditions are stored and shown |
+| Categories | A kind of site, safe search, or a class of address (newly registered, for one) that someone chose to block | Never: deliberate |
 | Deny entries | An address someone put on a deny list | Never: deliberate |
 | Firewall policies | Anything at the firewall, region blocking included | Never |
 | Intrusion prevention | A recognised attack pattern | Never |
 | Unknown | Anything not recognised or not stated | Never |
+
+A list the source's maker draws up counts with a third party's in the
+advertising tier. The rule opened blocks by such lists before there were
+tiers, and nothing that opened then stops opening.
 
 A block is **deliberate** when it exists because an administrator chose it: a
 category, a deny entry, or anything an administrator wrote. A hit on someone
