@@ -32,17 +32,20 @@ DOCKERFILE = Path(__file__).resolve().parents[3] / "Dockerfile"
 def demo_app(listed=PROXY, hops=1):
     """Build an isolated demo API that believes the given proxies."""
     return create_app(Settings(mode="demo", database_url="sqlite:///:memory:", public_url="http://testserver",
-                               cookie_secure=False, forwarded_allow_ips=listed, proxy_hops=hops))
+                               cookie_secure=False, trusted_proxies=listed, proxy_hops=hops))
 
 
 @contextmanager
-def served(app, peer_address=PROXY, plain=False, **options):
+def served(app, peer_address=PROXY, plain=False, by_hand=False, **options):
     """Serve the app as the image does, the web server's own forwarded-header handling off.
 
     `plain` is what Nyctr gets when TLS ends at a proxy: the browser speaks HTTPS
     to the public address, and the connection that reaches the server is plain HTTP.
+    `by_hand` is a server started without the image's flags: its own handling is
+    on, with whatever list its environment gives it.
     """
-    config = Config(app, interface="asgi3", log_config=None, proxy_headers=False)
+    flags = {} if by_hand else {"proxy_headers": False}
+    config = Config(app, interface="asgi3", log_config=None, **flags)
     config.load()
 
     async def over_plain_http(scope, receive, send):
@@ -85,38 +88,52 @@ def test_the_image_starts_the_web_server_with_its_own_forwarded_handling_off(mon
     started = {}
     server = sys.modules["uvicorn.main"]  # the package's own `main` attribute is the command, not the module
     monkeypatch.setattr(server, "run", lambda app, **options: started.update(options, app=app))
+    # Even with the old name in its environment, the image's server is given only itself as a proxy.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.42.0.0/16")
     server.main(command[1:], standalone_mode=False)
-    assert (started["app"], started["proxy_headers"]) == ("nyctr.main:app", False)
+    assert (started["app"], started["proxy_headers"], started["forwarded_allow_ips"]) == (
+        "nyctr.main:app", False, "127.0.0.1")
 
 
-@pytest.mark.parametrize(("listed", "hops", "peer_address", "forwarded", "expected", "scheme"), [
-    (PROXY, 1, PROXY, MEMBER, MEMBER, "https"),
-    (PROXY, 1, ATTACKER, MEMBER, ATTACKER, "http"),
-    ("", 1, PROXY, MEMBER, PROXY, "http"),
-    ("2001:db8:42::10", 1, "2001:db8:42::10", "2001:db8:51::20", "2001:db8:51::20", "https"),
+def test_a_server_started_by_hand_without_the_flag_does_not_bring_the_gap_back(monkeypatch):
+    """Nyctr's list is under a name the web server does not know, so its own handling believes only itself."""
+    monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    app, inside = demo_app("10.42.0.0/16"), "10.42.3.3"
+    with served(app, "10.42.9.77", by_hand=True) as client:
+        spend(app, inside)
+        assert wrong_password(client, "last@example.test", f"{FORGED}, {inside}").status_code == 401
+        assert wrong_password(client, "more@example.test", f"192.0.2.7, {inside}").status_code == 429
+        assert (attempts(app, inside), attempts(app, FORGED), attempts(app, "192.0.2.7")) == (60, None, None)
+
+
+@pytest.mark.parametrize(("listed", "hops", "peer_address", "forwarded", "expected"), [
+    (PROXY, 1, PROXY, MEMBER, MEMBER),
+    (PROXY, 1, ATTACKER, MEMBER, ATTACKER),
+    ("", 1, PROXY, MEMBER, PROXY),
+    ("2001:db8:42::10", 1, "2001:db8:42::10", "2001:db8:51::20", "2001:db8:51::20"),
     # Two proxies: counted as one hop the edge is the client; counted as two, the member is.
-    (f"{PROXY},{EDGE}", 1, PROXY, f"{FORGED}, {MEMBER}, {EDGE}", EDGE, "https"),
-    (f"{PROXY},{EDGE}", 2, PROXY, f"{FORGED}, {MEMBER}, {EDGE}", MEMBER, "https"),
+    (f"{PROXY},{EDGE}", 1, PROXY, f"{FORGED}, {MEMBER}, {EDGE}", EDGE),
+    (f"{PROXY},{EDGE}", 2, PROXY, f"{FORGED}, {MEMBER}, {EDGE}", MEMBER),
     # Counted as two, a client that went round the edge, or an edge that is not listed, has no address.
-    (f"{PROXY},{EDGE}", 2, PROXY, f"{FORGED}, {ATTACKER}", None, "https"),
-    (PROXY, 2, PROXY, f"{MEMBER}, {EDGE}", None, "https"),
+    (f"{PROXY},{EDGE}", 2, PROXY, f"{FORGED}, {ATTACKER}", None),
+    (PROXY, 2, PROXY, f"{MEMBER}, {EDGE}", None),
     # A range, as the chart allows behind its network policy: any proxy pod in it is believed, a
     # peer outside it is not, and a client inside it that goes through the proxy is itself.
-    ("10.42.0.0/16", 1, "10.42.9.77", MEMBER, MEMBER, "https"),
-    ("10.42.0.0/16", 1, "10.43.0.5", MEMBER, "10.43.0.5", "http"),
-    ("10.42.0.0/16", 1, "10.42.9.77", f"{FORGED}, 10.42.3.3", "10.42.3.3", "https"),
-    ("2001:db8:42::/56", 1, "2001:db8:42:1::10", "[2001:db8:51::20]:443", "2001:db8:51::20", "https"),
-    (PROXY, 1, PROXY, "", None, "https"),
+    ("10.42.0.0/16", 1, "10.42.9.77", MEMBER, MEMBER),
+    ("10.42.0.0/16", 1, "10.43.0.5", MEMBER, "10.43.0.5"),
+    ("10.42.0.0/16", 1, "10.42.9.77", f"{FORGED}, 10.42.3.3", "10.42.3.3"),
+    ("2001:db8:42::/56", 1, "2001:db8:42:1::10", "[2001:db8:51::20]:443", "2001:db8:51::20"),
+    (PROXY, 1, PROXY, "", None),
 ])
-def test_address_and_scheme_are_believed_only_from_a_listed_proxy(listed, hops, peer_address, forwarded,
-                                                                 expected, scheme):
-    """A listed proxy is believed about the address it saw and the scheme; nobody else is."""
+def test_the_address_is_believed_only_from_a_listed_proxy_and_the_scheme_from_nobody(listed, hops, peer_address,
+                                                                                    forwarded, expected):
+    """A listed proxy is believed about the address it saw. Nyctr reads nobody's word on the scheme."""
     app = demo_app(listed, hops)
 
     @app.get("/api/proxy-test-client")
     def client_address(request: Request):
         """Expose what Nyctr worked out, only on this isolated test application."""
-        return {"client": peer.client_address(request), "scheme": request.url.scheme}
+        return {"client": peer.client_address(request), "scheme": request.scope["scheme"]}
 
     # Keep this test-only route ahead of the application's unknown-API fallback.
     app.router.routes.insert(0, app.router.routes.pop())
@@ -125,10 +142,7 @@ def test_address_and_scheme_are_believed_only_from_a_listed_proxy(listed, hops, 
             "X-Forwarded-For": forwarded, "X-Forwarded-Proto": "https",
         })
         assert response.status_code == 200
-        assert response.json() == {"client": expected, "scheme": scheme}
-        for unclear in ("https, http", "ftp", ""):
-            again = client.get("/api/proxy-test-client", headers={"X-Forwarded-Proto": unclear})
-            assert again.json()["scheme"] == "http"
+        assert response.json() == {"client": expected, "scheme": "http"}
 
 
 def test_a_listed_proxy_keeps_one_clients_exhausted_quota_out_of_anothers_login():
@@ -197,7 +211,7 @@ def test_different_addresses_cannot_get_round_the_account_quota():
 
 def test_a_device_is_recognised_by_the_address_the_listed_proxy_wrote(tmp_path):
     """Recognition reads the same function: a forged entry or a header from elsewhere names no device."""
-    app = live_app(tmp_path, forwarded_allow_ips=PROXY)
+    app = live_app(tmp_path, trusted_proxies=PROXY)
     laptop = {"X-Forwarded-For": f"{FORGED}, 10.0.0.9"}
     with served(app) as client:
         seed_live_member(app)
@@ -213,7 +227,7 @@ def test_a_device_is_recognised_by_the_address_the_listed_proxy_wrote(tmp_path):
 
 def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_sees(tmp_path):
     """A member is refused, and so is anyone on the portal address, an administrator included."""
-    app = live_app(tmp_path, forwarded_allow_ips=PROXY, public_url="http://console.example.test",
+    app = live_app(tmp_path, trusted_proxies=PROXY, public_url="http://console.example.test",
                    portal_url="http://portal.example.test")
     with served(app, base_url="http://console.example.test") as client:
         seed_live_member(app)
@@ -221,10 +235,10 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
         live_signin(client, LIVE_ADMIN)
         assert client.get("/api/me/address", headers={"X-Forwarded-For": f"{FORGED}, {MEMBER}"}).json() == {
             "address": MEMBER, "peer": PROXY, "via_proxy": True, "why": "forwarded", "entry": 1, "entries": 2,
-            "unlisted": None, "proxy_hops": 1}
+            "unlisted": None, "proxy_hops": 1, "old_name": False}
         assert client.get("/api/me/address").json() == {
             "address": None, "peer": PROXY, "via_proxy": True, "why": "missing", "entry": None, "entries": 0,
-            "unlisted": None, "proxy_hops": 1}
+            "unlisted": None, "proxy_hops": 1, "old_name": False}
     with served(app, base_url="http://portal.example.test") as portal:
         for who in (LIVE_MEMBER, LIVE_ADMIN):
             live_signin(portal, who)
@@ -233,7 +247,7 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
         live_signin(direct, LIVE_ADMIN)
         assert direct.get("/api/me/address", headers={"X-Forwarded-For": MEMBER}).json() == {
             "address": ATTACKER, "peer": ATTACKER, "via_proxy": False, "why": "peer", "entry": None,
-            "entries": 0, "unlisted": None, "proxy_hops": 1}
+            "entries": 0, "unlisted": None, "proxy_hops": 1, "old_name": False}
 
 
 def test_the_administrator_is_told_which_entry_is_not_a_listed_proxy():
@@ -242,7 +256,17 @@ def test_the_administrator_is_told_which_entry_is_not_a_listed_proxy():
         signin(client)
         assert client.get("/api/me/address", headers={"X-Forwarded-For": f"{MEMBER}, {EDGE}"}).json() == {
             "address": None, "peer": PROXY, "via_proxy": True, "why": "unlisted", "entry": 1, "entries": 2,
-            "unlisted": EDGE, "proxy_hops": 2}
+            "unlisted": EDGE, "proxy_hops": 2, "old_name": False}
+
+
+def test_the_administrator_is_told_when_the_list_is_still_under_the_old_name():
+    """The list read from the old name works for now, and the check says so."""
+    app = create_app(Settings(mode="demo", database_url="sqlite:///:memory:", public_url="http://testserver",
+                              cookie_secure=False, forwarded_allow_ips=PROXY))
+    with served(app) as client:
+        signin(client)
+        told = client.get("/api/me/address", headers={"X-Forwarded-For": MEMBER}).json()
+        assert (told["address"], told["via_proxy"], told["old_name"]) == (MEMBER, True, True)
 
 
 @pytest.fixture(scope="module")
@@ -264,7 +288,7 @@ def test_secure_cookies_and_the_sign_in_return_address_come_from_configuration(t
                                                                               peer_address, headers):
     """Behind a proxy or not, single sign-on returns to the configured origin and every cookie is Secure."""
     origin, issuer = "https://nyctr.example.test", "https://id.example/issuer/"
-    app = live_app(tmp_path, forwarded_allow_ips=PROXY, public_url=origin, cookie_secure=True,
+    app = live_app(tmp_path, trusted_proxies=PROXY, public_url=origin, cookie_secure=True,
                    oidc_issuer=issuer, oidc_client_id="nyctr", oidc_client_secret="test-client-secret")
     sent = {}
 

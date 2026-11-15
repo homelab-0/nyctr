@@ -157,7 +157,9 @@ def test_live_secrets_are_references_and_ca_mount_preserves_read_only_boundary(h
         assert env[variable] == {"name": variable, "valueFrom": {"secretKeyRef": {"name": name, "key": key}}}
     assert env["NYCTR_MODE"]["value"] == "live"
     assert env["NYCTR_COOKIE_SECURE"]["value"] == "true"
-    assert env["FORWARDED_ALLOW_IPS"]["value"] == "10.42.0.10"
+    assert env["NYCTR_TRUSTED_PROXIES"]["value"] == "10.42.0.10"
+    # The web server's own name for a list of proxies is never set, so it believes only itself.
+    assert "FORWARDED_ALLOW_IPS" not in env
     assert env["NYCTR_PROXY_HOPS"]["value"] == "1"
     assert env["NYCTR_CONNECTOR_HOSTS"]["value"] == "console.example.test"
     assert env["NYCTR_CONNECTOR_CA_BUNDLE"]["value"] == "/etc/nyctr/connector-ca/ca-bundle.crt"
@@ -205,7 +207,7 @@ def test_changes_collection_and_the_assistant_are_explicit_and_keep_credentials_
 def test_a_bounded_proxy_range_is_accepted_only_behind_the_network_policy(helm_binary, tmp_path, trusted):
     """A range of proxy peers is accepted only while the chart renders its ingress policy."""
     manifests = render(helm_binary, tmp_path, merge(fixture("live-values.yaml"), {"forwardedAllowIps": trusted}))
-    assert environment(manifests)["FORWARDED_ALLOW_IPS"]["value"] == ",".join(trusted)
+    assert environment(manifests)["NYCTR_TRUSTED_PROXIES"]["value"] == ",".join(trusted)
     policy = manifests["NetworkPolicy"]["spec"]
     assert policy["policyTypes"] == ["Ingress"] and policy["ingress"][0]["from"]
 
@@ -247,7 +249,7 @@ def test_demo_keeps_known_credentials_isolated_and_database_choice_explicit(helm
     assert set(manifests) == {"Deployment", "Service", "ServiceAccount"}
     env = environment(manifests)
     assert env["NYCTR_MODE"]["value"] == "demo" and env["NYCTR_COOKIE_SECURE"]["value"] == "false"
-    assert env["FORWARDED_ALLOW_IPS"]["value"] == ""
+    assert env["NYCTR_TRUSTED_PROXIES"]["value"] == "" and "FORWARDED_ALLOW_IPS" not in env
     assert not any(key.startswith("NYCTR_CONNECTOR_SECRET_") for key in env)
     if external:
         assert env["NYCTR_DATABASE_URL"]["valueFrom"]["secretKeyRef"]["name"] == "nyctr-db"

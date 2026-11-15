@@ -1,4 +1,6 @@
 # Merge with compose.yaml and an explicitly configured .env.production.
+# Refuses to start without a list of proxies, under the new name or for this release the old one.
+x-proxies-required: ${NYCTR_TRUSTED_PROXIES:-${FORWARDED_ALLOW_IPS:?Set NYCTR_TRUSTED_PROXIES to the actual trusted reverse-proxy peer IPs}}
 services:
   nyctr:
     environment:
@@ -7,7 +9,9 @@ services:
       NYCTR_PUBLIC_URL: ${NYCTR_PUBLIC_URL:?Set the public HTTPS origin}
       NYCTR_PORTAL_URL: ${NYCTR_PORTAL_URL:-}
       NYCTR_COOKIE_SECURE: "true"
-      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:?Set the actual trusted reverse-proxy peer IPs}
+      NYCTR_TRUSTED_PROXIES: ${NYCTR_TRUSTED_PROXIES:-}
+      # The old name of the list above, read for this release when that one is empty. Nyctr warns while it is used.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-}
       NYCTR_PROXY_HOPS: ${NYCTR_PROXY_HOPS:-1}
       NYCTR_BOOTSTRAP_ADMIN_EMAIL: ${NYCTR_BOOTSTRAP_ADMIN_EMAIL:-}
       NYCTR_BOOTSTRAP_ADMIN_PASSWORD: ${NYCTR_BOOTSTRAP_ADMIN_PASSWORD:-}

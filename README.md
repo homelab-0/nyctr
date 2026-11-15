@@ -153,7 +153,7 @@ demo mode. Live mode never creates the demonstration accounts or sample topology
 
 1. Copy `.env.production.example` to `.env.production` and set the database
    password, initial administrator credentials, public HTTPS URL, and the actual
-   reverse-proxy peer addresses in `FORWARDED_ALLOW_IPS` (and `NYCTR_PROXY_HOPS`
+   reverse-proxy peer addresses in `NYCTR_TRUSTED_PROXIES` (and `NYCTR_PROXY_HOPS`
    if a request passes more than one of your proxies).
 2. Place Nyctr behind your HTTPS ingress or reverse proxy.
 3. Start the production Compose override:

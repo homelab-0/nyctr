@@ -1,13 +1,16 @@
 """Which address a request came from: the rule in `nyctr.peer`, denial paths first."""
 
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from nyctr.config import Settings
+from nyctr.main import create_app
 from nyctr.peer import client_address, seen
 
 PROXY, EDGE = "10.42.0.10", "10.42.0.11"
@@ -17,7 +20,7 @@ NYCTR = Path(__file__).resolve().parents[1] / "nyctr"
 
 def ask(peer, *forwarded, listed=PROXY, hops=1):
     """Build the request Nyctr would get from this TCP peer with these `X-Forwarded-For` lines."""
-    settings = SimpleNamespace(forwarded_allow_ips=listed, proxy_hops=hops)
+    settings = SimpleNamespace(proxy_list=listed, proxy_hops=hops)
     return Request({"type": "http", "client": (peer, 40000) if peer else None,
                     "headers": [(b"x-forwarded-for", line.encode()) for line in forwarded],
                     "app": SimpleNamespace(state=SimpleNamespace(settings=settings))})
@@ -145,8 +148,10 @@ def test_a_peer_is_matched_to_the_list_whichever_way_its_address_is_written():
 
 
 @pytest.mark.parametrize("values", [
-    {"forwarded_allow_ips": "*"}, {"forwarded_allow_ips": "proxy.example"},
-    {"forwarded_allow_ips": "10.42.0.0/33"}, {"forwarded_allow_ips": "10.42.0.10 10.42.0.11"},
+    {"trusted_proxies": "*"}, {"trusted_proxies": "proxy.example"},
+    {"trusted_proxies": "10.42.0.0/33"}, {"trusted_proxies": "10.42.0.10 10.42.0.11"},
+    # The old name is held to the same rule while it is the one in use.
+    {"forwarded_allow_ips": "*"}, {"trusted_proxies": " ", "forwarded_allow_ips": "proxy.example"},
     {"proxy_hops": 0}, {"proxy_hops": -1}, {"proxy_hops": 11},
 ])
 def test_a_proxy_setting_nyctr_cannot_honour_stops_it_starting(values):
@@ -155,26 +160,65 @@ def test_a_proxy_setting_nyctr_cannot_honour_stops_it_starting(values):
         Settings(mode="demo", database_url="sqlite:///:memory:", **values)
 
 
-def test_the_list_of_proxies_is_read_from_the_name_operators_already_set(monkeypatch):
-    """`FORWARDED_ALLOW_IPS` keeps its name; unset means no proxy is believed."""
-    monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
-    assert Settings(mode="demo").forwarded_allow_ips == ""
-    assert Settings(mode="demo").proxy_hops == 1
-    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.42.0.0/16,2001:db8:42::10")
+OLD_LIST, NEW_LIST = "10.42.0.0/16", "10.99.0.10,2001:db8:42::10"
+
+
+@pytest.mark.parametrize(("new", "old", "in_force", "old_name"), [
+    (None, None, "", False),
+    (NEW_LIST, None, NEW_LIST, False),
+    # For one release the web server's name is still read when Nyctr's own is unset or empty.
+    (None, OLD_LIST, OLD_LIST, True),
+    ("", OLD_LIST, OLD_LIST, True),
+    # Both set: Nyctr's own name wins, whatever the old one says.
+    (NEW_LIST, OLD_LIST, NEW_LIST, False),
+    (NEW_LIST, "*", NEW_LIST, False),
+])
+def test_the_list_of_proxies_is_read_from_nyctrs_own_name_and_for_now_the_old_one(monkeypatch, new, old,
+                                                                                 in_force, old_name):
+    """`NYCTR_TRUSTED_PROXIES` is the list. Unset under both names, no proxy is believed."""
+    for name, value in (("NYCTR_TRUSTED_PROXIES", new), ("FORWARDED_ALLOW_IPS", old)):
+        monkeypatch.delenv(name, raising=False)
+        if value is not None:
+            monkeypatch.setenv(name, value)
     monkeypatch.setenv("NYCTR_PROXY_HOPS", "2")
-    settings = Settings(mode="demo")
-    assert (settings.forwarded_allow_ips, settings.proxy_hops) == ("10.42.0.0/16,2001:db8:42::10", 2)
+    settings = Settings(mode="demo", database_url="sqlite:///:memory:")
+    assert (settings.proxy_list, settings.old_proxy_name_in_use, settings.proxy_hops) == (in_force, old_name, 2)
+    inside_old, inside_new = "10.42.9.77", "10.99.0.10"
+    request = ask(inside_old, MEMBER)
+    request.app.state.settings = settings
+    assert seen(request).via_proxy is (in_force == OLD_LIST)
+    request = ask(inside_new, MEMBER)
+    request.app.state.settings = settings
+    assert seen(request).via_proxy is (in_force == NEW_LIST)
+
+
+@pytest.mark.parametrize(("values", "warned"), [
+    ({"forwarded_allow_ips": OLD_LIST}, 1), ({"trusted_proxies": NEW_LIST}, 0),
+    ({"trusted_proxies": NEW_LIST, "forwarded_allow_ips": OLD_LIST}, 0), ({}, 0),
+])
+def test_starting_on_the_old_name_writes_one_plain_warning(caplog, values, warned):
+    """One line at start says the old name is in use and will stop working, and no line otherwise."""
+    app = create_app(Settings(mode="demo", database_url="sqlite:///:memory:", worker_enabled=False, **values))
+    with caplog.at_level(logging.WARNING, logger="nyctr"), TestClient(app):
+        pass
+    lines = [x.getMessage() for x in caplog.records if "FORWARDED_ALLOW_IPS" in x.getMessage()]
+    assert len(lines) == warned
+    assert all("NYCTR_TRUSTED_PROXIES" in line and "stop working" in line for line in lines)
 
 
 def test_only_the_peer_module_reads_where_a_request_came_from():
     """A second reader would bring back the forged address. Ask `peer.client_address` instead.
 
     Catches the peer of a request (`request.client`, `request.scope`) and the
-    header names, in code and in comments, in every module but `peer.py`.
+    header names, in code and in comments, in every module but `peer.py`. It
+    also catches a reader of the request's scheme or base address: behind a
+    proxy that ends TLS those say `http`, and Nyctr believes no header about
+    them. Cookies and addresses Nyctr builds come from the configured origins.
     """
-    reads = re.compile(r"\b(request|req|conn|connection|websocket)\.(client|scope)\b"
-                       r"|x-forwarded|x-real-ip|[\"']forwarded[\"']", re.I)
+    reads = re.compile(r"\b(request|req|conn|connection|websocket)\.(client|scope|base_url|url_for)\b"
+                       r"|\.url\.scheme|x-forwarded|x-real-ip|[\"']forwarded[\"']", re.I)
     offenders = [f"{path.relative_to(NYCTR)}:{number}: {line.strip()[:80]}"
                  for path in sorted(NYCTR.rglob("*.py")) if path.name != "peer.py"
                  for number, line in enumerate(path.read_text().splitlines(), 1) if reads.search(line)]
     assert offenders == []
+    assert not re.search(r"proto|scheme", (NYCTR / "peer.py").read_text(), re.I)

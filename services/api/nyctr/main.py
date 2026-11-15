@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import hmac
+import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -17,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, access, assistant, guests, peer, query, removal, worker
+from . import __version__, access, assistant, guests, query, removal, worker
 from . import blocks as block_list
 from .collection import after_collection, apply_snapshot, collect_integration, last_gaps, parsed_date  # noqa: F401
 from .config import Settings
@@ -162,6 +163,10 @@ def create_app(settings: Settings | None = None):
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)
+        if settings.old_proxy_name_in_use:
+            logging.getLogger("nyctr").warning(
+                "The list of proxies is read from FORWARDED_ALLOW_IPS. That name will stop working in a later "
+                "release: set NYCTR_TRUSTED_PROXIES to the same list and remove the old name.")
         upkeep = asyncio.create_task(worker.run(app)) if settings.worker_enabled else None
         yield
         if upkeep:
@@ -176,7 +181,6 @@ def create_app(settings: Settings | None = None):
     app.state.engine = engine
     app.state.session_factory = factory
     app.add_middleware(RequestBodyLimit, max_body_size=32768)
-    app.add_middleware(peer.ForwardedScheme, settings=settings)
 
     @app.middleware("http")
     async def security_headers(request, call_next):

@@ -440,6 +440,8 @@ export interface AddressSeen {
   entries: number;
   /** The passed-on address that should be one of the operator's proxies and is not on the list. */
   unlisted: string | null;
+  /** The list of proxies still comes from the variable name that will stop working. */
+  old_name: boolean;
   proxy_hops: number;
 }
 export interface AssistantConfig {

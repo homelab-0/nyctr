@@ -203,6 +203,9 @@ networkPolicy:
 ### Which address Nyctr takes for a client
 
 Nyctr works out the client's address itself; the web server no longer does.
+The chart passes `forwardedAllowIps` to Nyctr as `NYCTR_TRUSTED_PROXIES`, a name
+the web server does not read, so its own forwarded-header handling never learns
+the list.
 
 1. A peer that is not in `forwardedAllowIps` is the client. Its headers are
    ignored.
@@ -232,10 +235,14 @@ What you must provide:
   range, and which can reach an inner proxy directly, passes for a proxy and
   can name any address. Nyctr cannot tell the two apart. Keep such clients
   from reaching the inner proxy, or list exact addresses, not a range.
+- **An edge that cannot be listed** (a large public network, wider than the
+  ranges the chart accepts): leave `proxyHops: 1`. Everyone behind that edge
+  then appears at the edge's address, which is wrong for them but cannot be
+  forged. With a higher count and the edge unlisted, nobody gets an address.
 
-`X-Forwarded-Proto` is taken from a listed peer only. Nyctr's cookies and its
-single sign-on return address do not depend on it: they follow `publicUrl` and
-`portalUrl`. An unlisted proxy puts all its users in one sign-in quota; a list
+Nyctr does not read `X-Forwarded-Proto`. Its cookies and its single sign-on
+return address follow `publicUrl` and `portalUrl`, whatever a proxy reports.
+An unlisted proxy puts all its users in one sign-in quota; a list
 that is too wide lets a peer in it name any address. See the
 [deployment proxy guidance](../../deploy/README.md#trusted-reverse-proxies-and-login-limits).
 

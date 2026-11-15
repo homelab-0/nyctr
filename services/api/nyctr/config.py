@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     portal_url: str = ""
     cookie_secure: bool | None = None
     # The operator's own proxies, as addresses or ranges: only they are believed about where a
-    # request came from. Read from FORWARDED_ALLOW_IPS, the name already in use. Empty believes nobody.
+    # request came from. Empty believes nobody. The name is Nyctr's own, so the web server's
+    # forwarded-header handling never learns the list, even when it is started without the flag.
+    trusted_proxies: str = ""
+    # The web server's name for the same list, read for one release when the one above is empty.
     forwarded_allow_ips: str = Field("", validation_alias="FORWARDED_ALLOW_IPS")
     # How many of the operator's proxies a request passes: which entry, from the right, to read.
     proxy_hops: int = 1
@@ -104,7 +107,7 @@ class Settings(BaseSettings):
                                  "leave it empty to serve the portal on the console address")
         if self.cookie_secure is None:
             self.cookie_secure = self.mode == "live"
-        peer.proxies(self.forwarded_allow_ips)
+        peer.proxies(self.proxy_list)
         if not 1 <= self.proxy_hops <= 10:
             raise ValueError("NYCTR_PROXY_HOPS must be between 1 and 10")
         if not 1 <= self.session_hours <= 24:
@@ -140,6 +143,16 @@ class Settings(BaseSettings):
         if self.mode == "demo" and self.oidc_issuer:
             raise ValueError("OIDC is disabled in demo mode; use a separate live database")
         return self
+
+    @property
+    def old_proxy_name_in_use(self) -> bool:
+        """Say whether the list of proxies comes from FORWARDED_ALLOW_IPS, which will stop working."""
+        return not self.trusted_proxies.strip() and bool(self.forwarded_allow_ips.strip())
+
+    @property
+    def proxy_list(self) -> str:
+        """Return the list of proxies in force: Nyctr's own name wins, the old one stands in when it is empty."""
+        return self.forwarded_allow_ips if self.old_proxy_name_in_use else self.trusted_proxies
 
     @property
     def oidc_enabled(self) -> bool:

@@ -1119,10 +1119,13 @@ def address_seen(request: Request, _user=Depends(admin)):
     """Show an administrator the address Nyctr sees for this request, and how it was worked out.
 
     For proving a proxy is set up right before members rely on it. It names the
-    peer, whether that peer is a listed proxy and which header entry was read.
+    peer, whether that peer is a listed proxy and which header entry was read,
+    and says when the list still comes from the old variable name.
     Members, and anyone on the portal address, are refused.
     """
-    return {**asdict(peer.seen(request)), "proxy_hops": request.app.state.settings.proxy_hops}
+    settings: Settings = request.app.state.settings
+    return {**asdict(peer.seen(request)), "proxy_hops": settings.proxy_hops,
+            "old_name": settings.old_proxy_name_in_use}
 
 
 @router.post("/blocks/find")

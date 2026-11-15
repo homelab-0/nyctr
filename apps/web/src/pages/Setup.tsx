@@ -520,13 +520,26 @@ function AddressPanel() {
         <p className="aside">Checking…</p>
       ) : (
         <div className="stack">
+          {seen.data.old_name && (
+            <div className="note yellow" role="status">
+              <div>
+                <b>Your list of proxies is set under an old name.</b>
+                <p>
+                  It is read from <span className="mono">FORWARDED_ALLOW_IPS</span>. That name will
+                  stop working in a later release. Set{' '}
+                  <span className="mono">NYCTR_TRUSTED_PROXIES</span> to the same list and remove
+                  the old name.
+                </p>
+              </div>
+            </div>
+          )}
           <p className="rule mono">{seen.data.address || 'Nyctr cannot tell your address'}</p>
           <p>{addressText(seen.data)}</p>
           <p className="aside">
             {seen.data.address
               ? 'If this is a router or load balancer and not your device, something in front of your proxy is hiding your address.'
               : 'Sign-in attempts from every request like this one are counted together, and no device is recognised.'}{' '}
-            Set with <span className="mono">FORWARDED_ALLOW_IPS</span> (your proxies) and{' '}
+            Set with <span className="mono">NYCTR_TRUSTED_PROXIES</span> (your proxies) and{' '}
             <span className="mono">NYCTR_PROXY_HOPS</span> (how many a request passes, now{' '}
             {seen.data.proxy_hops}).
           </p>

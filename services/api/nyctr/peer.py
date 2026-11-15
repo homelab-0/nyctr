@@ -53,7 +53,8 @@ def proxies(listed: str) -> tuple:
     try:
         return tuple(ip_network(item.strip(), strict=False) for item in listed.split(",") if item.strip())
     except ValueError:
-        raise ValueError("FORWARDED_ALLOW_IPS accepts only IP addresses and ranges, separated by commas") from None
+        raise ValueError("The list of proxies (NYCTR_TRUSTED_PROXIES) accepts only IP addresses and ranges, "
+                         "separated by commas") from None
 
 
 def _ip(text: str):
@@ -85,7 +86,7 @@ def _entry(text: str):
 
 def _listed(address, settings) -> bool:
     """Say whether this peer is one of the operator's proxies."""
-    return any(address in network for network in proxies(settings.forwarded_allow_ips))
+    return any(address in network for network in proxies(settings.proxy_list))
 
 
 def seen(request: Request) -> Seen:
@@ -119,26 +120,3 @@ def seen(request: Request) -> Seen:
 def client_address(request: Request) -> str | None:
     """Return the address this request came from, or None when Nyctr cannot tell."""
     return seen(request).address
-
-
-class ForwardedScheme:
-    """Take the scheme a listed proxy reports (`X-Forwarded-Proto`), and from nobody else.
-
-    The web server did this before its own handling was switched off. Nyctr's
-    cookies, redirects and sign-in return address do not use it: they come from
-    the configured origins. It keeps `request.url` right for anything that does.
-    """
-
-    def __init__(self, app, settings):
-        """Wrap the application with the settings that list the proxies."""
-        self.app, self.settings = app, settings
-
-    async def __call__(self, scope, receive, send):
-        """Set the scheme only for one clean `http` or `https` value sent by a listed proxy."""
-        if scope["type"] == "http" and scope.get("client"):
-            peer = _ip(str(scope["client"][0]))
-            said = [value for name, value in scope["headers"] if name == b"x-forwarded-proto"]
-            scheme = said[0].decode("latin-1").strip().lower() if len(said) == 1 else ""
-            if peer is not None and scheme in ("http", "https") and _listed(peer, self.settings):
-                scope["scheme"] = scheme
-        await self.app(scope, receive, send)

@@ -83,7 +83,10 @@ session can do, as before.
 ## Where a request came from
 
 Nyctr works out a request's address in one place (`nyctr/peer.py`), and the web
-server's own forwarded-header handling is off. A peer that is not one of the
+server's own forwarded-header handling is off. The list of proxies is kept under
+a name the web server does not read (`NYCTR_TRUSTED_PROXIES`), so that handling
+believes only itself even if it is switched on by mistake. Nyctr reads no header
+about the scheme. A peer that is not one of the
 operator's listed proxies is the client and its headers are ignored. Behind a
 listed proxy Nyctr reads `X-Forwarded-For` from the right and takes the entry
 that proxy wrote, at position `NYCTR_PROXY_HOPS`; entries to its left came from

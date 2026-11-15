@@ -24,6 +24,7 @@ const seen: AddressSeen = {
   entries: 2,
   unlisted: null,
   proxy_hops: 1,
+  old_name: false,
 };
 
 /** Opens the installation tab over a fabricated schedule that a save replaces. */
@@ -345,6 +346,22 @@ describe('the address Nyctr sees for you, in Setup', () => {
       expect(screen.getByText(/but it passed no address on/)).toBeDefined();
       expect(screen.getByText(/counted together, and no device is recognised/)).toBeDefined();
       expect(screen.queryByText('10.42.0.10')).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'warns that the list of proxies is under the old name only while it is',
+    async () => {
+      check({ ...seen, old_name: true });
+      expect(await shown('Your list of proxies is set under an old name.')).toBeDefined();
+      expect(screen.getByText(/That name will\s+stop working in a later release/)).toBeDefined();
+      expect(screen.getByText('FORWARDED_ALLOW_IPS')).toBeDefined();
+      cleanup();
+      check(seen);
+      expect(await shown('198.51.100.21')).toBeDefined();
+      expect(screen.queryByText('Your list of proxies is set under an old name.')).toBeNull();
+      expect(screen.queryByText('FORWARDED_ALLOW_IPS')).toBeNull();
     },
     patient,
   );
