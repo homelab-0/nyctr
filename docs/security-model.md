@@ -172,7 +172,7 @@ Whether one request may be opened is decided by one function,
 `policy.may_open`, from the stored rule and plain facts. It reads no database,
 calls nothing and holds no model. Its checks run in this order, the first that
 fails ends them, and each one run is kept with its result in the request's
-audit record (`access.rule_checked`):
+audit record (`rule.access_checked`):
 
 1. The rule is switched on.
 2. No reason on the block is in a tier that is never automatic. This comes

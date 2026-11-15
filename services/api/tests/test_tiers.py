@@ -401,7 +401,7 @@ def test_a_request_is_told_which_new_check_left_it_to_a_person(client, app):
     assert full["status"] == "pending" and full["decision_note"] \
         == "Nyctr has reached today's limit of 1 automatic openings for everyone, so a person decides."
     with app.state.session_factory() as db:
-        event = db.scalar(select(Audit).where(Audit.action == "access.rule_checked", Audit.target_id == full["id"]))
+        event = db.scalar(select(Audit).where(Audit.action == "rule.access_checked", Audit.target_id == full["id"]))
         assert event.details["checks"] == [*([name, "passed"] for name in ORDER[:-1]), ["daily_total", "failed"]]
         assert event.details["outcome"] == "waits" and "minutes" not in event.details
         one = db.get(Observation, "block-gallery")
@@ -428,7 +428,7 @@ def test_record_only_leaves_the_request_to_a_person_and_changes_nothing_at_the_s
         with app.state.session_factory() as db:
             assert db.scalars(select(Lease)).all() == []
             assert held(db) == []
-            event = db.scalar(select(Audit).where(Audit.action == "access.rule_checked", Audit.target_id == row["id"]))
+            event = db.scalar(select(Audit).where(Audit.action == "rule.access_checked", Audit.target_id == row["id"]))
             assert event.actor_id is None and event.details["checks"] == [[name, "passed"] for name in ORDER]
             assert (event.details["outcome"], event.details["tier"], event.details["minutes"]) \
                 == ("would_open", "ad_tracker", 60)
