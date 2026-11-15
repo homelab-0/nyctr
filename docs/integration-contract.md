@@ -27,6 +27,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `provides` | The capabilities below |
 | `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell |
 | `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gaps` also travel in the catalog as `limits`, and the Briefing lists them under "Keep in mind" for each connected source. A source whose blocked lookups arrive without a device declares that under the gap id `upstream_identity`; Blocks quotes it when every stored lookup from the source is unattributed. `gap_notes` are also shown on the source's card after a collection that recorded their code. A note says what is missing and what follows from it, not why the read was not made: the core adds that sentence (refused, or an error at the source) from what happened |
+| `detail_gaps` | Optional. The codes among `gap_notes` that miss a detail, a setting or a side read and leave every list of items whole. After a collection that recorded any other gap, Nyctr marks nothing of the source as missing, because the gap may be why an item was not listed. Leave a code out when in doubt |
 | `not_collected` | Optional. What a source of this kind never collects, each a few plain words ("DNS lookups that were allowed"). It travels in the catalog, and the Briefing lists it under "Not collected" for each connected source. A caution about evidence that is collected belongs in `gaps` |
 | `resumes` | Optional. `True` when the source's log can be read from a given time on. See "A log read from where the last one ended" below |
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
@@ -101,6 +102,17 @@ Guest passes go in `Snapshot.passes` as `{id, code, name, minutes, guest_limit,
 data_limit_mb, guest_count, created_at, activated_at, expires_at, expired}`. Leave
 `passes` as `None` when the source did not report them this time, so stored passes
 are left alone; a list is treated as the complete current set.
+
+A collection that returns is taken as having listed every kind of item in full,
+and what it did not list is marked missing and dropped after 7 days (see the
+upkeep loop in docs/architecture/overview.md). Where that is not so, say it:
+put the kinds that were not listed in full in `Snapshot.unread` (a log read
+that was cut short or is switched off leaves `domain` and the `client` labels
+taken from it unread), and raise instead of returning when a list could not be
+read at all. A read that sets `partial_rows` and names no kind puts every kind
+in doubt. A `domain` item is a blocked address: its `source_id` is the address
+as its lookups carry it in `domain`, and it is kept for as long as a stored
+lookup from the same source names it.
 
 Blocks go in `Snapshot.blocks` with `source` set to the integration id, the
 provider's own reason text and `reason_codes`, `device_id` left `None`, and

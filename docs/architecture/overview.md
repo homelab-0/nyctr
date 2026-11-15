@@ -80,6 +80,40 @@ exceptions ahead of it at that same source, however long a collection takes. A
 run or retry that comes due during a pass is not claimed until the pass ends;
 it stays due in the database for the next tick, or for another copy.
 
+The tick also clears out what Nyctr no longer needs, without calling a source.
+Blocked lookups whose time is up are removed at every tick; a request keeps its
+own copy of what it asked about. Once an hour it looks for what has left each
+source (`nyctr/retention.py`):
+
+- A collection that listed a kind of item in full marks every stored item of
+  that kind it did not list as missing, once, with the time. A missing item is
+  kept, stays in Inventory with its mark, and is not counted as present or
+  drawn on the Map. When its source lists it again it is the same item, with
+  its owner, its assignment and its label links.
+- A missing item is dropped after 7 days: when a later collection of its
+  source, at least 7 days after the one that first missed it, was whole for
+  that kind and still did not list it. The number is `KEEP_DAYS` in
+  `nyctr/retention.py`. Its assignments and label links go with it, and one
+  that comes back later is a new item.
+- A blocked address is kept by its lookups instead of the 7 days: it goes when
+  no stored lookup from its source names it.
+- Not knowing is not the same as gone. Nothing is marked on a collection that
+  kept only its most recent rows, did not list the kind in full, or recorded a
+  gap that could have hidden items (the integration declares which gaps cannot,
+  see the integration contract). Nothing is dropped while a source's latest
+  collection failed, while it is being collected, after an edit that sent it
+  back to be tested, or before a collection has recorded what it read in full.
+  The source's row is locked for the run, so a collection, an edit and a
+  removal wait for it or are waited for.
+- An item Nyctr still holds something on is kept, marked missing, until that
+  ends: a blocked address with an open or unconfirmed exception or a waiting
+  request; a device a stored lookup is tied to; a guest Nyctr cut off or
+  locked out, or whose access at the source has not run out. Guest passes are
+  not items and are never dropped here.
+- Each run writes one audit record for each source that lost something, with
+  how many of each kind went and how many assignments and label links went
+  with them. A run that drops nothing records nothing.
+
 An exception is ended at the source once, whoever asks: the tick, someone
 opening the list of exceptions, an administrator ending it, or another copy.
 Before Nyctr reads or changes an entry at a source, to open an exception or
@@ -176,7 +210,9 @@ future reconciliation layer must preserve evidence before joining records.
 
 Each graph edge is **observed**, **configured**, or **inferred**. Physical
 attachment, VLAN membership, hosting, policy application and DNS resolution are
-different relationships. Unknown or stale evidence stays visible. There is no
+different relationships. Unknown or stale evidence stays visible, and an item its
+source has stopped reporting is marked and counted apart until it is dropped
+(see the upkeep loop above). There is no
 claim of a proven end-to-end traffic path merely because nodes are connected.
 
 ## Integration contract
