@@ -14,6 +14,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from . import layers
+
 LOW_MAX = 30
 MEDIUM_MAX = 60
 
@@ -54,6 +56,8 @@ class Assessment:
     score: int | None
     category: str
     factors: list[dict] = field(default_factory=list)
+    # What blocked it, one descriptor for each reason, as the source's integration stated them.
+    policies: tuple[layers.Descriptor, ...] = ()
 
     @property
     def band(self) -> str:
@@ -94,11 +98,14 @@ def _name_factors(domain: str) -> list[dict]:
 
 
 @lru_cache(maxsize=4096)
-def _reasoned(source: str | None, reason: str, codes: tuple[str, ...]) -> tuple[int | None, str, str]:
-    """Score the reasons a source gave, apart from the name: (base score, category, plain-language label).
+def _reasoned(source: str | None, reason: str, codes: tuple[str, ...]) -> tuple:
+    """Score the reasons a source gave, apart from the name: (base score, category, plain-language label, policies).
 
     A source repeats a few reasons over thousands of lookups, so each distinct set is
     explained once. A base score of None means unknown, and the label says why.
+
+    `policies` describes every reason: its kind and origin as the integration stated them, and
+    unknown for both where it stated none, or where a reason that counts was not explained at all.
     """
     from .integrations import registry
 
@@ -108,11 +115,16 @@ def _reasoned(source: str | None, reason: str, codes: tuple[str, ...]) -> tuple[
     best: tuple[int, str, str] | None = None
     cannot_tell: str | None = None
     scored: set[str] = set()
+    policies: list[layers.Descriptor] = []
     for text in [*codes, *names]:
         found = explain(text)
         if found is None:
+            # Identifiers decide when the source gave any: a name beside them is free-form and may go unexplained.
+            if text in (codes or names):
+                policies.append(layers.describe(layers.DNS_UPSTREAM, ref=text))
             continue
-        category, score, label = found
+        category, score, label, *stated = found
+        policies.append(layers.describe(layers.DNS_UPSTREAM, *stated[:2], ref=text, description=label))
         if score is None:
             cannot_tell = cannot_tell or label
             continue
@@ -124,11 +136,11 @@ def _reasoned(source: str | None, reason: str, codes: tuple[str, ...]) -> tuple[
     # Identifiers decide when the source gave any, because names are free-form list names.
     if best is not None and best[1] == PRIVACY and any(text not in scored for text in codes or names):
         return None, UNKNOWN, (cannot_tell or "A privacy list blocked this, and so did something Nyctr does not "
-                                              "recognise, so it cannot score it")
+                                              "recognise, so it cannot score it"), tuple(policies)
     if best is None:
-        return None, UNKNOWN, (cannot_tell
-                               or "Nyctr does not recognise the reason this was blocked, so it cannot score it")
-    return best
+        return None, UNKNOWN, (cannot_tell or "Nyctr does not recognise the reason this was blocked, so it "
+                                              "cannot score it"), tuple(policies)
+    return *best, tuple(policies)
 
 
 def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
@@ -142,13 +154,13 @@ def assess(domain: str, reason: str = "", reason_codes: list[str] | None = None,
     or a source that says it cannot tell, returns an unknown assessment. So
     does a privacy-list score beside a reason that could not be explained.
     """
-    score, category, label = _reasoned(
+    score, category, label, policies = _reasoned(
         source, reason, tuple(code for code in (reason_codes or []) if isinstance(code, str)))
     if score is None:
-        return Assessment(None, UNKNOWN, [{"label": label, "points": None}])
+        return Assessment(None, UNKNOWN, [{"label": label, "points": None}], policies)
     factors = [{"label": label, "points": score}] + _name_factors(domain)
     total = max(0, min(100, sum(f["points"] for f in factors)))
-    return Assessment(total, category, factors)
+    return Assessment(total, category, factors, policies)
 
 
 def member_summary(assessment: Assessment) -> str:

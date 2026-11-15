@@ -124,10 +124,12 @@ class Provider:
     # (apart from kinds the read names in `Snapshot.unread`). After any other recorded gap, Nyctr
     # marks nothing of this source as missing. Each code has a case in tests/test_whole_lists.py.
     detail_gaps: frozenset[str] = field(default_factory=frozenset)
-    # Optional: map one block reason (an identifier or a name) to (category, base score, explanation).
-    # A score of None says "this source cannot tell", which the core keeps as unknown. A provider
-    # that classifies is the only authority on its own reasons; the core's generic table is not used.
-    classify: Callable[[str], tuple[str, int | None, str] | None] | None = None
+    # Optional: map one block reason (an identifier or a name) to (category, base score, explanation),
+    # followed where the source says so by (kind, origin): what refused the address and who wrote it,
+    # in the words of `nyctr/layers.py`. A score of None says "this source cannot tell", which the core
+    # keeps as unknown, and so is a kind or origin left out. A provider that classifies is the only
+    # authority on its own reasons; the core's generic table is not used, and states no kind or origin.
+    classify: Callable[[str], tuple | None] | None = None
     # Optional: the configured scope (for example a site) that actions apply to.
     scope: Callable[[dict[str, Any]], str | None] | None = None
     # Optional actions, present exactly for the write capabilities this provider declares.

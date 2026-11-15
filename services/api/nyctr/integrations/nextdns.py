@@ -25,30 +25,41 @@ READS = (
 )
 
 # NextDNS block reasons, matched against reason identifiers and names in order:
-# (pattern, category, base score, plain explanation). The core adds name-shape factors.
-_REASONS: tuple[tuple[re.Pattern[str], str, int, str], ...] = tuple(
-    (re.compile(pattern, re.I), category, score, text) for pattern, category, score, text in (
-        (r"threat|safe.?browsing|malware|phish|cryptojack|rebind|homograph|typosquat|\bdga\b|csam",
-         "security", 92, "A security feed lists this address as a threat"),
-        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently"),
-        (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites"),
-        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it"),
-        (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name"),
+# (pattern, category, base score, plain explanation, kind, origin). The core adds name-shape factors.
+# Kind and origin are facts about what refused the address (see `nyctr/layers.py`). They are stated only
+# where NextDNS itself says so: a subscribed advertising or tracker list, its own tracker list, a third
+# party's threat feed, a content category, a deny entry. Its own protections that work some other way
+# (a detection, a class of address such as newly registered) state no kind, which the core keeps as unknown.
+_FEED, _CHECK = "A security feed lists this address as a threat", (None, "vendor")
+_REASONS: tuple[tuple[re.Pattern[str], str, int, str, str | None, str | None], ...] = tuple(
+    (re.compile(pattern, re.I), category, score, text, kind, origin)
+    for pattern, category, score, text, (kind, origin) in (
+        (r"threat.?intelligence|safe.?browsing|malware|phish", "security", 92, _FEED, ("feed", "third_party")),
+        (r"threat|cryptojack|rebind|homograph|typosquat|\bdga\b", "security", 92, _FEED, _CHECK),
+        (r"csam", "security", 92, _FEED, (None, "third_party")),
+        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently", _CHECK),
+        (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites",
+         _CHECK),
+        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it", _CHECK),
+        (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name",
+         ("deny_entry", "administrator")),
         (r"parental|category|service:|safe.?search|bypass", "policy", 60,
-         "A content rule set by an administrator blocks this kind of site"),
-        (r"disguised", "privacy_list", 24, "It is a tracker hidden behind another site's name"),
-        (r"^native|native.tracking", "privacy_list", 14, "It is device telemetry blocked by a tracking list"),
+         "A content rule set by an administrator blocks this kind of site", ("category", "vendor")),
+        (r"disguised", "privacy_list", 24, "It is a tracker hidden behind another site's name",
+         ("list", "third_party")),
+        (r"^native|native.tracking", "privacy_list", 14, "It is device telemetry blocked by a tracking list",
+         ("list", "vendor")),
         (r"^blocklist:|blocklist|privacy list|ad.?block|tracker|tracking", "privacy_list", 16,
-         "A privacy and ad-blocking list covers it, not a security feed"),
+         "A privacy and ad-blocking list covers it, not a security feed", ("list", "third_party")),
     )
 )
 
 
-def classify(text: str) -> tuple[str, int, str] | None:
+def classify(text: str) -> tuple[str, int, str, str | None, str | None] | None:
     """Explain one NextDNS block reason. Unrecognised reasons return None and stay unknown."""
-    for pattern, category, score, label in _REASONS:
+    for pattern, category, score, label, kind, origin in _REASONS:
         if pattern.search(text):
-            return category, score, label
+            return category, score, label, kind, origin
     return None
 
 

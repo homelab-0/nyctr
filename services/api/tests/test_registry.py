@@ -196,7 +196,7 @@ def test_a_new_integration_changes_behaviour_by_declaration_alone(tmp_path, monk
             db.commit()
         admin_headers = live_signin(client)
         client.put("/api/rules/access", headers=admin_headers,
-                   json={"enabled": True, "max_score": 30, "max_minutes": 60, "per_day": 3})
+                   json={"enabled": True, "per_day": 3, "ad_tracker": {"mode": "on", "max_score": 30}})
         rules = client.get("/api/rules").json()
         assert {s["provider_name"]: s["write_mode"] for s in rules["sources"]}["Acme Resolver"] == "none"
         member = live_signin(client, LIVE_MEMBER)

@@ -52,20 +52,22 @@ _BLOCKED = {
 }
 
 
-def classify(text: str) -> tuple[str, int | None, str] | None:
-    """Explain one Pi-hole block status.
+def classify(text: str) -> tuple[str, int | None, str, str | None, str | None] | None:
+    """Explain one Pi-hole block status, with the kind and origin of what refused it.
 
     A subscribed list can hold adverts or threats and Pi-hole does not say
-    which, so those blocks are explicitly unknown rather than scored low.
+    which, so those blocks are explicitly unknown rather than scored low, and
+    their kind is not stated. A deny entry or pattern is the administrator's own.
     """
     code = text.strip().upper()
     if code.startswith(("DENYLIST", "REGEX")):
-        return "policy", 65, "An administrator blocked this address by name"
+        return "policy", 65, "An administrator blocked this address by name", "deny_entry", "administrator"
     if code.startswith("GRAVITY"):
         return "unknown", None, ("A subscribed blocklist covers this address. The source does not say whether "
-                                 "that list is about adverts or about threats, so Nyctr cannot score it")
+                                 "that list is about adverts or about threats, so Nyctr cannot score it"), \
+            None, "third_party"
     if code.startswith("EXTERNAL_BLOCKED"):
-        return "unknown", None, "The upstream DNS server refused this address and gave no reason"
+        return "unknown", None, "The upstream DNS server refused this address and gave no reason", None, None
     return None
 
 
