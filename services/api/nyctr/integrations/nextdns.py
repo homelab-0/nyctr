@@ -163,8 +163,7 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             return snapshot
         # The published API returns logs "from newest to oldest" under sort=desc, so when the
         # stretch holds more than one collection may read, the rows kept are the most recent.
-        start = min(max(cutoff, since), now) if since else cutoff
-        snapshot.log = core.LogRead(cutoff, start, now)
+        start, snapshot.log = core.log_read(cutoff, since, now)
         logs, more = await cursor_pages(reader, path + "/logs", {
             "status": "blocked", "from": core.iso(start), "to": collected_at,
             "sort": "desc", "limit": core.PAGE_SIZE,

@@ -74,7 +74,8 @@ def apply_snapshot(db, integration, snapshot, settings):
     now = utcnow()
     seen = set()
     # A read that picked up where an earlier one ended names only what the newly read rows name.
-    resumed = snapshot.log is not None and snapshot.log.read_from > snapshot.log.window_from
+    window_from = parsed_date(snapshot.log["window_from"]) if snapshot.log else None
+    resumed = window_from is not None and parsed_date(snapshot.log["read_from"]) > window_from
     stored = {row.id: row for row in db.scalars(select(Resource).where(Resource.integration_id == integration.id))}
     if _owners(db, Resource, [data["id"] for data in snapshot.resources if data["id"] not in stored]):
         raise ValueError("Resource identity crosses integration boundary")
@@ -100,7 +101,7 @@ def apply_snapshot(db, integration, snapshot, settings):
         # What earlier reads stored from the log still stands while it is inside the window, exactly
         # as a read of the whole window would find it; older than that, it is missing like anything else.
         seen |= {row.id for row in stored.values()
-                 if row.evidence_kind == "observed" and utc(row.observed_at) >= snapshot.log.window_from}
+                 if row.evidence_kind == "observed" and utc(row.observed_at) >= window_from}
     # Keep previously seen inventory and ownership but explicitly flag missing sources.
     for row in db.scalars(select(Resource).where(Resource.integration_id == integration.id)):
         if row.id not in seen:
@@ -109,8 +110,7 @@ def apply_snapshot(db, integration, snapshot, settings):
     if resumed:
         again = {data["id"] for data in snapshot.relationships}
         for row in db.scalars(select(Relationship).where(Relationship.integration_id == integration.id)):
-            if row.id in again or (row.evidence_kind == "observed"
-                                   and utc(row.observed_at) >= snapshot.log.window_from):
+            if row.id in again or (row.evidence_kind == "observed" and utc(row.observed_at) >= window_from):
                 kept[row.id] = row
             else:
                 db.delete(row)
@@ -427,7 +427,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                       **({"gap_causes": {code: sorted(causes)
                                          for code, causes in sorted(evidence.gap_causes.items())}}
                          if evidence.gap_causes else {}),
-                      **({"read_to": snapshot.log.read_to.isoformat()} if snapshot.log else {}),
+                      **({"read_to": snapshot.log["read_to"]} if snapshot.log else {}),
                       **({"attempt": attempt} if attempt is not None else {}))
                 db.commit()
                 return new

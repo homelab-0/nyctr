@@ -166,19 +166,6 @@ def _transport_category(error: Exception) -> str:
     return "transport"
 
 
-@dataclass(frozen=True)
-class LogRead:
-    """The stretch of its log a source that declares `resumes` read in one collection.
-
-    `window_from` is where the configured window starts. `read_from` is where this read started:
-    the same, or later when it picked up where an earlier collection ended. `read_to` is where it
-    ended. Rows inside the stretch that were left unread are said by `Snapshot.partial_rows`.
-    """
-    window_from: datetime
-    read_from: datetime
-    read_to: datetime
-
-
 @dataclass
 class Snapshot:
     """Normalized evidence returned only after a provider collection succeeds."""
@@ -193,9 +180,11 @@ class Snapshot:
     # Set when the source held more log rows than one collection may read: the number of
     # most recent rows kept. None means everything the read set out to read was read.
     partial_rows: int | None = None
-    # Set by a source that declares `resumes` once it has read its log. When the read started after
-    # the window did, the observed items here are only those the newly read rows name.
-    log: LogRead | None = None
+    # Set by a source that declares `resumes` once it has read its log: {window_from, read_from,
+    # read_to} as timestamps. The window's start, where this read started (the same, or later when
+    # it picked up where an earlier collection ended) and where it ended. When the read started
+    # after the window did, the observed items here are only those the newly read rows name.
+    log: dict[str, str] | None = None
 
 
 def utc_now() -> datetime:
@@ -206,6 +195,15 @@ def utc_now() -> datetime:
 def iso(value: datetime) -> str:
     """Serialize a timestamp in UTC for the adapter snapshot contract."""
     return value.astimezone(UTC).isoformat()
+
+
+def log_read(window_from: datetime, since: datetime | None, now: datetime) -> tuple[datetime, dict[str, str]]:
+    """Say where a read of a log starts, given where the last one ended, and build `Snapshot.log` for it.
+
+    Never before the window and never after now.
+    """
+    start = min(max(window_from, since), now) if since else window_from
+    return start, {"window_from": iso(window_from), "read_from": iso(start), "read_to": iso(now)}
 
 
 def source_id(value: Any) -> str:

@@ -138,8 +138,7 @@ async def collect_pihole(integration_id: str, config: dict[str, Any], api_key: s
                                 attributes={"scope": "entire_resolver"})
             snapshot.resources.append(resolver)
             seen: set[str] = set()
-            start = min(max(cutoff, since), now) if since else cutoff
-            snapshot.log = core.LogRead(cutoff, start, now)
+            start, snapshot.log = core.log_read(cutoff, since, now)
             for page in range(MAX_QUERY_PAGES):
                 payload = await reader.get("/queries", {
                     "from": int(start.timestamp()), "until": int(now.timestamp()),
