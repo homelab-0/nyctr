@@ -41,6 +41,10 @@ What remains: a client inside a listed range that reaches an inner proxy directl
 {{- end }}
 Check it after install: sign in as an administrator and open Setup, This installation, "The address Nyctr sees for you".
 Secret values and external PostgreSQL connectivity are not validated by Helm rendering.
+{{- if .Values.assistant.hosts }}
+Besides assistant.baseUrl's own server, an administrator may connect the model in the Console on: {{ join ", " .Values.assistant.hosts }}.
+A bare name there means HTTPS on port 443; plain HTTP or another port is allowed only where it is written in full.
+{{- end }}
 {{- if .Values.httpRoute.enabled }}
 Verify the HTTPRoute Accepted/ResolvedRefs conditions and the parent Gateway's HTTPS listener.
 {{- end }}

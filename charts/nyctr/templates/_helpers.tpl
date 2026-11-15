@@ -106,8 +106,17 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 {{- $_ := set $names .envName true -}}
 {{- end -}}
+{{- range .Values.assistant.secrets -}}
+{{- if hasKey $names .envName -}}
+{{- fail "assistant.secrets contains duplicate environment names." -}}
+{{- end -}}
+{{- $_ := set $names .envName true -}}
+{{- end -}}
 {{- if ne (empty .Values.assistant.baseUrl) (empty .Values.assistant.model) -}}
 {{- fail "assistant.baseUrl and assistant.model must be set together." -}}
+{{- end -}}
+{{- if and (ne .Values.assistant.trace "off") (empty .Values.assistant.baseUrl) -}}
+{{- fail "assistant.trace is set but no assistant endpoint is configured." -}}
 {{- end -}}
 {{- if and .Values.assistant.existingSecret (empty .Values.assistant.baseUrl) -}}
 {{- fail "assistant.existingSecret is set but no assistant endpoint is configured." -}}
@@ -169,7 +178,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- if or .Values.auth.oidc.enabled .Values.auth.oidc.existingSecret .Values.auth.oidc.issuer .Values.auth.oidc.clientId .Values.auth.local.bootstrap.existingSecret (not (empty .Values.connectors.secrets)) (not (empty .Values.connectors.hosts)) .Values.connectors.caBundle.existingSecret -}}
 {{- fail "Demo mode cannot receive real identity-provider, bootstrap or connector configuration." -}}
 {{- end -}}
-{{- if or (not (empty .Values.providerWrites)) (ne (int .Values.collection.intervalSeconds) 0) .Values.collection.nudge.existingSecret .Values.assistant.baseUrl .Values.assistant.existingSecret -}}
+{{- if or (not (empty .Values.providerWrites)) (ne (int .Values.collection.intervalSeconds) 0) .Values.collection.nudge.existingSecret .Values.assistant.baseUrl .Values.assistant.existingSecret (not (empty .Values.assistant.hosts)) (not (empty .Values.assistant.secrets)) -}}
 {{- fail "Demo mode simulates every change and answers from samples; it cannot receive provider write permission, scheduled collection, a nudge token or a model endpoint." -}}
 {{- end -}}
 {{- if eq (empty .Values.database.existingSecret) (not .Values.demo.ephemeralDatabase) -}}

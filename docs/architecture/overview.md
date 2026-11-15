@@ -221,7 +221,9 @@ authorization → execution → verification. Each step has an explicit owner.
 - Verification: DNS exceptions and guest authorisation read back the provider
   state (voucher create and delete are confirmed at the next collection); `nyctr/worker.py`
   and every lease read reconcile expired leases.
-- Explanation: `nyctr/assistant.py` and the read-only `nyctr/query.py`.
+- Explanation: `nyctr/assistant.py` and the read-only `nyctr/query.py`. Every
+  call to the model goes through `nyctr/model.py`, which holds where the model
+  is, the limits on where its key may go and the trace fields of each call.
 
 Execution still runs inside the API process. Separating it, and binding
 approvals to an immutable plan digest, remain to be done.
@@ -229,8 +231,9 @@ approvals to an immutable plan digest, remain to be done.
 Deterministic analysis should establish facts and policy semantics before AI
 summarizes them. AI responses must refer to authorized evidence, identify gaps
 and return structured proposals. Provider credentials stay outside model context.
-A configurable model-provider boundary will support LiteLLM and future Spektr
-routing. An external MCP surface is a separate, authenticated read interface;
+The model is one chat-completions endpoint, connected by an administrator in the
+console or set on the server ([the model](../model.md)); a proxy in front of it
+can route to any provider and trace the calls. An external MCP surface is a separate, authenticated read interface;
 it does not give external agents ambient mutation privileges.
 
 Execution exists in a first form: an approval or the administrator's written

@@ -48,6 +48,10 @@ interface text in plain words a non-technical member can read.
 - AI has no infrastructure credentials and cannot authorize its own changes. It
   sees only the redacted evidence pack built in `nyctr/assistant.py`; citations
   to anything outside the pack are removed before the answer is returned.
+- Every call to a model goes through `model.call` in `nyctr/model.py`. The
+  model's key goes only where the operator's host list (`NYCTR_MODEL_HOSTS`) and
+  secret names (`NYCTR_MODEL_SECRET_*`) allow. Trace field names live in one
+  table in `nyctr/model.py`, and nothing branches on them.
 - Unknown risk is unknown, never an invented low score. Missing logs do not
   prove a successful connection.
 - Physical topology, configured policy, inferred reachability and observed

@@ -145,6 +145,15 @@ network}],notice,nudge}`. Nyctr has no guest-facing route.
 - `GET /api/attention` (admin) -> ranked `{kind,id,severity,title,detail,at}`[]. No model.
   A source that stored only part of a collection also carries `action`: `edit` or `card`.
 - `GET /api/assistant` -> `{provider:"model"|"sample"|"off",model}`.
+- `GET /api/model` (admin) -> `{connected,endpoint,model,secret_ref,key:"reference"|
+  "server"|"none",trace,timeout_seconds,source:"console"|"deployment"|"none",problem,
+  editable,hosts,styles,seconds}`. Never the key. `PUT /api/model` (admin) with
+  `{endpoint,model,secret_ref?,trace?,timeout_seconds?}` -> the same; 422 in plain
+  words when a rule fails or the body has another shape (nothing sent is repeated), 409 in demo. `POST /api/model/test` (admin) ->
+  `{outcome:"reachable"|"refused"|"not_reachable"|"wrong_shape"|"too_slow",status}`;
+  409 when no model is connected or the saved one may not be used or cannot be read.
+  `hosts` are the allowed servers as written (`https://name`, `http://name:4000`).
+  `GET /api/attention` lists a saved model that cannot be used as `kind:"model"`.
 - `POST /api/assistant/ask` with `{question,finding_id?}` ->
   `{answer,references:[{ref,kind,id,label}],provider,model}`. `[[ref]]` tokens in
   `answer` resolve to `references`. 409 when no model is configured in live mode.
