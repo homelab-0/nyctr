@@ -507,7 +507,7 @@ def test_an_answer_that_repeats_an_identifier_is_stored_once_and_the_last_one_st
 
 
 def test_what_a_store_refuses_and_what_a_read_that_picked_up_carries(tmp_path, monkeypatch):
-    """A lookup identifier another source holds is refused. On a read that picked up, a relationship may
+    """An item or lookup identifier another source holds is refused. On a read that picked up, a relationship may
     join only what that answer names, and only observed items it did not name are kept from being missing."""
     app, now = live_app(tmp_path), utcnow()
     with TestClient(app):
@@ -521,6 +521,8 @@ def test_what_a_store_refuses_and_what_a_read_that_picked_up_carries(tmp_path, m
         apply(app, Snapshot(resources=[profile, rules, address], blocks=[lookup(1)]))
         with pytest.raises(ValueError, match="Observation identity crosses"):
             apply(app, Snapshot(blocks=[lookup(1)]), source="other")
+        with pytest.raises(ValueError, match="Resource identity crosses"):
+            apply(app, Snapshot(resources=[address]), source="other")
         picked_up = {"window_from": (now - timedelta(hours=24)).isoformat(),
                      "read_from": (now - timedelta(minutes=25)).isoformat(), "read_to": now.isoformat()}
         with pytest.raises(ValueError, match="outside this snapshot"):
