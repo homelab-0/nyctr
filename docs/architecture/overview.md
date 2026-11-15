@@ -38,6 +38,22 @@ one copy claims the same way as a run. A Collect pressed by a person and a
 connection test are not retried. Moving scheduled collection and background
 analysis to a separate worker process is future work.
 
+Reading a source is network work on the server's loop. Storing what was read,
+and the analysis after a scheduled run, are blocking database work and run on a
+worker thread, so the API goes on answering meanwhile. A store is one
+transaction that begins by checking the lease on the source: it is stored whole
+or not at all, and a server asked to stop during a store waits for it to end.
+A store reads what is already stored in a fixed number of statements plus one
+per 500 new identifiers, never one per item. On SQLite, which allows one writer,
+a request that writes waits for a store in progress; PostgreSQL has no such wait.
+
+Each collection writes two log lines, at its start and at its end: the source's
+name as saved, who started it (`schedule`, `person` or `nudge`), which retry it
+is, how long it took and how long the store took, items and lookups read and
+new, requests sent to the source, seconds spent waiting for a turn at a request
+limit, and the outcome (`stored`, `partial`, `failed` with its category,
+`replaced`). No key, address or lookup is logged.
+
 The upkeep loop ticks every 30 seconds, and a tick never waits for a provider.
 It starts ending the exceptions whose time is up, and it starts a collection
 pass (the scheduled run if one is due, then the retries that are due) unless

@@ -73,6 +73,15 @@ collection that fails stores nothing, so the gaps of the last stored collection
 stay on the card beside the error. A partly collected source is listed there
 too, with a link to its Edit form, where a shorter time window is the cure.
 
+A source of blocked lookups is read from where its last stored collection
+ended, ten minutes earlier to be safe, so a collection every 15 minutes reads
+those 25 minutes and not the whole window again. The whole window is read the
+first time, after a failed collection and after an edit. A collection is partly
+collected only when lookups inside what it set out to read were left unread:
+typically the first one on a busy source, which keeps the most recent 4,000.
+The collection after it picks up from there and is complete; the older lookups
+that first read left out are not gone back for.
+
 Where the source's answer says why, the card says it: the source refused the
 read (this key may not read it), or the source had an error of its own (the next
 collection may read it). Neither fails the collection. A rate limit, a timeout
@@ -306,8 +315,9 @@ The adapter uses the fixed official `https://api.nextdns.io` endpoint and a
 profile ID. It collects profile configuration and recent blocked-query records.
 The provider's account API key is resolved from the environment reference.
 
-Optional `lookback_hours` is bounded to 1–72. Collection is bounded, so a busy
-profile may require the later incremental collector to establish full coverage.
+Optional `lookback_hours` is bounded to 1–72. Collection is bounded to the most
+recent 4,000 blocked lookups per read; later collections read from where the
+last one ended (see "What a collection could not read").
 Logging must be enabled and available at the provider for events to exist.
 
 If your gateway forwards all DNS upstream, the upstream records may lack useful
