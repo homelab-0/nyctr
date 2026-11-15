@@ -150,8 +150,15 @@ def test_a_store_stopped_half_way_leaves_the_source_as_it_was(tmp_path, monkeypa
 @pytest.mark.parametrize("cancels", [1, 2])
 def test_a_collection_cancelled_during_its_store_waits_for_the_store_to_end_whole(tmp_path, monkeypatch, caplog,
                                                                                  cancels):
-    """Stopping the server mid-store, however often it cancels, ends stored: all of it, and its record with it."""
-    app, entered, release = live_app(tmp_path), threading.Event(), threading.Event()
+    """Stopping the server mid-store, however often it cancels, ends stored: all of it, and its record with it.
+
+    The store's session is opened on the store's own thread, so nothing on the loop can close it.
+    """
+    app, entered, release, opened = live_app(tmp_path), threading.Event(), threading.Event(), []
+
+    def factory():
+        opened.append(threading.get_ident())
+        return app.state.session_factory()
     with TestClient(app):
         add_source(app, monkeypatch)
         returns(monkeypatch, shaped(20, 30))
@@ -159,14 +166,14 @@ def test_a_collection_cancelled_during_its_store_waits_for_the_store_to_end_whol
 
         def held(*args):
             result = staged(*args)
+            opened.append(("store", threading.get_ident()))
             entered.set()
             assert release.wait(30)
             return result
         monkeypatch.setattr(collection, "apply_snapshot", held)
 
         async def scenario():
-            task = asyncio.create_task(collect_integration(app.state.session_factory, app.state.settings,
-                                                           "dns", None))
+            task = asyncio.create_task(collect_integration(factory, app.state.settings, "dns", None))
             assert await asyncio.to_thread(entered.wait, 30)
             for _ in range(cancels):
                 task.cancel()
@@ -178,6 +185,7 @@ def test_a_collection_cancelled_during_its_store_waits_for_the_store_to_end_whol
                 await task
         asyncio.run(scenario())
         assert counts(app) == (20, 19, 30, 1)
+        assert opened[0] == threading.get_ident() and opened[2] == ("store", opened[1]) and opened[1] != opened[0]
         with app.state.session_factory() as db:
             row = db.get(Integration, "dns")
             assert (row.status, row.sync_started_at) == ("connected", None)
