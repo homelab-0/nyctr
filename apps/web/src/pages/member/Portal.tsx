@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowLeft,
   Check,
@@ -113,6 +113,19 @@ function useMemberData() {
   const coverage = useApi<BlockCoverage>('/blocks/coverage');
   // The devices this person is tied to by having signed in on them. Without an answer, none.
   const ties = useApi<Presence>('/presence');
+  // A first sign-in on a device is tied to it by the answer to `/me/device`, which can come after the
+  // lists were worked out without that tie. So once that answer says "signed in", the lists that
+  // depend on it are read once more: the page that says the device is recognised lists its blocks.
+  const tied = device.data?.how === 'signed_in' ? device.data.device_id : null;
+  const readFor = useRef<string | null>(null);
+  const [readBlocks, readDevices, readTies] = [list.reload, devices.reload, ties.reload];
+  useEffect(() => {
+    if (!tied || readFor.current === tied) return;
+    readFor.current = tied;
+    readBlocks();
+    readDevices();
+    readTies();
+  }, [tied, readBlocks, readDevices, readTies]);
   return { blocks, requests, leases, device, devices, coverage, ties };
 }
 type Data = ReturnType<typeof useMemberData>;

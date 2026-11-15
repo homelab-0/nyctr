@@ -825,6 +825,39 @@ describe('the device a member signed in on', () => {
   );
 
   it(
+    'lists what was blocked on a device first signed in on without the page being opened again',
+    async () => {
+      // The tie is made by the answer to `/me/device`. Until then the lists know nothing of the device.
+      let tied = false;
+      const { calls } = open({
+        'GET /me/device': () => {
+          tied = true;
+          return { device_id: 'laptop', name: "Sam's laptop", simulated: false, how: 'signed_in' };
+        },
+        'GET /devices': () => (tied ? [{ id: 'laptop', name: "Sam's laptop" }] : []),
+        'GET /presence': () => ({ items: tied ? [tie] : [] }),
+        'GET /blocks': () => blockList(tied ? [block('b1', 'blocked-0.example', 'laptop')] : []),
+      });
+      expect(await screen.findByText(/blocked-0\.example/, undefined, wait)).toBeDefined();
+      expect(document.body.textContent).toContain(
+        "You're on Sam's laptop, recognised because you signed in on it.",
+      );
+      expect(screen.getByRole('button', { name: 'Forget this device' })).toBeDefined();
+      // Read once more, not over and over.
+      await new Promise((done) => setTimeout(done, 50));
+      const asked = (path: string) =>
+        calls.filter((call) => call.method === 'GET' && call.path === path).length;
+      expect([
+        asked('/blocks'),
+        asked('/devices'),
+        asked('/presence'),
+        asked('/me/device'),
+      ]).toEqual([2, 2, 2, 1]);
+    },
+    patient,
+  );
+
+  it(
     'says in the words it was given why this device is not recognised, and offers nothing to forget',
     async () => {
       const message =
