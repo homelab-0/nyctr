@@ -88,7 +88,8 @@ describe('what a source no longer reports', () => {
     const dropped: AuditEvent = {
       id: 'a',
       created_at: new Date().toISOString(),
-      actor_id: null,
+      // The server sends no actor for what Nyctr did by itself.
+      actor_id: null as unknown as string,
       action: 'inventory.dropped',
       target_id: 'dns',
       details: {
