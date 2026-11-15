@@ -10,9 +10,9 @@ from datetime import timedelta
 import pytest
 from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, insert, select
 
-from nyctr import collection, retention, worker
+from nyctr import collection, retention, schedule, worker
 from nyctr.collection import collect_integration
 from nyctr.integrations import IntegrationError, Snapshot, core
 from nyctr.models import (
@@ -249,7 +249,7 @@ def test_a_source_removed_meanwhile_and_one_collected_by_an_earlier_release_lose
     world.change(world.gone("old", days=30))
     # No collection of this source ever recorded what it read in full: not known, so nothing goes.
     assert world.drop() == 0 and "unifi:client:old" in world.stored()
-    assert retention.drop_from(world.app.state.session_factory, "a source that is gone", world.now) == 0
+    assert retention.drop_from(world.app.state.session_factory, "a source that is gone", world.now) == (0, False)
 
 
 def test_an_item_missing_for_seven_days_goes_with_one_record_and_not_a_day_sooner(world):
@@ -402,6 +402,104 @@ def test_the_tick_removes_expired_lookups_every_time_and_looks_for_what_left_onc
     assert "unifi:client:late" not in world.stored() and len(world.dropped()) == 2
 
 
+def test_a_source_collected_at_every_hourly_tick_still_has_what_left_it_dropped_within_the_hour(world, monkeypatch):
+    """The real tick every 30 seconds for two hours, the default schedule, a collection due at the first tick.
+
+    The pass takes the DNS source first, so a look that starts at the same tick finds it being
+    collected, and with one hour counted for all sources it would find that at every hour. Each
+    source answers only after the clearing out of that tick has ended, as a real source is
+    slower than a look at the database.
+    """
+    address = thing("dns", "domain", "old.example")
+    world.read(address, source="dns")  # A blocked address no stored lookup names.
+    world.read(LAPTOP)
+    factory = world.app.state.session_factory
+    upkeep = worker.Upkeep(factory, world.app.state.settings, clock=lambda: world.now)
+    found, real = [], retention.drop_from
+
+    def looked(*args):
+        result = real(*args)
+        found.append((args[1], result[1]))
+        return result
+    monkeypatch.setattr(retention, "drop_from", looked)
+
+    async def answer(provider, integration_id, config, api_key, since=None):
+        while not upkeep.clearing.done():
+            await asyncio.sleep(0.005)
+        if integration_id != "dns":
+            return Snapshot(resources=[{**thing("unifi", "client", "laptop"), "observed_at": world.now.isoformat()}])
+        start = world.now - timedelta(days=1)
+        return Snapshot(resources=[{**item, "observed_at": world.now.isoformat()} for item in listed],
+                        log={"window_from": start.isoformat(), "read_from": start.isoformat(),
+                             "read_to": world.now.isoformat()})
+    monkeypatch.setattr("nyctr.integrations.collect", answer)
+
+    async def nothing(*args, **kwargs):
+        return None
+    monkeypatch.setattr(worker, "_analyse", nothing)
+    with factory() as db:
+        plan = schedule.in_force(db, world.app.state.settings)
+        assert plan["enabled"] and plan["interval_seconds"] == 900  # So a run falls on every hourly tick.
+    listed, went, late = [], {}, thing("dns", "domain", "late.example")
+
+    async def ticks():
+        for tick in range(245):
+            if tick == 60:
+                listed.append(late)  # The source lists an address no lookup names, once, half an hour in.
+            upkeep.tick()
+            await asyncio.gather(*(task for task in (upkeep.collecting, upkeep.clearing) if task))
+            listed.clear()
+            for id_ in (address["id"], late["id"]):
+                if (tick >= 60 or id_ != late["id"]) and id_ not in world.stored():
+                    went.setdefault(id_, tick)
+            world.now += timedelta(seconds=30)
+        await upkeep.stop()
+    asyncio.run(ticks())
+    # The DNS source was being collected at the first tick. It was tried again at the next and cleared
+    # then, not an hour later and not never; from there its hour no longer falls on the collection's.
+    looks = [(source, busy) for source, busy in found]
+    assert looks[:3] == [("dns", True), ("unifi", False), ("dns", False)] and went[address["id"]] == 1
+    # Each source is gone through again an hour after it last was: the network source at the ticks on
+    # the hour, the DNS source one tick later, so what came half an hour in went within the hour.
+    assert looks[3:] == [("unifi", False), ("dns", False)] * 2 and went[late["id"]] == 121
+
+
+def address(key):
+    """A blocked address at the DNS source that no stored lookup names."""
+    return Resource(id=f"dns:domain:{key}", integration_id="dns", name=key, kind="domain", provider="x",
+                    source_id=key, observed_at=utcnow(), evidence_kind="observed", attributes={})
+
+
+def test_a_source_that_is_being_collected_whenever_its_hour_comes_is_tried_at_every_run_until_it_is_free(world):
+    world.read(source="dns")
+    factory, ran = world.app.state.session_factory, {}
+
+    def dns(status):
+        with factory() as db:
+            db.get(Integration, "dns").status = status
+            db.commit()
+    for hour in range(3):
+        world.change(address(f"hour{hour}.example"))
+        dns("syncing")
+        before = ran.get("dns")
+        for _ in range(4):  # Still being collected two minutes on: looked at every time, never stamped.
+            assert retention.drop(factory, world.now, ran) == 0 and ran.get("dns") == before
+            world.now += timedelta(seconds=30)
+        dns("connected")
+        # Free at last: what turned up since its last time goes with it, and its hour runs from here.
+        assert retention.drop(factory, world.now, ran) == (2 if hour else 1) and ran["dns"] == world.now
+        world.change(address(f"soon{hour}.example"))
+        world.now += retention.DROP_EVERY - timedelta(seconds=30)
+        assert retention.drop(factory, world.now, ran) == 0
+        world.now += timedelta(seconds=30)
+        dns("syncing")
+    assert [details["resources"] for details in world.dropped()] == [1, 2, 2]
+    # A source removed meanwhile is forgotten.
+    ran["a source that is gone"] = world.now
+    retention.drop(factory, world.now, ran)
+    assert set(ran) == {"dns", "unifi"}
+
+
 def test_the_clearing_out_runs_off_the_servers_loop_a_batch_to_a_transaction_with_one_record(world, monkeypatch):
     """What runs where: every batch on a worker thread, while the loop goes on turning with a batch held open."""
     world.read(LAPTOP)
@@ -424,6 +522,8 @@ def test_the_clearing_out_runs_off_the_servers_loop_a_batch_to_a_transaction_wit
         return expire(*args)
     monkeypatch.setattr(retention, "_batch", held)
     monkeypatch.setattr(retention, "expire_lookups", expired)
+    # Between two batches of a source whatever else waits to write is let in: SQLite has one write lock.
+    monkeypatch.setattr(retention.time, "sleep", lambda seconds: ran.append((threading.get_ident(), seconds)))
 
     async def nothing(*args, **kwargs):
         return False
@@ -441,11 +541,65 @@ def test_the_clearing_out_runs_off_the_servers_loop_a_batch_to_a_transaction_wit
         await upkeep.stop()
         return threading.get_ident()
     loop = asyncio.run(scenario())
-    assert [what for _thread, what in ran] == ["lookups", 2, 2, 1] and loop not in {thread for thread, _what in ran}
+    assert [what for _thread, what in ran] == ["lookups", 2, retention.PAUSE, 2, retention.PAUSE, 1]
+    assert loop not in {thread for thread, _what in ran}
     # Each batch was committed before the next began, into the one record of the run.
     assert records == [0, 1, 1]
     assert world.dropped() == [{"name": "UniFi", "resources": 5, "kinds": {"client": 5}}]
     assert set(world.stored()) == {LAPTOP}
+
+
+def test_the_work_under_the_write_lock_does_not_grow_with_addresses_times_lookups(world):
+    """SQLite counts the steps it takes. Ten times the addresses and lookups may cost ten times, not a hundred."""
+    engine = world.app.state.session_factory.kw["bind"]
+    if engine.dialect.name != "sqlite":
+        pytest.skip("counts SQLite's own steps; PostgreSQL plans the same statements with its own indexes")
+    steps = [0]
+
+    def count():
+        steps[0] += 1
+
+    @event.listens_for(engine, "checkout")
+    def counted(connection, _record, _proxy):
+        connection.set_progress_handler(count, 100)
+    world.read(source="dns")
+    now, work = utcnow(), []
+    for more in (300, 3000):
+        with world.app.state.session_factory() as db:
+            # Addresses that still have a lookup, and their lookups: none of them is to go.
+            names = [f"kept{more}-{n}.example" for n in range(more)]
+            db.execute(insert(Resource), [{"id": f"dns:domain:{name}", "integration_id": "dns", "name": name,
+                                           "kind": "domain", "provider": "x", "source_id": name, "observed_at": now,
+                                           "evidence_kind": "observed", "attributes": {}} for name in names])
+            db.execute(insert(Observation), [{
+                "id": f"dns:block:{name}", "integration_id": "dns", "device_name": "x", "domain": name,
+                "source": "x", "reason": "x", "observed_at": now, "expires_at": now + timedelta(days=30),
+                "evidence_kind": "observed", "attribution": "unattributed", "risk_explanation": ""} for name in names])
+            db.add_all([address(f"left{more}-{n}.example") for n in range(20)])
+            db.commit()
+        steps[0] = 0
+        assert world.drop() == 20
+        work.append(steps[0])
+    event.remove(engine, "checkout", counted)
+    # 300 and then 3,300 kept addresses, each with a lookup; the same twenty to drop both times.
+    assert work[1] < 20 * work[0], work
+
+
+def test_an_address_looked_up_after_the_run_read_what_may_go_is_kept(world, monkeypatch):
+    """What may go is read once, with no lock held. Each batch looks again at the items it was given."""
+    world.read(source="dns")
+    world.change(address("again.example"), address("quiet.example"))
+    batch = retention._batch
+
+    def meanwhile(db, integration_id, *args):
+        if integration_id == "dns":
+            again = lookup()
+            again.domain = "again.example"
+            world.change(again)
+        return batch(db, integration_id, *args)
+    monkeypatch.setattr(retention, "_batch", meanwhile)
+    assert world.drop() == 1
+    assert "dns:domain:again.example" in world.stored() and "dns:domain:quiet.example" not in world.stored()
 
 
 def test_a_collection_that_starts_between_two_batches_stops_the_run_at_what_it_recorded(world, monkeypatch):
@@ -456,7 +610,7 @@ def test_a_collection_that_starts_between_two_batches_stops_the_run_at_what_it_r
 
     def between(db, integration_id, *args):
         calls.append(integration_id)
-        if calls[-2:] == ["unifi", "unifi"]:
+        if calls == ["unifi", "unifi"]:
             world.change(status="syncing")  # A collection took the source after the first batch was committed.
         return batch(db, integration_id, *args)
     monkeypatch.setattr(retention, "_batch", between)

@@ -8,8 +8,8 @@ pass is still going: the pass claims the scheduled run if one is due, collects
 each source in turn, then runs the retries that are due. The schedule is read
 from the database at every pass, so a change an administrator saves applies at
 the next pass on every running copy, and it never runs in demo mode. And it
-clears out, on a worker thread, the lookups whose time is up and, once an hour,
-what has left the sources (`retention`).
+clears out, on a worker thread, the lookups whose time is up and, once an hour
+for each source, what has left it (`retention`).
 
 A scheduled collection that fails for a reason that may pass is retried up to
 three times before the source is shown as failed (see `schedule.plan_retry`).
@@ -196,13 +196,13 @@ class Upkeep:
         self.collecting: asyncio.Task | None = None
         self.ending: dict[str | None, asyncio.Task] = {}
         self.clearing: asyncio.Task | None = None
-        self.dropped_at = None
+        self.dropped: dict = {}  # When each source was last gone through for what has left it.
 
     def tick(self) -> None:
         """Start a collection pass if none is going, the endings that are due, and the clearing out.
 
         Lookups whose time is up go at every tick; what has left a source is looked for once
-        an hour (`retention`). Neither calls a source, and neither runs on the server's loop.
+        an hour, and at the next tick when a collection had the source (`retention`). Neither calls a source, and neither runs on the server's loop.
 
         A run or retry that comes due during a pass is not claimed until the pass
         ends, so it stays due in the database for the next tick, or for another copy.
@@ -226,16 +226,16 @@ class Upkeep:
             self.clearing = asyncio.create_task(self._clear(self.clock()))
 
     async def _clear(self, now) -> None:
-        """Remove the lookups whose time is up and, once an hour, what has left the sources.
+        """Remove the lookups whose time is up and go through each source whose hour has come for what has left it.
 
-        Off the server's loop, as a collection's store is. A failure is logged without its
-        cause text; the hour is stamped first, so a run that fails is not tried again at every tick.
+        Off the server's loop, as a collection's store is. Each source has its own hour, counted
+        from when it was last gone through. One that a collection had at that moment is tried
+        again at the next tick, so a collection that falls on the same tick every hour cannot
+        keep a source from ever being cleared. A failure is logged without its cause text.
         """
         try:
             await off_loop(lambda: retention.expire_lookups(self.factory, now))
-            if self.dropped_at is None or now - self.dropped_at >= retention.DROP_EVERY:
-                self.dropped_at = now
-                await off_loop(lambda: retention.drop(self.factory, now))
+            await off_loop(lambda: retention.drop(self.factory, now, self.dropped))
         except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
             log.warning("Background upkeep failed: %s", type(error).__name__)
 

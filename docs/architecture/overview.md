@@ -119,11 +119,20 @@ source (`nyctr/retention.py`):
   Nothing is dropped while a source's latest collection failed, while it is
   being collected, after an edit that sent it back to be tested, or before a
   collection has recorded what it read in full.
-- The drop works through a source in batches of 500 items, each in its own
-  transaction that locks the source's row first, as the store step of a
-  collection does. So a drop and a store of one source never work at once: a
-  collection waits for one batch at most, and a collection that has taken the
-  source stops the run until the next hour.
+- Each source is gone through once an hour, counted from when it last was. A
+  source that a collection has at that moment is tried again at the next
+  tick, so a collection that falls on the same tick every hour cannot keep a
+  source from being cleared.
+- What may go is read once a run, with no lock held: the source's blocked
+  addresses and the addresses its stored lookups name are each read through
+  the index on their source and compared, so the cost grows with their sum.
+  The drop then works in batches of 500 items, each in its own transaction
+  that locks the source's row first, as the store step of a collection does,
+  and looks again at the items it was given. So a drop and a store of one
+  source never work at once: a collection waits for one batch at most, and a
+  collection that has taken the source stops the run until the next tick.
+  SQLite has one write lock for the whole database, so there a batch keeps
+  every other write waiting; the run pauses between batches to let them in.
 - An item Nyctr still holds something on is kept, marked missing, until that
   ends: a blocked address with an open or unconfirmed exception or a waiting
   request; a device a stored lookup is tied to; a guest Nyctr cut off or

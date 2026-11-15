@@ -12,10 +12,11 @@ person attached something to is never dropped here: it stays, marked, until that
 """
 
 import logging
+import time
 from collections import Counter
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, exists, or_, select, update
+from sqlalchemy import delete, or_, select, update
 
 from .integrations import registry
 from .models import (
@@ -34,11 +35,15 @@ MISSING, SINCE, DAYS = "missing_from_latest_snapshot", "missing_since", "missing
 # How many days an item must be missing, and on how many separate days a whole read must have
 # left it out, before it is dropped. The one place this number lives.
 KEEP_DAYS = 7
-# How often one copy looks for what to drop. Expired lookups are removed at every tick.
+# How often one copy goes through each source for what to drop. Expired lookups are removed at every tick.
 DROP_EVERY = timedelta(hours=1)
-# How many items one transaction looks at. A batch holds the source's row only as long as it
-# takes, so a collection that wants the source waits for one batch at most.
+# How many items one transaction looks at. A batch holds the source's row, and on SQLite the
+# only write lock, for as long as these take, so whatever waits for either waits for one batch.
 BATCH = 500
+# Seconds between two batches of one run. SQLite hands its write lock to whoever asks next, not
+# to whoever has waited longest, and a waiting writer asks again at most this far apart.
+PAUSE = 0.15
+BUSY, UNKNOWN = "busy", "unknown"
 EVERY_KIND = "*"
 log = logging.getLogger("nyctr.retention")
 
@@ -183,15 +188,33 @@ def _held(db, integration_id: str, rows: list[Resource], now: datetime) -> set[s
     return held
 
 
-def _batch(db, integration_id: str, now: datetime, after: str) -> tuple[list[Resource], str | None]:
-    """Drop what has left among the source's next `BATCH` candidates after the item `after`.
+def _candidates(db, integration_id: str) -> list[str]:
+    """Name, in id order, the source's items that may be dropped: read once a run, with no lock held.
 
-    Works in the caller's transaction and returns the items that went and the item to go on
-    after, or None when the source is done or may not be touched. The source's row is locked
-    first, as the store step of a collection does, and only when its latest collection stored
-    and none is going. So a collection, an edit and a removal each wait for this batch or stop
-    the run, and a drop and a store of one source never work at once. The candidates are then
-    locked in id order, as removal does.
+    A blocked address is one when no stored lookup of the source names it. Both sides are read
+    whole, each by the index on its source, and compared here, so the cost grows with the
+    number of addresses plus the number of lookups and not with one times the other. The
+    other kinds are the marked items. Each batch looks again at the ones it is given.
+    """
+    named = set(db.scalars(select(Observation.domain).where(Observation.integration_id == integration_id).distinct()))
+    addresses = db.execute(select(Resource.id, Resource.source_id).where(
+        Resource.integration_id == integration_id, Resource.kind == "domain")).all()
+    marked = db.scalars(select(Resource.id).where(
+        Resource.integration_id == integration_id, Resource.kind != "domain", flagged()))
+    return sorted([id_ for id_, name in addresses if name not in named] + list(marked))
+
+
+def _batch(db, integration_id: str, now: datetime, ids: list[str]) -> tuple[list[Resource], str | None]:
+    """Drop what has left among these candidates of the source, `BATCH` of them at most.
+
+    Works in the caller's transaction and returns the items that went and why the run must
+    stop here, if it must: `BUSY` when a collection has the source, `UNKNOWN` when it may not
+    be touched for another reason. The source's row is locked first, as the store step of a
+    collection does, and only when its latest collection stored and none is going. So a
+    collection, an edit and a removal each wait for this batch or stop the run, and a drop and
+    a store of one source never work at once. The candidates are then locked in id order, as
+    removal does, and looked at again: every statement under the lock names the items it is
+    about, so the lock is held for as long as `BATCH` items take and no longer.
     """
     from .removal import forget
 
@@ -199,37 +222,47 @@ def _batch(db, integration_id: str, now: datetime, after: str) -> tuple[list[Res
         Integration.id == integration_id, Integration.status.in_(("connected", "partial")),
         Integration.last_error.is_(None), Integration.last_sync.is_not(None),
     ).values(name=Integration.name).execution_options(synchronize_session=False))
+    if locked.rowcount != 1:
+        going = db.scalar(select(Integration.status).where(Integration.id == integration_id)) == "syncing"
+        return [], BUSY if going else UNKNOWN  # Collecting; or failed, edited, never collected, removed.
     last = db.scalar(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == integration_id)
                      .order_by(Audit.created_at.desc()).limit(1))
     doubt = last.details.get("unread") if last is not None else None
-    if locked.rowcount != 1 or not isinstance(doubt, list):
-        return [], None  # Collecting, failed, never collected, or collected before this was recorded: not known.
+    if not isinstance(doubt, list):
+        return [], UNKNOWN  # Collected before this was recorded: not known.
     cutoff = utc(db.get(Integration, integration_id).last_sync) - timedelta(days=KEEP_DAYS)
-    named = exists().where(Observation.integration_id == integration_id, Observation.domain == Resource.source_id)
     rows = list(db.scalars(select(Resource).where(
-        Resource.integration_id == integration_id, Resource.id > after,
-        or_(and_(Resource.kind == "domain", ~named), and_(Resource.kind != "domain", flagged())),
-    ).order_by(Resource.id).limit(BATCH).with_for_update()))
-    gone = [row for row in rows if row.kind == "domain"
-            or EVERY_KIND not in doubt and row.kind not in doubt and _due(row, cutoff)]
+        Resource.integration_id == integration_id, Resource.id.in_(ids),
+    ).order_by(Resource.id).with_for_update()))
+    names = [row.source_id for row in rows if row.kind == "domain"]
+    named = set(db.scalars(select(Observation.domain).where(
+        Observation.integration_id == integration_id, Observation.domain.in_(names)))) if names else set()
+    gone = [row for row in rows if (row.source_id not in named if row.kind == "domain" else (
+        is_missing(row) and EVERY_KIND not in doubt and row.kind not in doubt and _due(row, cutoff)))]
     held = _held(db, integration_id, gone, now) if gone else set()
     gone = [row for row in gone if row.id not in held]
     for row in gone:
         db.expunge(row)
     forget(db, [row.id for row in gone])
-    return gone, rows[-1].id if len(rows) == BATCH else None
+    return gone, None
 
 
-def drop_from(factory, integration_id: str, now: datetime) -> int:
-    """Drop what has left one source, a batch to a transaction, and say how many items went.
+def drop_from(factory, integration_id: str, now: datetime) -> tuple[int, bool]:
+    """Drop what has left one source, a batch to a transaction; say how many items went and whether it was busy.
 
-    One audit record covers the run. Each batch writes into it what has gone so far in the
-    same transaction as its deletions, so the record never says more or less than was deleted.
+    Busy means a collection had the source, at the start or between two batches, so the rest
+    is still to do. One audit record covers the run. Each batch writes into it what has gone
+    so far in the same transaction as its deletions, so the record never says more or less
+    than was deleted. Between two batches whatever else is waiting to write is let in.
     """
-    kinds, after, record = Counter(), "", None
-    while after is not None:
+    kinds, record = Counter(), None
+    with factory() as db:
+        ids = _candidates(db, integration_id)
+    for start in range(0, len(ids), BATCH):
+        if start:
+            time.sleep(PAUSE)
         with factory() as db:
-            gone, after = _batch(db, integration_id, now, after)
+            gone, stop = _batch(db, integration_id, now, ids[start:start + BATCH])
             if gone:
                 kinds.update(row.kind for row in gone)
                 details = {"name": db.get(Integration, integration_id).name, "resources": kinds.total(),
@@ -243,7 +276,9 @@ def drop_from(factory, integration_id: str, now: datetime) -> int:
                 else:
                     db.get(Audit, record).details = details
             db.commit()
-    return kinds.total()
+        if stop:
+            return kinds.total(), stop == BUSY
+    return kinds.total(), False
 
 
 def expire_lookups(factory, now: datetime) -> None:
@@ -253,14 +288,30 @@ def expire_lookups(factory, now: datetime) -> None:
         db.commit()
 
 
-def drop(factory, now: datetime) -> int:
-    """One run over every source. A source that fails is logged without its cause text and the rest go on."""
+def drop(factory, now: datetime, ran: dict[str, datetime] | None = None) -> int:
+    """One run over every source whose hour has come, and say how many items went.
+
+    `ran` holds when each source was last gone through, and is kept by the caller from one run
+    to the next; without it every source is gone through. A source a collection had is not
+    stamped, so the next run tries it again and no source waits longer than its hour plus the
+    collection that held it. A source that fails is logged without its cause text, stamped so
+    it is not tried at every tick, and the rest go on.
+    """
     with factory() as db:
-        ids = list(db.scalars(select(Integration.id)))
+        ids = list(db.scalars(select(Integration.id).order_by(Integration.id)))
+    if ran is not None:
+        for gone in set(ran) - set(ids):
+            del ran[gone]
     total = 0
     for integration_id in ids:
+        if ran is not None and integration_id in ran and now - ran[integration_id] < DROP_EVERY:
+            continue
+        busy = False
         try:
-            total += drop_from(factory, integration_id, now)
+            count, busy = drop_from(factory, integration_id, now)
+            total += count
         except Exception as error:  # noqa: BLE001 - one source's failure must not keep the others uncleared
             log.warning("Dropping what has left a source failed: %s", type(error).__name__)
+        if ran is not None and not busy:
+            ran[integration_id] = now
     return total
