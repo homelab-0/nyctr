@@ -167,6 +167,22 @@ function notKnown(data: Data): { title: string; text: string } | null {
   return null;
 }
 
+/**
+ * Says that the list of ties could not be read, with a way to read it again. Without it a Forget
+ * button would simply be missing, and nobody could tell that from there being nothing to forget.
+ */
+function TiesNotRead({ data }: { data: Data }) {
+  if (!data.ties.error) return null;
+  return (
+    <p className="aside" role="alert">
+      Nyctr could not read which devices you signed in on, so it cannot offer to forget one here.{' '}
+      <button className="linklike" onClick={data.ties.reload}>
+        Try again
+      </button>
+    </p>
+  );
+}
+
 /** A plain button that ends the tie a sign-in made to a device. Shown only where there is such a tie. */
 function Forget({ data, device, name }: { data: Data; device: string; name: string }) {
   const [error, setError] = useState<string | null>(null);
@@ -375,6 +391,7 @@ function Home({ data }: { data: Data }) {
               : `${unrecognised}.`}
           </p>
         )}
+        {here?.device_id && <TiesNotRead data={data} />}
       </header>
       <form className="m-find" onSubmit={find}>
         <Search size={18} />
@@ -903,6 +920,7 @@ function MyDevices({ data }: { data: Data }) {
     <div className="m-col">
       <h1 className="display d2">My devices</h1>
       <p className="lede">You see blocked sites only from these. {ASK} to add one.</p>
+      <TiesNotRead data={data} />
       <section className="m-card">
         {(devices.data || []).map((device) => (
           <div className="m-row" key={device.id}>

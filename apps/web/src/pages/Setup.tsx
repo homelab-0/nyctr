@@ -183,6 +183,15 @@ function PeoplePanel() {
   return (
     <div className="stack">
       <InlineError message={error} />
+      {signIns.error && (
+        <p className="aside" role="alert">
+          Nyctr could not read who signed in on which device, so the sign-ins under the devices
+          below may be missing or out of date.{' '}
+          <button className="linklike" onClick={signIns.reload}>
+            Try again
+          </button>
+        </p>
+      )}
       <Panel
         title="Whose device is it"
         hint="A member only ever sees blocks from devices that are theirs or shared."
@@ -537,29 +546,52 @@ export function addressText(seen: AddressSeen): string {
 function RecognitionPanel() {
   const presence = useApi<Presence>('/presence');
   const [error, setError] = useState<string | null>(null);
-  const now = presence.data;
-  if (!now || now.enabled === undefined) return <InlineError message={presence.error} />;
-  const value = { enabled: now.enabled, reach_back_hours: now.reach_back_hours ?? 2 };
-  const save = async (next: typeof value) => {
+  const [saving, setSaving] = useState(false);
+  // What the last save answered: the setting in force. It is shown until the setting has been read
+  // again, so the switch never shows a value older than the one just saved.
+  const [answered, setAnswered] = useState<Recognition | null>(null);
+  const busy = useRef(false);
+  useEffect(() => setAnswered(null), [presence.data]);
+  const read = presence.data;
+  const value =
+    answered ??
+    (read && read.enabled !== undefined
+      ? { enabled: read.enabled, reach_back_hours: read.reach_back_hours ?? 2 }
+      : null);
+  if (!value) return <InlineError message={presence.error} />;
+  // Only what was changed is sent. A value this page still shows can then never undo a change made
+  // since, here or by another administrator. As with the schedule, input during a save is ignored
+  // and nothing is disabled, so keyboard focus stays where it is.
+  const save = async (change: Partial<Recognition>) => {
+    if (busy.current) return;
+    busy.current = true;
     setError(null);
+    setSaving(true);
     try {
-      await put('/presence', next);
-      presence.reload();
+      setAnswered(await put<Recognition>('/presence', change));
     } catch (e) {
-      setError((e as Error).message);
+      // With no answer the save may still have landed: what is read next says what is in force.
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : `${UNREACHABLE} Check what is shown here before you try again.`,
+      );
     }
+    presence.reload();
+    busy.current = false;
+    setSaving(false);
   };
   return (
     <Panel
       title="Recognise members' devices when they sign in"
       hint="A member who signs in on a device sees what was blocked on it, with nothing set up on the device."
     >
-      <div className="stack">
+      <div className="stack" aria-busy={saving}>
         <div className="bar">
           <Switch
             label="Recognise members' devices when they sign in"
             checked={value.enabled}
-            onChange={(enabled) => void save({ ...value, enabled })}
+            onChange={(enabled) => void save({ enabled })}
           />
           <span className="aside">
             Before you switch this on, check that the panel below shows the address of the device
@@ -574,7 +606,7 @@ function RecognitionPanel() {
             min={0}
             max={24}
             value={value.reach_back_hours}
-            onChange={(reach_back_hours) => void save({ ...value, reach_back_hours })}
+            onChange={(reach_back_hours) => void save({ reach_back_hours })}
           />
           hours before they first signed in on it.
         </div>
@@ -584,11 +616,22 @@ function RecognitionPanel() {
           device, or when the member or you end it; who signed in on which device is listed under
           People and devices. Switching this off ends every tie at once.
         </p>
+        {presence.error && (
+          <p className="aside" role="alert">
+            Nyctr could not read this setting again, so what is shown here may be out of date.{' '}
+            <button className="linklike" onClick={presence.reload}>
+              Try again
+            </button>
+          </p>
+        )}
         <InlineError message={error} />
       </div>
     </Panel>
   );
 }
+
+/** Whether signing in ties a person to a device, and how far back a new tie reaches. */
+type Recognition = { enabled: boolean; reach_back_hours: number };
 
 /** The operator's check that a proxy passes the right address on, before members rely on it. */
 function AddressPanel() {

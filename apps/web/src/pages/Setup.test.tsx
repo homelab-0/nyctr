@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../api';
@@ -471,10 +471,151 @@ describe('recognising devices at sign-in, in Setup', () => {
       expect(toggle.compareDocumentPosition(below) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
       fireEvent.click(toggle);
-      await waitFor(() => expect(saved()).toEqual([{ enabled: true, reach_back_hours: 2 }]), wait);
+      // Each save carries only what was changed.
+      await waitFor(() => expect(saved()).toEqual([{ enabled: true }]), wait);
       await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'), wait);
       fireEvent.click(screen.getByRole('button', { name: 'Raise hours before the first sign-in' }));
-      await waitFor(() => expect(saved()[1]).toEqual({ enabled: true, reach_back_hours: 3 }), wait);
+      await waitFor(() => expect(saved()[1]).toEqual({ reach_back_hours: 3 }), wait);
+    },
+    patient,
+  );
+
+  const name = "Recognise members' devices when they sign in";
+  const raise = () => screen.getByRole('button', { name: 'Raise hours before the first sign-in' });
+  /** A server that keeps the setting and changes only the part a save carries, as the real one does. */
+  const server = (first: { enabled: boolean; reach_back_hours: number }) => {
+    const kept = { now: first };
+    const calls = mockApi({
+      ...system,
+      'GET /collection': scheduleFixture(),
+      'GET /presence': () => ({ items: [], ...kept.now }),
+      'PUT /presence': (body: unknown) => (kept.now = { ...kept.now, ...(body as object) }),
+    });
+    const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+    return { kept, saved };
+  };
+
+  it(
+    'cannot switch recognition back on by changing the hours before the page has read it again',
+    async () => {
+      const { kept, saved } = server({ enabled: true, reach_back_hours: 2 });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const toggle = await screen.findByRole('switch', { name }, wait);
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      // No read after this gets an answer until released: only the saves' own answers reach the page.
+      const release = holdBack('GET', '/presence');
+      fireEvent.click(toggle);
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'), wait);
+      fireEvent.click(raise());
+      await waitFor(() => expect(saved()).toHaveLength(2), wait);
+      expect(saved()).toEqual([{ enabled: false }, { reach_back_hours: 3 }]);
+      expect(kept.now).toEqual({ enabled: false, reach_back_hours: 3 });
+      const hours = () => raise().parentElement!.querySelector('output')!.textContent;
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(hours()).toBe('3');
+      // And once the setting is read again it says the same.
+      release();
+      await waitFor(() => expect(hours()).toBe('3'), wait);
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+    },
+    patient,
+  );
+
+  it(
+    'ignores a second press while a save is under way and keeps keyboard focus on the switch',
+    async () => {
+      const { saved } = server({ enabled: false, reach_back_hours: 2 });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const toggle = (await screen.findByRole('switch', { name }, wait)) as HTMLButtonElement;
+      const release = holdBack('PUT', '/presence');
+      toggle.focus();
+      fireEvent.click(toggle);
+      await waitFor(() => expect(saved()).toHaveLength(1), wait);
+      expect(toggle.closest('[aria-busy="true"]')).not.toBeNull();
+      // Pressed again, and the hours changed, before the first save has answered: neither is sent.
+      fireEvent.click(toggle);
+      fireEvent.click(raise());
+      expect(toggle.disabled).toBe(false);
+      expect(document.activeElement).toBe(toggle);
+      release();
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'), wait);
+      expect(saved()).toEqual([{ enabled: true }]);
+      expect(toggle.closest('[aria-busy="true"]')).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'shows what the save answered and says so when the setting cannot be read again',
+    async () => {
+      let reads = 0;
+      let failing = true;
+      mockApi({
+        ...system,
+        'GET /collection': scheduleFixture(),
+        'GET /presence': () => {
+          reads += 1;
+          if (reads > 1 && failing) throw new TypeError('Failed to fetch');
+          return { items: [], enabled: reads > 1, reach_back_hours: 2 };
+        },
+        'PUT /presence': { enabled: true, reach_back_hours: 2 },
+      });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const toggle = await screen.findByRole('switch', { name }, wait);
+      fireEvent.click(toggle);
+      // The switch shows On, as the server has it, although the read after the save failed.
+      const said = await screen.findByText(
+        /Nyctr could not read this setting again, so what is shown here may be out of date\./,
+        undefined,
+        wait,
+      );
+      expect(said.getAttribute('role')).toBe('alert');
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      failing = false;
+      fireEvent.click(within(said).getByRole('button', { name: 'Try again' }));
+      await waitFor(
+        () => expect(screen.queryByText(/could not read this setting again/)).toBeNull(),
+        wait,
+      );
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+    },
+    patient,
+  );
+
+  it(
+    'says so, with a way to try again, when who signed in on which device cannot be read',
+    async () => {
+      let failing = true;
+      mockApi({
+        'GET /rules': rules,
+        'GET /users': [{ id: 'sam', name: 'Sam', active: true }],
+        'GET /device-links': [],
+        'GET /devices': [
+          {
+            id: 'laptop',
+            name: 'Laptop',
+            kind: 'client',
+            classification: 'unassigned',
+            attributes: {},
+          },
+        ],
+        'GET /presence': () => {
+          if (failing) throw new TypeError('Failed to fetch');
+          return { items: [signIn('t1', 'tie', 'Sam')], enabled: true, reach_back_hours: 2 };
+        },
+      });
+      render(<Setup params={new URLSearchParams('tab=people')} />);
+      const said = await screen.findByText(
+        /Nyctr could not read who signed in on which device/,
+        undefined,
+        wait,
+      );
+      expect(said.getAttribute('role')).toBe('alert');
+      expect(screen.queryByText(/signed in on it/)).toBeNull();
+      failing = false;
+      fireEvent.click(within(said).getByRole('button', { name: 'Try again' }));
+      expect(await screen.findByText(/Sam signed in on it/, undefined, wait)).toBeDefined();
+      expect(screen.queryByText(/could not read who signed in/)).toBeNull();
     },
     patient,
   );

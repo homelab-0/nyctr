@@ -886,6 +886,46 @@ describe('the device a member signed in on', () => {
     patient,
   );
 
+  for (const [view, hash] of [
+    ['the first page', '/portal'],
+    ['My devices', '/devices'],
+  ]) {
+    it(
+      `says on ${view} that the devices signed in on could not be read, and reads them again when told to`,
+      async () => {
+        let failing = true;
+        open(
+          {
+            'GET /me/device': {
+              device_id: 'laptop',
+              name: "Sam's laptop",
+              simulated: false,
+              how: 'signed_in',
+            },
+            'GET /devices': [{ id: 'laptop', name: "Sam's laptop", classification: 'unassigned' }],
+            'GET /presence': () => {
+              if (failing) throw new TypeError('Failed to fetch');
+              return { items: [tie] };
+            },
+          },
+          hash,
+        );
+        const said = await screen.findByText(
+          /Nyctr could not read which devices you signed in on, so it cannot offer to forget one here\./,
+          undefined,
+          wait,
+        );
+        expect(said.getAttribute('role')).toBe('alert');
+        expect(screen.queryByRole('button', { name: /^Forget/ })).toBeNull();
+        failing = false;
+        await act(async () => within(said).getByRole('button', { name: 'Try again' }).click());
+        expect(await screen.findByRole('button', { name: /^Forget/ }, wait)).toBeDefined();
+        expect(screen.queryByText(/could not read which devices you signed in on/)).toBeNull();
+      },
+      patient,
+    );
+  }
+
   it(
     'tells an assigned device from one signed in on under My devices, and only a tie can be forgotten',
     async () => {
