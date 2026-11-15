@@ -29,7 +29,9 @@ about a person or a device goes in them: the purpose is one of a fixed set, and
 what the call is about is named by a keyed digest of its id, never by the id.
 The key is this installation's own, made on first use and kept in the settings
 table: without it a digest could be matched against guessed ids. It is not the
-model's key, which every endpoint receives, and it is never sent or shown.
+model's key, which every endpoint receives, and it is never sent or shown. It
+is made in a database session of its own, so asking the model never saves or
+discards work the caller has not saved.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, StrictInt
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from . import __version__
@@ -270,29 +272,43 @@ def describe(db: Session, settings: Settings) -> dict:
             "styles": list(STYLES), "seconds": list(SECONDS[:2])}
 
 
-def trace_key(db: Session) -> bytes:
-    """Return this installation's key for trace sessions, making it on first use. Commits when it makes one.
-
-    32 random bytes kept in the settings table under their own name. It is not
-    the model's key, it goes in no request, answer, audit record or log line,
-    and a new one only splits old and new traces into separate groups.
-    """
-    row = db.get(Setting, TRACE_KEY)
+def _stored_key(row: Setting | None) -> bytes:
+    """Read the trace key out of its settings row, or nothing when the row is missing or is not a key."""
     try:
         key = bytes.fromhex(row.value["key"]) if row is not None else b""
     except (KeyError, TypeError, ValueError):
-        key = b""
-    if len(key) == 32:
-        return key
-    if row is None:
-        db.add(Setting(key=TRACE_KEY, value={"key": secrets.token_hex(32)}))
-    else:  # not a key this version wrote: replace it
-        row.value = {"key": secrets.token_hex(32)}
-    try:
-        db.commit()
-    except IntegrityError:  # another copy of Nyctr made it a moment earlier: use that one
-        db.rollback()
-    return bytes.fromhex(db.get(Setting, TRACE_KEY).value["key"])
+        return b""
+    return key if len(key) == 32 else b""
+
+
+def trace_key(db: Session) -> bytes:
+    """Return this installation's key for trace sessions, making it on first use.
+
+    32 random bytes kept in the settings table under their own name. It is not
+    the model's key and it goes in no request, answer or audit record, and in
+    no log line Nyctr writes; SQL statement logging, if an operator turns it
+    on, writes stored values, this one included. A new key only splits old and
+    new traces into separate groups.
+
+    The key is read and made in a short session of its own, on the caller's
+    database. The caller's session is never committed or rolled back here, so
+    work it has not saved is neither saved early nor lost. A stored value that
+    is not a key is replaced. Two copies of Nyctr making the key at the same
+    moment end on one: the second finds the row taken and uses the first's.
+    """
+    with Session(db.get_bind()) as own:
+        row = own.get(Setting, TRACE_KEY)
+        if key := _stored_key(row):
+            return key
+        if row is None:
+            own.add(Setting(key=TRACE_KEY, value={"key": secrets.token_hex(32)}))
+        else:  # not a key this version wrote
+            row.value = {"key": secrets.token_hex(32)}
+        try:
+            own.commit()
+        except IntegrityError:  # another copy made it between the read and the write: use that one
+            own.rollback()
+        return _stored_key(own.get(Setting, TRACE_KEY))
 
 
 def trace(purpose: str, subject: tuple[str, str] | None, style: str, mode: str, prompt_version: str,
@@ -333,6 +349,7 @@ async def call(purpose: str, subject: tuple[str, str] | None, connection: InForc
     """Ask the model once and return its text. The only place a request to the model is built.
 
     A call about a subject needs `db`, to read this installation's trace key.
+    The caller's session is only passed on: nothing here commits it or rolls it back.
 
     Raises Refused, before anything is sent, when the connection may not be
     used. Raises ModelError when no usable answer came back: `refused` (with
@@ -347,9 +364,16 @@ async def call(purpose: str, subject: tuple[str, str] | None, connection: InForc
     if key and ("\r" in key or "\n" in key):
         raise Refused("The model's key holds a line break, so it cannot be sent.")
     # Only a style that sends a session reads the key, so an untraced installation never makes one.
-    keyed = subject is not None and connection.trace in ("proxy", "proxy_body")
-    headers, about = trace(purpose, subject, connection.trace, settings.mode, prompt_version,
-                           trace_key(db) if keyed and db is not None else b"")
+    session_key = b""
+    if subject is not None and connection.trace in ("proxy", "proxy_body") and db is not None:
+        try:
+            session_key = trace_key(db)
+        except OperationalError:
+            # The database would not take the key just now. SQLite allows one writer, and a caller
+            # that has written and not yet saved is that writer. The call matters more than how its
+            # trace is grouped, so this one goes out with no session; the next makes the key.
+            subject = None
+    headers, about = trace(purpose, subject, connection.trace, settings.mode, prompt_version, session_key)
     if key:
         headers["Authorization"] = f"Bearer {key}"
     body = {"model": connection.model, "temperature": 0.2, "max_tokens": max_tokens,

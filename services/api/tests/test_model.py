@@ -16,7 +16,8 @@ import httpx
 import pytest
 from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin, seed_live_member, signin
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 from nyctr import model
 from nyctr.config import Settings
@@ -747,6 +748,103 @@ def test_the_trace_session_is_keyed_by_this_installation_alone(tmp_path, endpoin
     assert sessions[0] == sessions[2] and keys[0] == keys[2]  # the same after a restart
     assert sessions[0] != sessions[1] and keys[0] != keys[1]  # another installation, another session
     assert UNKEYED not in sessions
+
+
+def test_making_the_trace_key_neither_saves_nor_loses_work_the_caller_has_not_saved(tmp_path):
+    """The key is made in a session of its own: the caller's unsaved work stays unsaved, and stays."""
+    app = console(tmp_path)
+    with TestClient(app):
+        factory = app.state.session_factory
+        with factory() as caller, factory() as other:
+            caller.add(Setting(key="callers_unsaved_work", value={"n": 1}))
+            key = model.trace_key(caller)
+            assert len(key) == 32
+            assert other.get(Setting, model.TRACE_KEY).value == {"key": key.hex()}  # the key itself is kept
+            assert other.get(Setting, "callers_unsaved_work") is None  # not saved early
+            assert [row.key for row in caller.new] == ["callers_unsaved_work"]  # and not lost
+            caller.commit()
+            assert other.get(Setting, "callers_unsaved_work").value == {"n": 1}
+        # The other way round: a caller that then discards its work takes nothing of the key with it.
+        with factory() as caller:
+            caller.get(Setting, model.TRACE_KEY).value = {"key": "damaged"}
+            caller.commit()
+        with factory() as caller:
+            caller.add(Setting(key="discarded", value={}))
+            replaced = model.trace_key(caller)
+            caller.rollback()
+        with factory() as after:
+            assert after.get(Setting, "discarded") is None
+            assert model.trace_key(after) == replaced != key
+
+
+def test_a_database_that_cannot_take_the_key_just_now_costs_the_session_not_the_call(tmp_path, endpoint):
+    """SQLite allows one writer. A caller that has written and not saved still gets its answer, ungrouped once."""
+    app = console(tmp_path)
+    settings = Settings(mode="live", ai_base_url="https://llm.example/v1", ai_model="m", ai_trace="proxy")
+
+    def ask(db):
+        return asyncio.run(model.call("nyctr.explanation", ("finding", DEVICE_FINDING), server_set(settings),
+                                      settings, system="s", user="u", db=db))
+
+    with TestClient(app):
+        # The same database, giving up on a lock at once instead of after SQLite's five seconds.
+        impatient = create_engine(str(app.state.engine.url), connect_args={"timeout": 0.01})
+        with Session(impatient) as caller:
+            caller.add(Setting(key="callers_unsaved_work", value={}))
+            caller.flush()  # written, not saved: this session is now the one writer
+            assert ask(caller) == "ready"
+            sent = endpoint.requests[-1].headers
+            assert sent["langfuse_trace_name"] == "nyctr.explanation" and "langfuse_session_id" not in sent
+            assert caller.get(Setting, "callers_unsaved_work") is not None  # its work is still there, unsaved
+            caller.rollback()
+        with Session(impatient) as caller:
+            assert caller.get(Setting, model.TRACE_KEY) is None and caller.get(Setting, "callers_unsaved_work") is None
+            assert ask(caller) == "ready"  # nothing written this time: the key is made and the session sent
+            assert re.fullmatch("finding:[0-9a-f]{16}", endpoint.requests[-1].headers["langfuse_session_id"])
+        impatient.dispose()
+
+
+def test_two_copies_making_the_trace_key_at_the_same_moment_end_on_one_key(tmp_path, monkeypatch):
+    """The first copy reads "no key"; the second makes one before the first writes; the first uses the second's."""
+    app = console(tmp_path)
+    with TestClient(app):
+        factory, real, second = app.state.session_factory, model.secrets.token_hex, []
+
+        def between_read_and_write(size):
+            if not second:  # the first copy is about to write its own key: the second copy gets in first
+                second.append(b"")
+                with factory() as other:
+                    second.append(model.trace_key(other))
+            return real(size)
+
+        monkeypatch.setattr(model.secrets, "token_hex", between_read_and_write)
+        with factory() as first:
+            got = model.trace_key(first)
+        assert len(got) == 32 and got == second[1]
+        with factory() as db:
+            (row,) = db.scalars(select(Setting).where(Setting.key == model.TRACE_KEY)).all()
+            assert row.value == {"key": got.hex()}
+
+
+def test_a_stored_trace_key_that_is_not_a_key_is_replaced_and_the_new_one_kept(tmp_path):
+    """A damaged row never stops a call or sends a session under a weak key: a new key takes its place."""
+    app = console(tmp_path)
+    with TestClient(app):
+        factory = app.state.session_factory
+        with factory() as db:
+            last = model.trace_key(db)
+        for damaged in ({}, {"key": ""}, {"key": "not hex"}, {"key": 7}, {"key": None}, {"key": "ab" * 31},
+                        {"key": "ab" * 33}, {"other": last.hex()}, ["a", "list"], None):
+            with factory() as db:
+                db.get(Setting, model.TRACE_KEY).value = damaged
+                db.commit()
+            with factory() as db:
+                fresh = model.trace_key(db)
+                assert len(fresh) == 32 and fresh != last, damaged
+                assert model.trace_key(db) == fresh
+            with factory() as db:
+                assert db.get(Setting, model.TRACE_KEY).value == {"key": fresh.hex()}
+            last = fresh
 
 
 def test_the_proxys_header_names_sit_in_one_table_and_purposes_are_a_fixed_set():
