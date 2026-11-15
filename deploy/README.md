@@ -77,9 +77,20 @@ The list used to be called `FORWARDED_ALLOW_IPS`, the web server's own name for
 it. That name is still read for this release when `NYCTR_TRUSTED_PROXIES` is
 unset or empty; Nyctr then writes a warning at start and shows one in Setup. If
 both are set, `NYCTR_TRUSTED_PROXIES` wins. Move to the new name: under its own
-name the list is unknown to the web server, so a server started by hand without
-`--no-proxy-headers` still believes only itself and cannot bring forged
-addresses back. While the old name is set, such a server can.
+name the list is unknown to the web server.
+
+Always start the web server with `--no-proxy-headers`. The image, the chart,
+Compose and the commands in this repository do. A server started by hand
+without that flag runs the web server's own forwarded-header handling, which
+believes `127.0.0.1` by default and rewrites the peer before Nyctr sees it.
+Nyctr's own name for the list keeps that harmless only when no proxy runs on
+the server's own host. It is not safe in two cases: with a proxy on the same
+host, where a passed-on `X-Forwarded-For: 192.0.2.99, 127.0.0.1` makes Nyctr
+take the forged `192.0.2.99`; and while the old name is set, where the web
+server believes the whole list.
+
+The list must be exact addresses or bounded ranges. A list that covers every
+address, such as `0.0.0.0/0` or `::/0`, is refused at start like `*`.
 
 Do not use `*`, a client network, or a shared container/cluster subnet. (The Helm
 chart accepts a bounded range only together with its NetworkPolicy, and only

@@ -95,8 +95,12 @@ def test_the_image_starts_the_web_server_with_its_own_forwarded_handling_off(mon
         "nyctr.main:app", False, "127.0.0.1")
 
 
-def test_a_server_started_by_hand_without_the_flag_does_not_bring_the_gap_back(monkeypatch):
-    """Nyctr's list is under a name the web server does not know, so its own handling believes only itself."""
+def test_a_server_started_by_hand_without_the_flag_is_safe_when_no_proxy_is_on_its_own_host(monkeypatch):
+    """Nyctr's list is under a name the web server does not know, so its own handling believes only 127.0.0.1.
+
+    That covers a proxy on another host. It does not cover one on the server's
+    own host: see the next test.
+    """
     monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
     app, inside = demo_app("10.42.0.0/16"), "10.42.3.3"
     with served(app, "10.42.9.77", by_hand=True) as client:
@@ -104,6 +108,22 @@ def test_a_server_started_by_hand_without_the_flag_does_not_bring_the_gap_back(m
         assert wrong_password(client, "last@example.test", f"{FORGED}, {inside}").status_code == 401
         assert wrong_password(client, "more@example.test", f"192.0.2.7, {inside}").status_code == 429
         assert (attempts(app, inside), attempts(app, FORGED), attempts(app, "192.0.2.7")) == (60, None, None)
+
+
+@pytest.mark.parametrize(("by_hand", "address", "why"), [(True, FORGED, "peer"), (False, "127.0.0.1", "forwarded")])
+def test_the_limit_of_a_server_started_by_hand_is_a_proxy_on_its_own_host(monkeypatch, by_hand, address, why):
+    """Known and documented: without the flag, a proxy on the same host lets a forged entry through.
+
+    The web server believes 127.0.0.1 by default, skips the proxy's own entry
+    and hands Nyctr the one to its left as the peer. Nyctr cannot see that it
+    was rewritten. Started with the image's flags, the same request is read
+    right: the entry the proxy wrote.
+    """
+    monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    with served(demo_app("127.0.0.1"), "127.0.0.1", by_hand=by_hand) as client:
+        signin(client)
+        told = client.get("/api/me/address", headers={"X-Forwarded-For": f"{FORGED}, 127.0.0.1"}).json()
+        assert (told["address"], told["why"]) == (address, why)
 
 
 @pytest.mark.parametrize(("listed", "hops", "peer_address", "forwarded", "expected"), [
@@ -235,10 +255,12 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
         live_signin(client, LIVE_ADMIN)
         assert client.get("/api/me/address", headers={"X-Forwarded-For": f"{FORGED}, {MEMBER}"}).json() == {
             "address": MEMBER, "peer": PROXY, "via_proxy": True, "why": "forwarded", "entry": 1, "entries": 2,
-            "unlisted": None, "proxy_hops": 1, "old_name": False}
+            "unlisted": None, "address_is_proxy": False, "proxy_hops": 1,
+            "old_name": False}
         assert client.get("/api/me/address").json() == {
             "address": None, "peer": PROXY, "via_proxy": True, "why": "missing", "entry": None, "entries": 0,
-            "unlisted": None, "proxy_hops": 1, "old_name": False}
+            "unlisted": None, "address_is_proxy": False, "proxy_hops": 1,
+            "old_name": False}
     with served(app, base_url="http://portal.example.test") as portal:
         for who in (LIVE_MEMBER, LIVE_ADMIN):
             live_signin(portal, who)
@@ -247,7 +269,8 @@ def test_only_an_administrator_on_the_console_address_is_told_the_address_nyctr_
         live_signin(direct, LIVE_ADMIN)
         assert direct.get("/api/me/address", headers={"X-Forwarded-For": MEMBER}).json() == {
             "address": ATTACKER, "peer": ATTACKER, "via_proxy": False, "why": "peer", "entry": None,
-            "entries": 0, "unlisted": None, "proxy_hops": 1, "old_name": False}
+            "entries": 0, "unlisted": None, "address_is_proxy": False, "proxy_hops": 1,
+            "old_name": False}
 
 
 def test_the_administrator_is_told_which_entry_is_not_a_listed_proxy():
@@ -256,7 +279,7 @@ def test_the_administrator_is_told_which_entry_is_not_a_listed_proxy():
         signin(client)
         assert client.get("/api/me/address", headers={"X-Forwarded-For": f"{MEMBER}, {EDGE}"}).json() == {
             "address": None, "peer": PROXY, "via_proxy": True, "why": "unlisted", "entry": 1, "entries": 2,
-            "unlisted": EDGE, "proxy_hops": 2, "old_name": False}
+            "unlisted": EDGE, "address_is_proxy": False, "proxy_hops": 2, "old_name": False}
 
 
 def test_the_administrator_is_told_when_the_list_is_still_under_the_old_name():

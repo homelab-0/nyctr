@@ -23,6 +23,7 @@ const seen: AddressSeen = {
   entry: 1,
   entries: 2,
   unlisted: null,
+  address_is_proxy: false,
   proxy_hops: 1,
   old_name: false,
 };
@@ -343,9 +344,35 @@ describe('the address Nyctr sees for you, in Setup', () => {
     async () => {
       check({ ...seen, address: null, why: 'missing', entry: null, entries: 0 });
       expect(await shown('Nyctr cannot tell your address')).toBeDefined();
-      expect(screen.getByText(/but it passed no address on/)).toBeDefined();
+      // The line that states the address never holds the proxy's, and the sentence under it
+      // names the proxy only as where the connection came from.
+      expect(document.querySelector('p.rule')?.textContent).toBe('Nyctr cannot tell your address');
+      expect(
+        screen.getByText(
+          'The connection came from 10.42.0.10, which is on your list of proxies, but it passed no address on. Set the proxy to add the address it saw (X-Forwarded-For).',
+        ),
+      ).toBeDefined();
       expect(screen.getByText(/counted together, and no device is recognised/)).toBeDefined();
-      expect(screen.queryByText('10.42.0.10')).toBeNull();
+      expect(screen.queryByText(/hiding your address/)).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'says to raise the number of proxies counted when the address shown is on the list of proxies',
+    async () => {
+      check({ ...seen, address: '10.42.0.11', address_is_proxy: true });
+      expect(await shown('10.42.0.11')).toBeDefined();
+      expect(
+        screen.getByText(
+          /^This address is on your list of proxies\. If it is one of your proxies and not your device, something in front of your proxy is hiding your address, or raise the number of proxies Nyctr counts\./,
+        ),
+      ).toBeDefined();
+      cleanup();
+      check(seen);
+      expect(await shown('198.51.100.21')).toBeDefined();
+      expect(screen.queryByText(/raise the number of proxies Nyctr counts/)).toBeNull();
+      expect(screen.getByText(/^If this is a router or load balancer/)).toBeDefined();
     },
     patient,
   );
@@ -388,6 +415,12 @@ describe('the address Nyctr sees for you, in Setup', () => {
       say({ why: 'unlisted', address: null, entry: 1, unlisted: '10.42.0.11', proxy_hops: 2 }),
     ).toMatch(
       /but 10\.42\.0\.11, at position 1 from the right of what it passed on, is not on the list\. Nyctr is set to count 2 proxies, and every one of them must be on the list/,
+    );
+    expect(say({ why: 'zone', address: null, peer: 'fe80::1%eth0', via_proxy: false })).toMatch(
+      /^The connection came from fe80::1%eth0, an address that only works on one network link/,
+    );
+    expect(say({ why: 'hops', address: null, proxy_hops: 0 })).toMatch(
+      /Nyctr is set to count 0 proxies\. The number must be 1 or more\.$/,
     );
     expect(say({ why: 'malformed', entry: 1 })).toMatch(
       /position 1 from the right is not an address/,

@@ -499,6 +499,10 @@ export function addressText(seen: AddressSeen): string {
       return `${proxy}, but it passed on ${seen.entries} and Nyctr is set to read number ${seen.proxy_hops} from the right. Lower the number of proxies Nyctr counts, or check that each proxy adds the address it saw.`;
     case 'unlisted':
       return `${proxy}, but ${seen.unlisted}, at position ${seen.entry} from the right of what it passed on, is not on the list. Nyctr is set to count ${seen.proxy_hops} proxies, and every one of them must be on the list. If ${seen.unlisted} is one of your proxies, add it. If it is your own device, you reached Nyctr without passing all of them, and Nyctr gives no address for that.`;
+    case 'zone':
+      return `The connection came from ${seen.peer}, an address that only works on one network link (the part after % names the link). Nyctr cannot match such an address to your list of proxies or to a device, so it gives none. Reach Nyctr, or have your proxy reach it, over an ordinary address.`;
+    case 'hops':
+      return `${proxy}, but Nyctr is set to count ${seen.proxy_hops} proxies. The number must be 1 or more.`;
     case 'malformed':
       return `${proxy}, but what it passed on at position ${seen.entry} from the right is not an address.`;
     default:
@@ -536,9 +540,11 @@ function AddressPanel() {
           <p className="rule mono">{seen.data.address || 'Nyctr cannot tell your address'}</p>
           <p>{addressText(seen.data)}</p>
           <p className="aside">
-            {seen.data.address
-              ? 'If this is a router or load balancer and not your device, something in front of your proxy is hiding your address.'
-              : 'Sign-in attempts from every request like this one are counted together, and no device is recognised.'}{' '}
+            {!seen.data.address
+              ? 'Sign-in attempts from every request like this one are counted together, and no device is recognised.'
+              : seen.data.address_is_proxy
+                ? 'This address is on your list of proxies. If it is one of your proxies and not your device, something in front of your proxy is hiding your address, or raise the number of proxies Nyctr counts.'
+                : 'If this is a router or load balancer and not your device, something in front of your proxy is hiding your address.'}{' '}
             Set with <span className="mono">NYCTR_TRUSTED_PROXIES</span> (your proxies) and{' '}
             <span className="mono">NYCTR_PROXY_HOPS</span> (how many a request passes, now{' '}
             {seen.data.proxy_hops}).

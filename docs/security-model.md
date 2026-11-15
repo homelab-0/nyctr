@@ -83,9 +83,13 @@ session can do, as before.
 ## Where a request came from
 
 Nyctr works out a request's address in one place (`nyctr/peer.py`), and the web
-server's own forwarded-header handling is off. The list of proxies is kept under
-a name the web server does not read (`NYCTR_TRUSTED_PROXIES`), so that handling
-believes only itself even if it is switched on by mistake. Nyctr reads no header
+server's own forwarded-header handling is off in the image, the chart, Compose
+and the documented commands. The list of proxies is kept under a name the web
+server does not read (`NYCTR_TRUSTED_PROXIES`), so a server started by hand with
+that handling left on believes only `127.0.0.1`. That is not enough when a proxy
+runs on the server's own host: the web server then rewrites the peer to an entry
+the client chose, and Nyctr cannot see that it did. A list that covers every
+address is refused at start. Nyctr reads no header
 about the scheme. A peer that is not one of the
 operator's listed proxies is the client and its headers are ignored. Behind a
 listed proxy Nyctr reads `X-Forwarded-For` from the right and takes the entry

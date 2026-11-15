@@ -19,7 +19,7 @@ from, never of who sent it.
 
 from dataclasses import dataclass
 from functools import lru_cache
-from ipaddress import ip_address, ip_network
+from ipaddress import collapse_addresses, ip_address, ip_network
 
 from starlette.requests import Request
 
@@ -29,10 +29,13 @@ class Seen:
     """What one request showed: the address, and how it was worked out.
 
     `why` is `peer` (the peer is the client), `forwarded` (a listed proxy's entry
-    was used), or the reason there is no address: `no_peer`, `missing`, `short`
-    (fewer entries than hops), `malformed`, or `unlisted` (an entry between the
-    peer and the one to read is not a listed proxy; `unlisted` holds it).
-    `entry` counts from the right and names the entry read or the one refused.
+    was used), or the reason there is no address: `no_peer`, `zone` (the peer
+    is a link-local address with a zone, which matches no list and no device),
+    `missing`, `short` (fewer entries than hops), `hops` (a hop count below
+    one), `malformed`, or `unlisted` (an entry between the peer and the one to
+    read is not a listed proxy; `unlisted` holds it). `entry` counts from the
+    right and names the entry read or the one refused. `address_is_proxy` says
+    the address read is itself on the list: too few hops are counted.
     """
     address: str | None
     peer: str | None
@@ -41,6 +44,7 @@ class Seen:
     entry: int | None = None
     entries: int = 0
     unlisted: str | None = None
+    address_is_proxy: bool = False
 
 
 @lru_cache(maxsize=16)
@@ -48,13 +52,18 @@ def proxies(listed: str) -> tuple:
     """Read the operator's list of proxies: addresses and ranges, comma separated.
 
     Raises ValueError for anything else, so a wildcard or a hostname stops the
-    server instead of being read as "believe everyone" or "believe nobody".
+    server instead of being read as "believe everyone" or "believe nobody". A
+    list whose ranges together cover every address of a family is the wildcard
+    written another way, and is refused in the words the chart uses.
     """
     try:
-        return tuple(ip_network(item.strip(), strict=False) for item in listed.split(",") if item.strip())
+        networks = tuple(ip_network(item.strip(), strict=False) for item in listed.split(",") if item.strip())
     except ValueError:
-        raise ValueError("The list of proxies (NYCTR_TRUSTED_PROXIES) accepts only IP addresses and ranges, "
-                         "separated by commas") from None
+        networks = None
+    if networks is None or any(merged.prefixlen == 0 for family in (4, 6)
+                               for merged in collapse_addresses(x for x in networks if x.version == family)):
+        raise ValueError("NYCTR_TRUSTED_PROXIES must contain only trusted proxy IP addresses or bounded ranges.")
+    return networks
 
 
 def _ip(text: str):
@@ -93,14 +102,19 @@ def seen(request: Request) -> Seen:
     """Work out the address of this request and say how, for the sign-in limit and the operator's check."""
     settings = request.app.state.settings
     client = request.scope.get("client")
-    peer = _ip(str(client[0])) if client else None
+    host = str(client[0]) if client else ""
+    peer = _ip(host)
     if peer is None:
-        return Seen(None, None, False, "no_peer")
+        zone = "%" in host and _ip(host.partition("%")[0]) is not None
+        return Seen(None, host if zone else None, False, "zone" if zone else "no_peer")
     if not _listed(peer, settings):
         return Seen(str(peer), str(peer), False, "peer")
     # Several header lines are one list, in the order they arrived: the proxy's entry is still last.
     entries = [x for line in request.headers.getlist("x-forwarded-for") for x in line.split(",")]
     hops = settings.proxy_hops
+    if hops < 1:
+        # The settings refuse this. Counting from the right, 0 would be the leftmost entry: never read it.
+        return Seen(None, str(peer), True, "hops")
     if not any(x.strip() for x in entries):
         return Seen(None, str(peer), True, "missing")
     if len(entries) < hops:
@@ -114,7 +128,7 @@ def seen(request: Request) -> Seen:
                         entries=len(entries), unlisted=str(proxy) if proxy else None)
     address = _entry(entries[-hops])
     return Seen(str(address) if address else None, str(peer), True, "forwarded" if address else "malformed",
-                entry=hops, entries=len(entries))
+                entry=hops, entries=len(entries), address_is_proxy=bool(address and _listed(address, settings)))
 
 
 def client_address(request: Request) -> str | None:
