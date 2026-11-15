@@ -33,6 +33,10 @@ const WORDS: Record<string, string> = {
   'device.assignment_changed': 'Changed who a device belongs to',
   'device.link_changed': 'Linked a DNS device label',
   'collection.schedule_changed': 'Changed the collection schedule',
+  'presence.tied': 'Signed in on a device and was tied to it',
+  'presence.conflict': 'Signed in on a device and was not tied to it',
+  'presence.ended': 'Ended a tie between a person and a device',
+  'presence.setting_changed': 'Changed whether devices are recognised at sign-in',
   'model.changed': 'Changed the model connection',
   'model.tested': 'Tested the model',
   'suggestion.dismissed': 'Dismissed a suggestion',
@@ -188,11 +192,32 @@ function serverOf(address: unknown) {
   }
 }
 
+/** Why a sign-in tie ended when no person ended that one tie. The server records a code. */
+const TIE_ENDED: Record<string, string> = {
+  assignment: 'an administrator changed who the device is for',
+  switched_off: 'recognition was switched off',
+  lapsed: 'nobody signed in on it for 30 days',
+  device_removed: 'the device is no longer in the inventory',
+};
+
 /** Renders the few audit details worth reading, never raw provider text. */
-function summary(event: AuditEvent) {
+function summary(event: AuditEvent, people: Map<string, string>) {
   const d = event.details || {};
   const parts: string[] = [];
   if (typeof d.domain === 'string') parts.push(d.domain);
+  // A sign-in tie: which device, and for an ending whose tie it was and why. The record keeps the
+  // device's name as it was, so the row still says it after the device has gone.
+  if (event.action.startsWith('presence.') && typeof d.device_name === 'string') {
+    const device = d.device_name || 'a device';
+    const whose = typeof d.user_id === 'string' ? people.get(d.user_id) : undefined;
+    parts.push(
+      event.action === 'presence.ended'
+        ? `${whose ? `${whose}'s` : "a person's"} tie to ${device}`
+        : device,
+    );
+    if (typeof d.because === 'string')
+      parts.push(TIE_ENDED[d.because] || 'for a reason this version of the page cannot describe');
+  }
   // An entry ended by hand was changed by a person at the source, not by Nyctr: the reason says so.
   const happened = d.reason === 'removed_by_hand' ? undefined : outcome(event);
   if (happened) parts.push(happened);
@@ -272,7 +297,7 @@ export default function Activity() {
   const rows = useMemo(() => {
     const needle = text.trim().toLowerCase();
     return (audit.data || []).filter((event) => {
-      const line = `${what(event, sourceNames)} ${names.get(event.actor_id) || ''} ${summary(event)} ${event.target_id || ''}`;
+      const line = `${what(event, sourceNames)} ${names.get(event.actor_id) || ''} ${summary(event, names)} ${event.target_id || ''}`;
       return !needle || line.toLowerCase().includes(needle);
     });
   }, [audit.data, text, names, sourceNames]);
@@ -331,7 +356,7 @@ export default function Activity() {
                       )}
                     </td>
                     <th>{what(event, sourceNames)}</th>
-                    <td className="muted">{summary(event)}</td>
+                    <td className="muted">{summary(event, names)}</td>
                   </tr>
                 ))}
               </tbody>

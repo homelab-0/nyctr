@@ -377,3 +377,75 @@ describe('Activity when source names are unavailable', () => {
     expect(screen.queryByText('Source names could not be loaded.')).toBeNull();
   });
 });
+
+describe('Activity rows about a sign-in tie', () => {
+  it('says whose tie ended, on which device and why, and never that a conflict was a tie', async () => {
+    const tie = (
+      id: string,
+      action: string,
+      details: Record<string, unknown>,
+      actor = 'admin',
+    ) => ({
+      ...event(id, action, details),
+      actor_id: actor as string | null,
+      target_id: 'device-1',
+    });
+    mockApi({
+      'GET /audit': [
+        tie('a', 'presence.conflict', { device_name: 'Workstation' }, 'kim'),
+        tie('b', 'presence.tied', { device_name: 'Front desk tablet' }, 'kim'),
+        tie('c', 'presence.ended', {
+          user_id: 'kim',
+          device_name: 'Front desk tablet',
+          because: 'switched_off',
+        }),
+        tie('d', 'presence.ended', {
+          user_id: 'sam',
+          device_name: 'Laptop',
+          because: 'switched_off',
+        }),
+        tie('e', 'presence.ended', { user_id: 'kim', device_name: 'Phone', because: 'assignment' }),
+        tie('f', 'presence.ended', { user_id: 'sam', device_name: 'Old phone', because: 'lapsed' }),
+        tie('g', 'presence.ended', {
+          user_id: 'gone',
+          device_name: 'Printer',
+          because: 'device_removed',
+        }),
+        tie('h', 'presence.ended', { user_id: 'kim', device_name: 'Tablet' }, 'kim'),
+        tie('i', 'presence.ended', { user_id: 'sam', device_name: 'Radio', because: 'new_code' }),
+      ],
+      'GET /users': [
+        { id: 'admin', name: 'Alex' },
+        { id: 'kim', name: 'Kim' },
+        { id: 'sam', name: 'Sam' },
+      ],
+      'GET /integrations': [],
+    });
+    render(<Activity />);
+    const conflict = (
+      await screen.findByText('Signed in on a device and was not tied to it')
+    ).closest('tr')!;
+    expect(conflict.textContent).toContain('Workstation');
+    expect(document.body.textContent).not.toMatch(/tied to someone else/);
+    expect(
+      screen.getByText('Signed in on a device and was tied to it').closest('tr')!.textContent,
+    ).toContain('Front desk tablet');
+    const ended = screen
+      .getAllByText('Ended a tie between a person and a device')
+      .map((cell) => cell.closest('tr')!.querySelector('td:last-child')!.textContent);
+    expect(ended).toEqual([
+      "Kim's tie to Front desk tablet · recognition was switched off",
+      "Sam's tie to Laptop · recognition was switched off",
+      "Kim's tie to Phone · an administrator changed who the device is for",
+      "Sam's tie to Old phone · nobody signed in on it for 30 days",
+      "a person's tie to Printer · the device is no longer in the inventory",
+      "Kim's tie to Tablet",
+      "Sam's tie to Radio · for a reason this version of the page cannot describe",
+    ]);
+    // The search finds a row by the person or the device it is about.
+    fireEvent.change(screen.getByPlaceholderText('Find an action, person or address'), {
+      target: { value: 'old phone' },
+    });
+    expect(screen.getAllByText('Ended a tie between a person and a device')).toHaveLength(1);
+  });
+});

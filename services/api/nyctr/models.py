@@ -148,6 +148,32 @@ class DeviceGrant(Base):
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class DevicePresence(Base):
+    """A signed-in person was on a device at a time: a tie, or a conflict where no tie was made.
+
+    Never an assignment: it changes no device's owner or classification. A tie lets
+    its person see that one device from `reach_from` on, until it is ended or 30
+    days pass after `last_at`. `basis` says whether the gateway was read (`live`)
+    or the stored inventory stood in (`stored`); `session` marks the sign-in that
+    last confirmed it. The device is named, not referenced, so a device that
+    leaves the inventory leaves a tie that shows nothing.
+    """
+    __tablename__ = "device_presence"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    kind: Mapped[str] = mapped_column(String(16), default="tie")
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    device_id: Mapped[str] = mapped_column(String(255), index=True)
+    address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    basis: Mapped[str] = mapped_column(String(16), default="live")
+    first_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    reach_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    session: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class Observation(Base):
     """Retain a block event until inbox expiry, with explicit attribution and unknown risk support."""
     __tablename__ = "observations"

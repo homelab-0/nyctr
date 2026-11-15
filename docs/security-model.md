@@ -133,6 +133,8 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | --- | --- |
 | Member requests another person's event by ID | Server authorization, including event-time ownership and current access |
 | Shared upstream resolver is mistaken for a person | Unattributed events remain administrator-only |
+| Signing in on a device shows a member what someone else did on it | Off until an administrator switches it on. A tie is made only for a signed-in person, on the one device the gateway says holds the request's address, never on infrastructure, on another person's device or on a device another person is tied to unless it is shared. It reaches back a set time before the first sign-in (two hours unless set otherwise, 24 at most) and assumes the person signing in was the one using the device in that time, but never past the last time an administrator said whose the device is, nor, on a device that is not shared, past the end of another person's tie on it. That is the one place a member sees events from before Nyctr knew who was on the device. When the gateway does not answer, the stored inventory stands in while the last collection is under 15 minutes old; an address can change hands in that time, so such a tie could name the wrong device, and it therefore reaches back to nothing before its own first sign-in. An administrator finds these ties by `basis: stored` in `GET /api/presence`. A client inside a listed proxy range that reaches the server directly can name any address, and is then tied to the device at the address it names |
+| Everyone arrives from one address because a proxy hides theirs | A listed proxy's address is tied to nobody and administrators are told. An address outside every collected network, held by no device or by two, is tied to nobody |
 | A total, a filter count or where a page ends gives away another person's event | The list of blocked lookups applies member rights in the database query, before the page is cut and before anything is counted |
 | Stale block becomes an access grant | Reject stale requests. An approval is refused once the blocked lookup behind it has expired; refusing or noting a request needs no fresh evidence |
 | Provider redirects leak an API key | No redirected credential-bearing requests |
@@ -237,9 +239,49 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
 - The risk score reads only the block reason and the shape of the name. It is
   not a reputation service and must not be presented as one.
 - Device recognition in the member portal matches the connecting address to
-  inventory among devices already assigned to the caller. It does not work
-  through NAT, or through a proxy that is not listed or does not pass the
-  member's LAN address on.
+  inventory among devices the caller may already see. With "Recognise members'
+  devices when they sign in" switched on (Setup, off by default), Nyctr also
+  asks the gateway which device holds the address and ties the signed-in person
+  to it: a record of its own that never changes whose a device is, ends 30 days
+  after the last sign-in from it or when the member or an administrator ends
+  it, and is kept 90 days after that. When an administrator changes whose a
+  device is or who shares it, every tie on it held by anyone the new
+  assignment does not name ends at once. A device that is dropped after it
+  has left its source, or whose source is removed, takes its ties with it.
+  Every ending is audited with whose tie it was: by the member, by an
+  administrator, by an assignment, by switching recognition off, by the 30
+  days running out and by the device going. The worker keeps these records,
+  so they are closed and deleted on time with nobody opening a page. A new
+  tie reaches back no further than the last time an administrator set whose
+  the device is (saved again unchanged counts too) and, on a device that is
+  not shared, no further than the end of the last tie another person held on
+  it. A tie that an assignment keeps starts again at that assignment, so it
+  shows nothing the new assignment does not cover. Making a tie and switching
+  recognition off take one lock on the stored setting, so no tie is committed
+  after the switch. When the gateway does not answer, Nyctr falls back to
+  the stored inventory while the last collection is under 15 minutes old.
+  An address can change hands in that time, and the tie would then name the
+  wrong device. Such a tie has `basis: stored` in `GET /api/presence`, which
+  is how an administrator finds it, and it does not reach back before its
+  own first sign-in, so a wrong match shows nothing from before. Only a
+  source whose integration declares the lookup takes part at all, so by
+  decision a range that a source without the lookup also holds does not cast
+  doubt on a tie; that has to be decided again when a second integration
+  stores ranges, because nothing tells one network described twice from
+  another network with the same range. A tie or conflict record holds the address the request came from
+  and the device's hardware address. Only administrators are shown them, and
+  they go when the record does, 90 days after a tie ends or after a
+  conflict's last attempt. Neither works through NAT, or through a
+  proxy that is not listed or does not pass the member's LAN address on. A
+  router or address translator that is not a listed proxy and is itself in the
+  inventory would be tied to the first person who signs in through it: check
+  the address Nyctr sees for you before switching recognition on. A request
+  that reaches Nyctr over IPv6 is never tied, by rule and whatever ranges a
+  source collects, and the portal tells the member so. An address is looked
+  up only in the site whose network holds it; where two sites, or two
+  sources, use the same range, nothing says which one a request came from
+  and nobody is tied. The gateway lookup has been run only against
+  fabricated answers.
 - Audit export and tamper-evidence. A database audit table is not an immutable log.
 - Explicit schema upgrade and rollback testing beyond the initial schema.
 - Image signing/SBOM publication, pinned release images and upgrade policy.

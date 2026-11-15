@@ -12,12 +12,12 @@ from datetime import datetime
 from functools import lru_cache
 
 from fastapi import HTTPException
-from sqlalchemy import Text, and_, cast, exists, func, or_, select, true
+from sqlalchemy import Text, and_, cast, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from . import risk
-from .deps import device_permitted, observation_json, observation_permitted
-from .models import DeviceGrant, Observation, Resource, utc, utcnow
+from .deps import observation_json, observation_permitted, observations_permitted
+from .models import Observation, utc, utcnow
 
 # A stored lookup is about 650 bytes as JSON, so 200 rows stay near 130 KB and are a
 # table a browser draws at once; most of a day's lookups are never scrolled to.
@@ -29,21 +29,11 @@ def visible(db: Session, user) -> list:
     """Return the query conditions for the fresh lookups this caller may inspect.
 
     Administrators may inspect every fresh lookup. A member may inspect a lookup
-    only when it is assigned to a device they may use now and a grant of theirs
-    covered that device when the lookup happened: the same rule as
-    `deps.observation_permitted`, stated as conditions so it applies before paging.
+    only when `deps.observation_permitted` lets them: that rule, stated by `deps`
+    as conditions so it applies before paging.
     """
     fresh = [Observation.expires_at > utcnow()]
-    if user.role == "admin":
-        return fresh
-    granted = select(DeviceGrant.device_id).where(DeviceGrant.user_id == user.id)
-    devices = [row.id for row in db.scalars(select(Resource).where(Resource.id.in_(granted)))
-               if device_permitted(db, row, user)]
-    at_the_time = exists().where(
-        DeviceGrant.device_id == Observation.device_id, DeviceGrant.user_id == user.id,
-        DeviceGrant.valid_from <= Observation.observed_at,
-        or_(DeviceGrant.valid_until.is_(None), DeviceGrant.valid_until > Observation.observed_at))
-    return [*fresh, Observation.attribution == "assigned", Observation.device_id.in_(devices), at_the_time]
+    return fresh if user.role == "admin" else [*fresh, *observations_permitted(db, user)]
 
 
 @lru_cache(maxsize=4096)

@@ -190,7 +190,8 @@ def test_suggestions_come_from_rule_openings_and_need_an_administrator(client, a
 def test_this_device_is_recognised_only_among_the_callers_devices(client, app, member_headers):
     """Recognition returns a device the member already holds; an address never grants a new one."""
     seen = client.get("/api/me/device").json()
-    assert seen == {"device_id": "laptop-jamie", "name": "Jamie's MacBook", "simulated": True}
+    assert seen == {"device_id": "laptop-jamie", "name": "Jamie's MacBook", "simulated": True, "how": "assigned",
+                    "reason": None, "message": None}
     found = client.post("/api/blocks/find", headers=member_headers, json={"domain": "proofing-studio.example"}).json()
     assert [x["id"] for x in found] == ["block-gallery"]
     hidden = client.post("/api/blocks/find", headers=member_headers, json={"domain": "downloads.filemirror.example"})
@@ -206,7 +207,9 @@ def test_live_address_match_requires_an_existing_grant(tmp_path):
         assert client.get("/api/me/device").json()["device_id"] == "unifi:client:laptop"
     with TestClient(app, client=("10.0.0.77", 50000)) as other:
         live_signin(other, LIVE_MEMBER)
-        assert other.get("/api/me/device").json() == {"device_id": None, "name": None, "simulated": False}
+        seen = other.get("/api/me/device").json()
+        assert seen == {"device_id": None, "name": None, "simulated": False, "how": None, "reason": "off",
+                        "message": "Nyctr is not set to recognise devices when people sign in."}
 
 
 def test_live_without_write_permission_never_claims_access(tmp_path):

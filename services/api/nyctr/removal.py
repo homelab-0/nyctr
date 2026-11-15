@@ -33,6 +33,7 @@ from .models import (
     utc,
     utcnow,
 )
+from .presence import gone as ties_gone
 from .retention import is_missing
 
 
@@ -130,7 +131,7 @@ def held_message(held: dict) -> str | None:
             "Nothing at the source itself is changed by removing it.")
 
 
-def remove(db, integration: Integration) -> None:
+def remove(db, integration: Integration, by: str | None = None) -> None:
     """Delete the source and what was collected from it. The caller holds its row and item locks and commits."""
     iid = integration.id
     db.execute(delete(Observation).where(Observation.integration_id == iid))
@@ -139,17 +140,20 @@ def remove(db, integration: Integration) -> None:
     # What remains active is not Nyctr's at the source (refused otherwise), so it ends here with no request.
     db.execute(update(Lease).where(Lease.integration_id == iid, Lease.status == "active").values(
         status="ended", ended_reason="source_removed", ended_at=utcnow()))
-    forget(db, list(db.scalars(select(Resource.id).where(Resource.integration_id == iid))))
+    forget(db, list(db.scalars(select(Resource.id).where(Resource.integration_id == iid))), by)
     db.delete(integration)
 
 
-def forget(db, ids: list[str]) -> None:
+def forget(db, ids: list[str], by: str | None = None) -> None:
     """Delete these items and what hangs on them.
 
     Used when a source is removed and when items that have left it are dropped. The caller holds
     the items' locks. Lookups tied to one of these devices lose that tie: it rested on the item.
+    A sign-in tie on one of them ends on record, under `by` or under nobody's name, and goes too.
     """
     gone = set(ids)
+    # Once for all of them, before the lots below: the ties are taken in one order, whatever lot their device is in.
+    ties_gone(db, ids, by)
     for start in range(0, len(ids), 500):
         items = ids[start:start + 500]
         db.execute(delete(DeviceGrant).where(DeviceGrant.device_id.in_(items)))

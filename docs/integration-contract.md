@@ -33,10 +33,12 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
 | `allow_domain`, `disallow_domain`, `issue_pass`, `end_pass`, `guest_access` | Actions, present exactly for the write capabilities declared |
 | `domain_listed` | Optional read for a source that declares `dns.exceptions`: whether an address is already allowed there, switched on or off. With it, Nyctr removes by itself what a failed or interrupted opening left behind. Without it, Nyctr removes nothing after such an opening and asks an administrator to check |
+| `client_at(integration_id, config, secret, address, site)` | The read behind `devices.lookup`: the clients of one site that hold that address now, as `[{"id", "mac"}]`, where `id` is the resource id collection gives that client. `site` is the source's own id of the site whose network holds the address (the `source_id` of the site item its network was collected under), or `None` where there is none; an adapter whose source has sites reads that site's list only and names nobody without one, because sites often use the same range. Read only, paced like collection, and compared with `core.plain_address`, never as text |
 | `add_sent` on a raised error | Optional. `allow_domain` sets it on the error it raises after its own read found the address absent: `True` if its add was sent (whatever the source then answered, and also when it was cut off or stopped while the add was going, where it cannot tell), `False` if nothing was sent (it failed before its add, no connection was opened, or it was refused before sending): Nyctr then keeps no record of an entry of its own. With `True`, Nyctr treats the entry as possibly there and, if it is, its own |
 
 The registry refuses to start if a provider declares a write capability without
-its actions, or actions without the capability.
+its actions, or actions without the capability; `devices.lookup` and `client_at`
+go together the same way.
 
 ## Logos
 
@@ -68,6 +70,7 @@ both.
 | `guest.passes` | Issuing and ending guest passes | Yes |
 | `guest.control` | Letting a waiting guest on, cutting one off, locking one out | Yes |
 | `compute` | Hosts and workloads, and inferred links from them to network devices | No |
+| `devices.lookup` | Recognising the device a member signed in on: which client holds an address right now | No |
 
 A feature works when a connected source offers its capability. When none does,
 the console says so instead of failing: the access rule reports that no connected
@@ -76,7 +79,7 @@ source can open an address, and a request about a block from a source without
 
 | Integration | Provides |
 | --- | --- |
-| UniFi Network | `inventory`, `guest.devices`, `guest.passes`, `guest.control` |
+| UniFi Network | `inventory`, `guest.devices`, `guest.passes`, `guest.control`, `devices.lookup` |
 | NextDNS | `dns.blocks`, `dns.exceptions` |
 | Proxmox VE (experimental) | `compute` |
 | Pi-hole (experimental) | `dns.blocks` |

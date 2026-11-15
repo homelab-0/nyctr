@@ -58,6 +58,13 @@ interface text in plain words a non-technical member can read.
   traffic are distinct evidence types.
 - Members must pass API authorization against event-time identity and current
   device access. A network address or DNS profile alone is not user identity.
+  One stated exception: a sign-in tie (`nyctr/presence.py`) reaches back a set
+  time before the first sign-in, two hours unless an administrator sets
+  another, and assumes the person signing in was the one using the device in
+  that time. It never reaches past the last time an administrator set whose
+  the device is, nor, on a device that is not shared, past the end of another
+  person's tie on it. Only `nyctr/deps.py` decides which device a member may
+  see.
 - Only `nyctr/peer.py` says which address a request came from: the peer, or
   behind a listed proxy the `X-Forwarded-For` entry that proxy wrote, counted
   from the right by `NYCTR_PROXY_HOPS`, with every entry to its right a listed

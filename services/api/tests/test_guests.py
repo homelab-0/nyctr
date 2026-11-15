@@ -367,7 +367,7 @@ def test_nothing_is_served_to_a_device_that_has_not_signed_in(app, client):
         if not path.startswith("/api/") or path in open_routes or signing_in or path == "/api/{path}":
             continue
         url = path
-        for name in ("integration_id", "request_id", "device_id", "lease_id", "pass_id", "finding_id", "token"):
+        for name in ("integration_id", "request_id", "device_id", "lease_id", "pass_id", "finding_id", "tie_id", "token"):
             url = url.replace("{" + name + "}", "x")
         assert "{" not in url, f"Add a placeholder for {path}"
         for method in operations:

@@ -440,6 +440,28 @@ async def collect_unifi(integration_id: str, config: dict[str, Any], api_key: st
     return snapshot
 
 
+async def client_at(integration_id: str, config: dict[str, Any], api_key: str, address: str,
+                    site: str | None) -> list[dict[str, Any]]:
+    """Say which connected clients of one site hold an address now: its documented client list, read and nothing else.
+
+    Sites often use the same private range, so only the site whose network holds the address
+    is read, never every site's list. No site named, or one other than the site this source
+    is set to read, names nobody and sends nothing. The list is read whole and compared here,
+    as addresses, so no spelling of an address is left to the source to match. Paced like
+    every other read.
+    """
+    wanted, found = core.plain_address(address), []
+    if wanted is None or not site or config.get("site_id") not in (None, "", site):
+        return found
+    async with core.make_http_client(api_key) as client:
+        reader = ReadClient(client, config["base_url"], pace(config["base_url"]))
+        for row in await offset_pages(reader, f"/v1/sites/{source_id(site)}/clients"):
+            if core.plain_address(row.get("ipAddress")) == wanted:
+                found.append({"id": core.object_id(integration_id, "client", row.get("id")),
+                              "mac": row["macAddress"] if isinstance(row.get("macAddress"), str) else None})
+    return found
+
+
 PROVIDER = Provider(
     id=ID, name="UniFi Network", letter="U", tone="blue", logo="unifi.png",
     summary="Gateways, switches, access points, clients, networks, firewall rules and guest Wi-Fi.",
@@ -451,7 +473,7 @@ PROVIDER = Provider(
                     "", "text", False),
     ),
     reads=READS,
-    provides=frozenset({"inventory", "guest.devices", "guest.passes", "guest.control"}),
+    provides=frozenset({"inventory", "guest.devices", "guest.passes", "guest.control", "devices.lookup"}),
     limitations=(
         ("firewall_events:read", "Observed firewall events",
          "This adapter reads configured policies; a UniFi firewall-event receiver is not implemented."),
@@ -507,5 +529,5 @@ PROVIDER = Provider(
         "unifi_vouchers_unavailable", "unifi_wifi_unavailable"}),
     validate=validate, collect=collect_unifi, scope=lambda config: config.get("site_id"),
     issue_pass=actions.unifi_create_voucher, end_pass=actions.unifi_delete_voucher,
-    guest_access=actions.unifi_set_guest_access,
+    guest_access=actions.unifi_set_guest_access, client_at=client_at,
 )

@@ -239,7 +239,7 @@ def test_a_device_is_recognised_by_the_address_the_listed_proxy_wrote(tmp_path):
         assert client.get("/api/me/device", headers=laptop).json()["device_id"] == "unifi:client:laptop"
         for forged in ("10.0.0.9, 10.0.0.77", "10.0.0.9, garbage", ""):
             seen = client.get("/api/me/device", headers={"X-Forwarded-For": forged}).json()
-            assert seen == {"device_id": None, "name": None, "simulated": False}
+            assert (seen["device_id"], seen["name"], seen["simulated"], seen["how"]) == (None, None, False, None)
     with served(app, "10.0.0.77") as direct:
         live_signin(direct, LIVE_MEMBER)
         assert direct.get("/api/me/device", headers=laptop).json()["device_id"] is None

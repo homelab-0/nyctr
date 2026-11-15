@@ -76,7 +76,47 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 - `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
   missing, expired or not visible to the caller answers the same 404.
-- `GET /api/me/device` -> `{device_id,name,simulated}`; only among the caller's devices.
+- `GET /api/me/device` -> `{device_id,name,simulated,how,reason,message}`; only among the
+  caller's devices. `how` is `assigned` or `signed_in`. With recognition at sign-in switched on,
+  the first request after signing in ties the caller to the one device the gateway says holds
+  the request's address; when no device is recognised, `reason` is a code and `message` the
+  sentence to show (never whose a device is). A request over IPv6 is refused by rule with the
+  reason `ipv6`, an address that two sites or two sources both use with `two_networks`, and a
+  tie the database was too busy to write with `busy`; none is an error.
+- `GET /api/presence` -> `{items}`: a member's own ties in force; for an administrator every
+  tie and conflict on record, with `enabled` and `reach_back_hours`. An item is
+  `{id,kind,user_id,user_name,device_id,device_name,basis,first_at,last_at,ended_at}`, `kind`
+  being `tie` or `conflict`. An administrator's items also carry `address` (where the request
+  came from) and `mac` (the device's hardware address); a member's never do. Both are deleted
+  with the record, 90 days after a tie ends or after a conflict's last attempt.
+- `PUT /api/presence` with `{enabled,reach_back_hours}` (0 to 24) is admin-only. Switching it
+  off ends every tie; a shorter reach applies to ties already made.
+- `DELETE /api/presence/{id}` ends a tie at once: a member their own, an administrator any.
+  An assignment that changes a device's classification, owner or named people
+  (`PUT /api/devices/{id}/assignment`) also ends, in the same transaction, every tie on it
+  held by anyone it does not name. Each ending writes one `presence.ended` audit record with
+  the device, `user_id` and, unless a person ended that one tie, `because`: `assignment`,
+  `switched_off`, `lapsed` (written by the worker) or `device_removed`. A tie that had lapsed
+  and not yet been recorded when its device went is recorded as `lapsed`, with `ended_at`.
+  `ended_at` in the list is the recorded ending or, until the worker records it, 30 days after
+  `last_at`.
+  A new tie's reach starts at the later of `first_at` minus `reach_back_hours`, the device's
+  last `device.assignment_changed` record and, unless the device is shared, the end of the
+  last tie another person held on it. A tie made on stored inventory (`basis: stored`) reaches
+  back to nothing: its reach starts at `first_at`. A tie an assignment keeps has its reach moved
+  to that assignment, also when the save changed nothing. The `presence.tied`,
+  `presence.conflict` and `presence.ended` records carry `device_name`. Only a source whose
+  integration declares `devices.lookup` is considered when the address is placed. `PUT
+  /api/presence` and the write of a tie hold the stored setting's row, so no tie commits after
+  recognition is switched off; a sign-in that lost that race answers `off`. A sign-in takes
+  that row before it reads who is tied to the device, so of two people signing in on one
+  unshared device at the same moment one is tied and the other is answered `other_person`.
+  Every writer of a tie (a sign-in, `PUT /api/presence`, an assignment, `DELETE
+  /api/presence/{id}` and the worker's closing of lapsed ties) takes its locks in one order
+  before it reads a tie: the setting's row first and the ties last. A sign-in, an assignment
+  and forgetting take the one device's row in between; `PUT /api/presence` and the worker take
+  no device's row, so they cannot wait on a collection that is being stored while it waits on
+  them. So an assignment saved while the setting is being changed is never overwritten by it.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as
@@ -89,7 +129,8 @@ Block: `{id,device_id,device_name,domain,source,reason,reason_codes,observed_at,
 expires_at,evidence_kind,attribution,risk_score,risk_band,risk_category,
 risk_factors,risk_explanation}`. `risk_score` is computed by `nyctr.risk` from the
 stored reason; unknown risk is null with band `unknown`. `attribution`: assigned,
-inferred, unverified or unattributed. Members see only `assigned`.
+inferred, unverified or unattributed. Members see only `assigned`, on a device assigned to
+them or one they are tied to by signing in on it (`nyctr/deps.py` decides, nowhere else).
 AccessRequest: `{id,block_id,domain,device_name,requester_id,reason,duration_minutes,
 status,created_at,review_note,risk_score,risk_category,risk_factors,decided_by,
 decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
@@ -178,7 +219,11 @@ taking an explicit `allowed` flag derived from `NYCTR_PROVIDER_WRITES`.
 
 ## Schema
 
-Schema version 2. `migrate` upgrades a version-1 database in place by creating
+Schema version 2: `migrate` upgrades a version-1 database in place by creating
 the new tables (settings, leases, device_links, guest_passes, guest_actions,
 sightings, insights) and adding nullable columns to observations and
 access_requests. No existing row is rewritten.
+
+Schema version 3 adds one table, `device_presence` (sign-in ties and conflicts), and alters
+nothing else. The upgrade from version 2 is tested on SQLite and PostgreSQL 17 with every
+stored row compared before and after.
