@@ -89,8 +89,10 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   being `tie` or `conflict`. An administrator's items also carry `address` (where the request
   came from) and `mac` (the device's hardware address); a member's never do. Both are deleted
   with the record, 90 days after a tie ends or after a conflict's last attempt.
-- `PUT /api/presence` with `{enabled,reach_back_hours}` (0 to 24) is admin-only. Switching it
-  off ends every tie; a shorter reach applies to ties already made.
+- `PUT /api/presence` with `{enabled}`, `{reach_back_hours}` (0 to 24) or both is admin-only
+  and answers the setting now in force. A part left out stays as stored, so a page that still
+  shows an older switch cannot put it back by saving the hours. Switching it off ends every
+  tie; a shorter reach applies to ties already made.
 - `DELETE /api/presence/{id}` ends a tie at once: a member their own, an administrator any.
   An assignment that changes a device's classification, owner or named people
   (`PUT /api/devices/{id}/assignment`) also ends, in the same transaction, every tie on it
