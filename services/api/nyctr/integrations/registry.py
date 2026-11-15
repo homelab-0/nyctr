@@ -115,6 +115,10 @@ class Provider:
     not_collected: tuple[str, ...] = ()
     # Text for gap codes the adapter records during a collection: code -> (title, text).
     gap_notes: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # True when the source's log can be read from a given time on. Collection then calls
+    # collect(integration_id, config, secret, since=<time>) to pick up where the last stored read
+    # ended, and the snapshot says what was read in `Snapshot.log`. See docs/integration-contract.md.
+    resumes: bool = False
     # Optional: map one block reason (an identifier or a name) to (category, base score, explanation).
     # A score of None says "this source cannot tell", which the core keeps as unknown. A provider
     # that classifies is the only authority on its own reasons; the core's generic table is not used.

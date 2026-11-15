@@ -5,12 +5,15 @@ analysis refreshes findings and the administrator-written guest rule is checked.
 """
 
 import asyncio
+import json
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 
 from .models import (
     Audit,
@@ -32,6 +35,12 @@ SECRET_REF = re.compile(r"NYCTR_CONNECTOR_SECRET_[A-Z0-9_]{1,100}")
 # at 60 seconds and waiting for a turn at a paced source at 120, so it is never reached in order.
 # It must stay above those two together and inside the five-minute lease on the source.
 BACKSTOP_SECONDS = 210
+# How far before the end of the last stored read a resumed read starts: the five minutes a source's
+# clock may differ from ours (the same allowance a future timestamp gets) and five for its log to settle.
+RESUME_OVERLAP = timedelta(minutes=10)
+# How many identifiers one lookup statement asks about.
+LOOKUP_BATCH = 500
+log = logging.getLogger("nyctr.collection")
 
 
 def parsed_date(value):
@@ -41,6 +50,15 @@ def parsed_date(value):
     return utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
 
 
+def _owners(db, model, ids) -> dict[str, str]:
+    """Say which of these identifiers are stored and for which source, a batch per statement."""
+    ids, found = list(dict.fromkeys(ids)), {}
+    for at in range(0, len(ids), LOOKUP_BATCH):
+        found.update(db.execute(select(model.id, model.integration_id)
+                                .where(model.id.in_(ids[at:at + LOOKUP_BATCH]))).all())
+    return found
+
+
 def apply_snapshot(db, integration, snapshot, settings):
     """Stage a complete integration snapshot while preserving local ownership and event expiry.
 
@@ -48,13 +66,22 @@ def apply_snapshot(db, integration, snapshot, settings):
     Missing inventory is marked stale, relationships are replaced, and replayed
     observations keep their original expiry. The caller commits or rolls back
     the full collection transaction; provider infrastructure is never modified.
+
+    What is stored is read in a fixed number of statements plus one per
+    `LOOKUP_BATCH` new identifiers, never one per item. Returns how many items
+    and how many lookups were new.
     """
     now = utcnow()
     seen = set()
+    # A read that picked up where an earlier one ended names only what the newly read rows name.
+    window_from = parsed_date(snapshot.log["window_from"]) if snapshot.log else None
+    resumed = window_from is not None and parsed_date(snapshot.log["read_from"]) > window_from
+    stored = {row.id: row for row in db.scalars(select(Resource).where(Resource.integration_id == integration.id))}
+    if _owners(db, Resource, [data["id"] for data in snapshot.resources if data["id"] not in stored]):
+        raise ValueError("Resource identity crosses integration boundary")
+    new_items = 0
     for data in snapshot.resources:
-        row = db.get(Resource, data["id"])
-        if row and row.integration_id != integration.id:
-            raise ValueError("Resource identity crosses integration boundary")
+        row = stored.get(data["id"])
         values = {key: data.get(key) for key in ["name", "kind", "provider", "source_id", "site_id", "evidence_kind"]}
         values.update(observed_at=parsed_date(data.get("observed_at", now)), attributes=data.get("attributes", {}))
         if row:
@@ -62,38 +89,65 @@ def apply_snapshot(db, integration, snapshot, settings):
                 setattr(row, key, value)
         else:
             # Importing an endpoint never assigns it to a person.
-            row = Resource(id=data["id"], integration_id=integration.id, classification="unassigned",
-                           owner_id=None, **values)
+            row = stored[data["id"]] = Resource(id=data["id"], integration_id=integration.id,
+                                                classification="unassigned", owner_id=None, **values)
             db.add(row)
+            new_items += 1
         seen.add(data["id"])
     db.flush()
+    # Relationships may join only what this snapshot itself names.
+    named = set(seen)
+    if resumed:
+        # What earlier reads stored from the log still stands while it is inside the window, exactly
+        # as a read of the whole window would find it; older than that, it is missing like anything else.
+        seen |= {row.id for row in stored.values()
+                 if row.evidence_kind == "observed" and utc(row.observed_at) >= window_from}
     # Keep previously seen inventory and ownership but explicitly flag missing sources.
     for row in db.scalars(select(Resource).where(Resource.integration_id == integration.id)):
         if row.id not in seen:
             row.attributes = {**row.attributes, "missing_from_latest_snapshot": True}
-    db.execute(delete(Relationship).where(Relationship.integration_id == integration.id))
+    kept = {}
+    if resumed:
+        again = {data["id"] for data in snapshot.relationships}
+        for row in db.scalars(select(Relationship).where(Relationship.integration_id == integration.id)):
+            if row.id in again or (row.evidence_kind == "observed" and utc(row.observed_at) >= window_from):
+                kept[row.id] = row
+            else:
+                db.delete(row)
+    else:
+        db.execute(delete(Relationship).where(Relationship.integration_id == integration.id))
     for data in snapshot.relationships:
-        if data["source"] not in seen or data["target"] not in seen:
+        if data["source"] not in named or data["target"] not in named:
             raise ValueError("Relationship endpoints are outside this snapshot")
         values = {key: data[key] for key in ["id", "source", "target", "kind", "provider", "evidence_kind"]}
-        db.add(Relationship(integration_id=integration.id, observed_at=parsed_date(data.get("observed_at", now)),
-                            attributes=data.get("attributes", {}), **values))
+        values.update(observed_at=parsed_date(data.get("observed_at", now)), attributes=data.get("attributes", {}))
+        if row := kept.get(data["id"]):
+            for key, value in values.items():
+                setattr(row, key, value)
+        else:
+            kept[data["id"]] = Relationship(integration_id=integration.id, **values)
+            db.add(kept[data["id"]])
     links = {link.source_id: link for link in db.scalars(select(DeviceLink))}
     guests_by_name: dict[str, list[str]] = {}
     for row in db.scalars(select(Resource).where(Resource.kind == "client")):
         if isinstance(row.attributes.get("guest"), dict):
             guests_by_name.setdefault(row.name.casefold(), []).append(row.id)
+    fresh = []
     for data in snapshot.blocks:
         when = parsed_date(data["observed_at"])
         expires = min(parsed_date(data.get("expires_at", when + timedelta(hours=settings.block_retention_hours))),
                       when + timedelta(hours=settings.block_retention_hours))
-        if expires <= now or when > now + timedelta(minutes=5):
-            continue
-        previous = db.get(Observation, data["id"])
-        if previous:
-            if previous.integration_id != integration.id:
+        if expires > now and when <= now + timedelta(minutes=5):
+            fresh.append((data, when, expires))
+    owners = _owners(db, Observation, [data["id"] for data, _when, _expires in fresh])
+    new_lookups = 0
+    for data, when, expires in fresh:
+        if owner := owners.get(data["id"]):
+            if owner != integration.id:
                 raise ValueError("Observation identity crosses integration boundary")
             continue  # Do not extend the lifetime of a replayed event.
+        owners[data["id"]] = integration.id
+        new_lookups += 1
         values = {key: data.get(key) for key in ["id", "device_id", "device_name", "domain", "source", "reason",
                                                 "evidence_kind", "attribution", "risk_score", "risk_explanation",
                                                 "reason_codes", "source_device_id"]}
@@ -115,6 +169,7 @@ def apply_snapshot(db, integration, snapshot, settings):
     integration.last_error = None
     integration.sync_started_at = None
     integration.capabilities = snapshot.capabilities
+    return new_items, new_lookups
 
 
 def _store_passes(db, integration, snapshot, now):
@@ -151,16 +206,22 @@ def _store_passes(db, integration, snapshot, now):
 
 def _record_sightings(db, integration, snapshot, now):
     """Extend or start each guest client's attachment record so movement between access points is kept."""
-    for data in snapshot.resources:
-        if data["kind"] != "client" or not isinstance(data["attributes"].get("guest"), dict):
-            continue
-        uplink = data["attributes"].get("uplink")
-        last = db.scalar(select(Sighting).where(Sighting.device_id == data["id"])
-                         .order_by(Sighting.last_seen.desc()).limit(1))
+    guests = [data for data in snapshot.resources
+              if data["kind"] == "client" and isinstance(data["attributes"].get("guest"), dict)]
+    latest: dict[str, Sighting] = {}
+    for at in range(0, len(guests), LOOKUP_BATCH):
+        newest = (select(Sighting.device_id, func.max(Sighting.last_seen).label("at"))
+                  .where(Sighting.device_id.in_([data["id"] for data in guests[at:at + LOOKUP_BATCH]]))
+                  .group_by(Sighting.device_id).subquery())
+        latest.update((row.device_id, row) for row in db.scalars(select(Sighting).join(newest, and_(
+            Sighting.device_id == newest.c.device_id, Sighting.last_seen == newest.c.at))))
+    for data in guests:
+        uplink, last = data["attributes"].get("uplink"), latest.get(data["id"])
         if last and last.uplink_id == uplink and now - utc(last.last_seen) < timedelta(hours=6):
             last.last_seen = now
         else:
-            db.add(Sighting(device_id=data["id"], uplink_id=uplink, first_seen=now, last_seen=now))
+            latest[data["id"]] = Sighting(device_id=data["id"], uplink_id=uplink, first_seen=now, last_seen=now)
+            db.add(latest[data["id"]])
 
 
 # Failures that may pass by waiting: a broken connection, a timeout, a rate limit.
@@ -200,6 +261,20 @@ def after_collection(db, settings):
     return evaluate_rule(db, settings)
 
 
+def analyse(factory, settings):
+    """Run the analysis in a session and transaction of its own and return who the guest rule cuts off.
+
+    Blocking database work over everything stored: call it through `off_loop`. One analysis runs
+    at a time in a process, so two never add the same new finding.
+    """
+    from .analysis import ONE_AT_A_TIME
+
+    with ONE_AT_A_TIME, factory() as db:
+        due = after_collection(db, settings)
+        db.commit()
+        return due
+
+
 def last_gaps(db, integration) -> list[dict[str, str]]:
     """Say what the last collection that stored data could not read, in the integration's own words.
 
@@ -221,6 +296,87 @@ def last_gaps(db, integration) -> list[dict[str, str]]:
     described = describe_gaps(definition.gap_notes if definition else {},
                               {code: causes.get(code) for code in codes if isinstance(code, str)})
     return [{"id": code, "title": title, "summary": text} for code, title, text in described]
+
+
+def _resume_from(db, integration) -> tuple[datetime | None, str | None]:
+    """Say where the next read of this source's log may start, or None to read its whole window.
+
+    A read picks up when the last stored collection or edit of the source is a stored collection
+    that said where its log read ended: not after an edit or a first run. A failed attempt stored
+    nothing, so the stored read before it still says where. The read starts `RESUME_OVERLAP` before
+    that end, and never later than `RESUME_OVERLAP` before the newest lookup stored for the source,
+    whose time is the source's own: a source clock behind ours then loses nothing. With no lookup
+    stored the whole window is read. What is read twice is stored once.
+
+    Also returns the time that record says the stored log is whole from.
+    """
+    last = db.scalar(select(Audit).where(
+        Audit.target_id == integration.id, Audit.action.in_(("integration.collected", "integration.updated"))
+    ).order_by(Audit.created_at.desc()).limit(1))
+    newest = db.scalar(select(func.max(Observation.observed_at)).where(Observation.integration_id == integration.id))
+    try:
+        return min(parsed_date(last.details["read_to"]), utc(newest)) - RESUME_OVERLAP, last.details.get("whole_from")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _whole_from(snapshot, earlier: str | None) -> datetime | None:
+    """Say the oldest time the stored log has no hole after, once this snapshot is stored.
+
+    A read that kept only its most recent rows leaves a hole before the oldest row it kept. A
+    complete read of the whole window leaves none. A complete read that picked up joins what was
+    stored, so the time the last record gave still stands. None when the snapshot read no log.
+    """
+    if not snapshot.log:
+        return None
+    window_from, read_from = (parsed_date(snapshot.log[key]) for key in ("window_from", "read_from"))
+    if snapshot.partial_rows is not None:
+        return min((parsed_date(data["observed_at"]) for data in snapshot.blocks),
+                   default=parsed_date(snapshot.log["read_to"]))
+    if read_from <= window_from:
+        return window_from
+    try:
+        return parsed_date(earlier)
+    except (AttributeError, TypeError, ValueError):
+        return read_from
+
+
+async def off_loop(work):
+    """Run blocking database work on a worker thread, so the server goes on answering meanwhile.
+
+    The work is waited for however often the caller is cancelled: it ends as a whole, stored or
+    not, before the caller goes on. Work that uses a session opens it itself, on its own thread.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(work))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.wait([task])
+            except asyncio.CancelledError:
+                continue
+        raise
+
+
+def show_log() -> None:
+    """Let Nyctr's own log lines through at the level a collection is reported at.
+
+    The server configures only its own loggers, so without this a line about a
+    collection would be dropped. Logging an operator set up already is left as it is.
+    """
+    ours = logging.getLogger("nyctr")
+    ours.setLevel(logging.INFO)
+    if not ours.handlers and not logging.getLogger().handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+        ours.addHandler(handler)
+
+
+def _report(event: str, name: str, **facts) -> None:
+    """Write one log line about a collection: counts and times only, the source by its saved name."""
+    log.info("Collection %s: source=%s %s", event, json.dumps(name, ensure_ascii=False),
+             " ".join(f"{key}={value}" for key, value in facts.items()))
 
 
 def _still_holds(db, integration_id: str, started) -> bool:
@@ -278,33 +434,80 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 integration.status, integration.sync_started_at = "configured", None
                 db.commit()
                 return None, "secret"
+        # Nobody else stores for this source while the lease is held, so its last record is final.
+        since, earlier = _resume_from(db, integration)
+        name, clock, stored = integration.name, time.monotonic(), []
+        provider, config = integration.provider, integration.config
+        # The store has a session of its own, so this one holds no transaction open meanwhile.
+        db.rollback()
+        told = {"by": "schedule" if attempt is not None else "person" if actor else "nudge", "retry": attempt or 0}
+        _report("started", name, **told, reading="since_last_read" if since else "whole_window")
+
+        def spent(evidence):
+            """What the collection cost, for the closing log line."""
+            return {"seconds": round(time.monotonic() - clock, 2), "requests": evidence.requests,
+                    "waited_seconds": round(evidence.waited, 2), **told}
         try:
             # The same recorder the connection test opens, so a collection keeps the gaps it hit.
             # The time limit is a backstop only; see BACKSTOP_SECONDS.
             with capture_probe() as evidence:
                 snapshot = await asyncio.wait_for(
-                    collect(integration.provider, integration.id, integration.config, api_key),
+                    collect(provider, integration_id, config, api_key, **({"since": since} if since else {})),
                     timeout=BACKSTOP_SECONDS)
-            # Lock the source row before any other row, and store only while this lease is still ours.
-            # A lease older than five minutes can be taken over, and an edit can then move the source;
-            # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
-            if not _still_holds(db, integration.id, started):
-                db.rollback()
+            # Partial while rows this read set out to read were left unread, and for as long as a
+            # hole an earlier read left is still inside the window.
+            whole = _whole_from(snapshot, earlier)
+            partial = snapshot.partial_rows is not None or (
+                whole is not None and whole > parsed_date(snapshot.log["window_from"]))
+
+            def store():
+                """Store the snapshot and its record in one transaction; None if the lease is no longer ours.
+
+                The session is opened here, on the thread that uses it, and closed here: nothing
+                the caller does, cancelled or not, can close it under the store.
+                """
+                with factory() as own:
+                    # Lock the source row before any other row, and store only while this lease is still ours.
+                    # A lease older than five minutes can be taken over, and an edit can then move the source;
+                    # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
+                    if not _still_holds(own, integration_id, started):
+                        return None
+                    source = own.get(Integration, integration_id)
+                    new = apply_snapshot(own, source, snapshot, settings)
+                    if partial:
+                        source.status = "partial"
+                    audit(own, actor, "integration.collected", source.id, name=source.name,
+                          resources=len(snapshot.resources), observations=len(snapshot.blocks), partial=partial,
+                          **({"rows_kept": snapshot.partial_rows} if snapshot.partial_rows is not None else {}),
+                          gaps=sorted(evidence.gaps),
+                          **({"gap_causes": {code: sorted(causes)
+                                             for code, causes in sorted(evidence.gap_causes.items())}}
+                             if evidence.gap_causes else {}),
+                          **({"read_to": snapshot.log["read_to"], "whole_from": whole.isoformat()}
+                             if snapshot.log else {}),
+                          **({"attempt": attempt} if attempt is not None else {}))
+                    own.commit()
+                    stored.append(True)
+                    return new
+
+            # Off the server's loop: storing is blocking database work and requests go on meanwhile.
+            read_at = time.monotonic()
+            new = await off_loop(store)
+            if new is None:
+                _report("ended", name, outcome="replaced", **spent(evidence))
                 return None, "replaced"
-            apply_snapshot(db, integration, snapshot, settings)
-            partial = snapshot.partial_rows is not None
-            audit(db, actor, "integration.collected", integration.id, name=integration.name,
-                  resources=len(snapshot.resources), observations=len(snapshot.blocks),
-                  partial=partial, **({"rows_kept": snapshot.partial_rows} if partial else {}),
-                  gaps=sorted(evidence.gaps),
-                  **({"gap_causes": {code: sorted(causes) for code, causes in sorted(evidence.gap_causes.items())}}
-                     if evidence.gap_causes else {}),
-                  **({"attempt": attempt} if attempt is not None else {}))
-            db.commit()
+            _report("ended", name, outcome="partial" if partial else "stored", **spent(evidence),
+                    store_seconds=round(time.monotonic() - read_at, 2), items_read=len(snapshot.resources),
+                    items_new=new[0], lookups_read=len(snapshot.blocks), lookups_new=new[1])
+        except asyncio.CancelledError:
+            # Stopped by the server or a dropped request. A store already begun was waited for.
+            _report("ended", name, outcome="stopped", **spent(evidence), stored=bool(stored))
+            raise
         except Exception as exc:
             db.rollback()
             if not _still_holds(db, integration_id, started):
                 db.rollback()
+                _report("ended", name, outcome="replaced", **spent(evidence))
                 return None, "replaced"
             integration = db.get(Integration, integration_id)
             integration.last_error = (str(exc) if isinstance(exc, IntegrationError)
@@ -316,6 +519,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 db.rollback()
                 if not _still_holds(db, integration_id, started):
                     db.rollback()
+                    _report("ended", name, outcome="replaced", **spent(evidence))
                     return None, "replaced"
                 # The failure is final, so the claimed retry that led here ends with it.
                 drop_retry(db, integration_id)
@@ -329,5 +533,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 details["retry_at"] = retry_at.isoformat()
             audit(db, actor, "integration.collection_failed", integration.id, name=integration.name, **details)
             db.commit()
+            _report("ended", name, outcome="failed", **spent(evidence),
+                    cause=getattr(exc, "category", "other"), retry_staged=bool(retry_at))
             return None, integration.last_error
         return snapshot, None

@@ -71,6 +71,9 @@ class ProbeEvidence:
     gap_causes: dict[str, set[str]] = field(default_factory=dict)
     # How the latest request was turned away, until the next request or the gap that records it.
     last_fault: str | None = None
+    # What the work cost the source: requests sent, and seconds spent waiting for a turn at its limit.
+    requests: int = 0
+    waited: float = 0.0
 
 
 _probe_evidence: ContextVar[ProbeEvidence | None] = ContextVar("nyctr_probe_evidence", default=None)
@@ -175,8 +178,13 @@ class Snapshot:
     # so stored passes are left alone; a list is the complete current set.
     passes: list[dict[str, Any]] | None = None
     # Set when the source held more log rows than one collection may read: the number of
-    # most recent rows kept. None means the whole requested window was read.
+    # most recent rows kept. None means everything the read set out to read was read.
     partial_rows: int | None = None
+    # Set by a source that declares `resumes` once it has read its log: {window_from, read_from,
+    # read_to} as timestamps. The window's start, where this read started (the same, or later when
+    # it picked up where an earlier collection ended) and where it ended. When the read started
+    # after the window did, the observed items here are only those the newly read rows name.
+    log: dict[str, str] | None = None
 
 
 def utc_now() -> datetime:
@@ -187,6 +195,15 @@ def utc_now() -> datetime:
 def iso(value: datetime) -> str:
     """Serialize a timestamp in UTC for the adapter snapshot contract."""
     return value.astimezone(UTC).isoformat()
+
+
+def log_read(window_from: datetime, since: datetime | None, now: datetime) -> tuple[datetime, dict[str, str]]:
+    """Say where a read of a log starts, given where the last one ended, and build `Snapshot.log` for it.
+
+    Never before the window and never after now.
+    """
+    start = min(max(window_from, since), now) if since else window_from
+    return start, {"window_from": iso(window_from), "read_from": iso(start), "read_to": iso(now)}
 
 
 def source_id(value: Any) -> str:
@@ -465,6 +482,8 @@ async def _take_turn(pace: Pace) -> list[float]:
         allowed.left -= wait
         if allowed.waited:
             allowed.waited(wait)
+        if (evidence := _probe_evidence.get()) is not None:
+            evidence.waited += wait
         await pause(wait)
 
 
@@ -522,6 +541,8 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
         raise BudgetExceeded("Collection exceeded its request budget; narrow the site scope.")
     _fault(None)
     turn = await _take_turn(self.pace) if self.pace else None
+    if (evidence := _probe_evidence.get()) is not None:
+        evidence.requests += 1
     try:
         async with self.client.stream(method, self.base_url + path, params=params, json=body) as response:
             if (evidence := _probe_evidence.get()) is not None:

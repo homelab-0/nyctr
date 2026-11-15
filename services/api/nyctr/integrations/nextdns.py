@@ -93,8 +93,11 @@ def _domain(value: Any) -> str:
     return domain
 
 
-async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
+async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: str,
+                          since: datetime | None = None) -> Snapshot:
     """Collect profile controls and recent blocks without assigning users or risk.
+
+    With `since`, the log is read from that time on, never from before the window.
 
     Preserve source timestamps and reasons, report disabled logging explicitly,
     and keep reported device labels unverified. Every imported block remains
@@ -159,9 +162,10 @@ async def collect_nextdns(integration_id: str, config: dict[str, Any], api_key: 
             snapshot.capabilities.append("blocked_dns_logs:disabled_at_source")
             return snapshot
         # The published API returns logs "from newest to oldest" under sort=desc, so when the
-        # window holds more than one collection may read, the rows kept are the most recent.
+        # stretch holds more than one collection may read, the rows kept are the most recent.
+        start, snapshot.log = core.log_read(cutoff, since, now)
         logs, more = await cursor_pages(reader, path + "/logs", {
-            "status": "blocked", "from": core.iso(cutoff), "to": collected_at,
+            "status": "blocked", "from": core.iso(start), "to": collected_at,
             "sort": "desc", "limit": core.PAGE_SIZE,
         })
         if more:
@@ -264,7 +268,7 @@ PROVIDER = Provider(
             "The source logging setting is unknown",
             "The profile did not explicitly report whether logging is enabled. Any successful log read describes only the requested window."),
     },
-    validate=validate, collect=collect_nextdns, classify=classify,
+    validate=validate, collect=collect_nextdns, classify=classify, resumes=True,
     allow_domain=actions.nextdns_allow, disallow_domain=actions.nextdns_disallow,
     domain_listed=actions.nextdns_listed,
 )

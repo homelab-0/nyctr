@@ -28,6 +28,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell |
 | `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gaps` also travel in the catalog as `limits`, and the Briefing lists them under "Keep in mind" for each connected source. A source whose blocked lookups arrive without a device declares that under the gap id `upstream_identity`; Blocks quotes it when every stored lookup from the source is unattributed. `gap_notes` are also shown on the source's card after a collection that recorded their code. A note says what is missing and what follows from it, not why the read was not made: the core adds that sentence (refused, or an error at the source) from what happened |
 | `not_collected` | Optional. What a source of this kind never collects, each a few plain words ("DNS lookups that were allowed"). It travels in the catalog, and the Briefing lists it under "Not collected" for each connected source. A caution about evidence that is collected belongs in `gaps` |
+| `resumes` | Optional. `True` when the source's log can be read from a given time on. See "A log read from where the last one ended" below |
 | `scope(config)` | Optional. The configured scope (a site, for example) that actions apply to |
 | `allow_domain`, `disallow_domain`, `issue_pass`, `end_pass`, `guest_access` | Actions, present exactly for the write capabilities declared |
 | `domain_listed` | Optional read for a source that declares `dns.exceptions`: whether an address is already allowed there, switched on or off. With it, Nyctr removes by itself what a failed or interrupted opening left behind. Without it, Nyctr removes nothing after such an opening and asks an administrator to check |
@@ -160,6 +161,31 @@ statement.
   and the collection ends as a rate limit carrying the wait. Declare fewer
   requests than the source allows if anything else of yours uses the same
   limit: changes made through `integrations/actions.py` are not paced.
+- **A log read from where the last one ended.** A source that keeps a log and
+  can be asked for it from a given time declares `resumes=True`, and its
+  `collect` takes a fourth argument, `since`. The core passes the time the last
+  stored collection's log read ended or the time of the newest row stored for
+  the source, whichever is earlier, less ten minutes. The newest stored row's
+  time is the source's own, so a source clock behind Nyctr's loses nothing.
+  After an edit, the first time, and while no row is stored, it passes nothing
+  and the whole window is read. A failed collection stored nothing, so the next
+  one picks up from the last stored one. The ten minutes are for the source's
+  log to settle: a row the source lists more than ten minutes late, after a
+  newer row was read, is not read, and nothing cures that.
+  Call `core.log_read(window start, since, now)`: it returns where to start,
+  never before the window, and the value for `Snapshot.log`, which the core
+  needs in order to resume next time. Give every row an id that is the same
+  each time it is read, because the overlap is read twice and stored once. On
+  a read that picked up, the snapshot's `configured` items are still the
+  complete current set, while its `observed` items are only those the newly
+  read rows name: the core keeps the stored `observed` items and links of that
+  source whose `observed_at` is inside the window, as a read of the whole
+  window would find them, and treats older ones as missing. Set
+  `partial_rows` only when rows inside what this read set out to read were left
+  unread. The core then takes the stored log to be whole only from the oldest
+  row that read kept, records that time with the collection, and shows the
+  source as partly collected until that time has passed out of the window, also
+  after later reads that left nothing unread.
 - **Changes live in `integrations/actions.py`** and nowhere else. Each takes an
   explicit `allowed` flag, validates its inputs, makes one documented call and
   reads back what it changed. They run only for an integration an operator named
