@@ -97,6 +97,9 @@ source (`nyctr/retention.py`):
   that comes back later is a new item.
 - A blocked address is kept by its lookups instead of the 7 days: it goes when
   no stored lookup from its source names it.
+- A collection that read a log only from where the last one ended counts what
+  earlier reads took from the log, and is still inside the window, as listed.
+  It marks what a read of the whole window would mark, and nothing else.
 - Not knowing is not the same as gone. Nothing is marked on a collection that
   kept only its most recent rows, did not list the kind in full, or recorded a
   gap that could have hidden items (the integration declares which gaps cannot,

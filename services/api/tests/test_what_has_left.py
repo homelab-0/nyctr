@@ -46,7 +46,7 @@ class World:
         monkeypatch.setattr("nyctr.integrations.collect", self.collect)
         monkeypatch.setattr("nyctr.collection.utcnow", lambda: self.now)
 
-    async def collect(self, provider, integration_id, config, api_key):
+    async def collect(self, provider, integration_id, config, api_key, since=None):
         if self.fail:
             raise IntegrationError("Could not connect.", category="transport")
         for gap in self.gaps:
@@ -55,7 +55,8 @@ class World:
                    "domain": name, "source": provider, "reason": "Fabricated list", "evidence_kind": "observed",
                    "observed_at": self.now.isoformat(), "attribution": "unattributed", "risk_score": None,
                    "risk_explanation": ""} for name in self.lookups]
-        return Snapshot(resources=self.listed, blocks=blocks, partial_rows=self.partial, unread=self.unread)
+        return Snapshot(resources=self.listed, blocks=blocks, partial_rows=self.partial, unread=self.unread,
+                        log=self.log)
 
     def read(self, *listed, source="unifi", days=0, **doubt):
         """Collect `source` after `days` more days. `doubt` sets gaps, fail, partial, unread or lookups for this read."""
@@ -64,6 +65,9 @@ class World:
         self.gaps, self.fail, self.partial, self.unread, self.lookups = (
             doubt.get("gaps", []), doubt.get("fail", False), doubt.get("partial"), doubt.get("unread", []),
             doubt.get("lookups", []))
+        # A read that picked up ten minutes back in a window of one day, as a source that resumes reports it.
+        self.log = {"window_from": (self.now - timedelta(days=1)).isoformat(), "read_to": self.now.isoformat(),
+                    "read_from": (self.now - timedelta(minutes=10)).isoformat()} if doubt.get("resumed") else None
         return asyncio.run(collect_integration(self.app.state.session_factory, self.app.state.settings, source, None))
 
     def drop(self):
@@ -210,6 +214,16 @@ def test_a_blocked_address_goes_when_no_stored_lookup_names_it_also_after_a_read
     assert world.drop() == 1 and one["id"] not in world.stored() and two["id"] in world.stored()
     assert world.dropped() == [{"name": "Office DNS", "resources": 1, "kinds": {"domain": 1},
                                 "assignments": 0, "links": 0}]
+
+
+def test_a_read_that_picks_up_where_the_last_ended_marks_only_what_has_fallen_out_of_the_window(world):
+    one = thing("dns", "domain", "one.example")
+    world.read(one, source="dns", lookups=["one.example"])
+    world.read(source="dns", days=0.5, resumed=True)  # Not read again, and still inside the window.
+    assert world.missing() == set() and world.drop() == 0
+    world.read(source="dns", days=1, resumed=True)  # Now older than the window, and its lookup has expired.
+    assert world.missing() == {one["id"]}
+    assert world.drop() == 1 and one["id"] not in world.stored()
 
 
 def test_the_tick_removes_expired_lookups_every_time_and_looks_for_what_left_once_an_hour(world):
