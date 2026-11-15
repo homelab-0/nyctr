@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+from dataclasses import asdict
 from datetime import timedelta
 from hashlib import sha256
 from typing import Literal
@@ -22,7 +23,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import risk, schedule
+from . import peer, risk, schedule
 from .collection import SECRET_REF
 from .config import Settings
 from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
@@ -1100,7 +1101,7 @@ def this_device(request: Request, auth=Depends(identity), db: Session = Depends(
     """
     user = auth[0]
     settings: Settings = request.app.state.settings
-    address = request.client.host if request.client else ""
+    address = peer.client_address(request)
     rows = [r for r in db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name))
             if device_permitted(db, r, user)]
     match = next((r for r in rows if address and address == r.attributes.get("ip")), None)
@@ -1111,6 +1112,17 @@ def this_device(request: Request, auth=Depends(identity), db: Session = Depends(
         simulated = match is not None
     return {"device_id": match.id if match else None, "name": match.name if match else None,
             "simulated": simulated}
+
+
+@router.get("/me/address")
+def address_seen(request: Request, _user=Depends(admin)):
+    """Show an administrator the address Nyctr sees for this request, and how it was worked out.
+
+    For proving a proxy is set up right before members rely on it. It names the
+    peer, whether that peer is a listed proxy and which header entry was read.
+    Members, and anyone on the portal address, are refused.
+    """
+    return {**asdict(peer.seen(request)), "proxy_hops": request.app.state.settings.proxy_hops}
 
 
 @router.post("/blocks/find")

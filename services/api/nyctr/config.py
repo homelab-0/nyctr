@@ -3,8 +3,10 @@
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from . import peer
 
 
 def _browser_origin(name: str, parsed) -> str:
@@ -32,7 +34,8 @@ class Settings(BaseSettings):
 
     Secrets stay server-side; invalid configuration suppresses input values in errors.
     """
-    model_config = SettingsConfigDict(env_prefix="NYCTR_", extra="ignore", hide_input_in_errors=True)
+    model_config = SettingsConfigDict(env_prefix="NYCTR_", extra="ignore", hide_input_in_errors=True,
+                                      populate_by_name=True)
 
     mode: Literal["demo", "live"] = "live"
     database_url: str = "sqlite:///./nyctr.db"
@@ -40,6 +43,11 @@ class Settings(BaseSettings):
     # Optional second origin for the member portal. Empty serves everything on public_url.
     portal_url: str = ""
     cookie_secure: bool | None = None
+    # The operator's own proxies, as addresses or ranges: only they are believed about where a
+    # request came from. Read from FORWARDED_ALLOW_IPS, the name already in use. Empty believes nobody.
+    forwarded_allow_ips: str = Field("", validation_alias="FORWARDED_ALLOW_IPS")
+    # How many of the operator's proxies a request passes: which entry, from the right, to read.
+    proxy_hops: int = 1
     local_login_enabled: bool = True
     bootstrap_admin_email: str = ""
     bootstrap_admin_password: str = ""
@@ -96,6 +104,9 @@ class Settings(BaseSettings):
                                  "leave it empty to serve the portal on the console address")
         if self.cookie_secure is None:
             self.cookie_secure = self.mode == "live"
+        peer.proxies(self.forwarded_allow_ips)
+        if not 1 <= self.proxy_hops <= 10:
+            raise ValueError("NYCTR_PROXY_HOPS must be between 1 and 10")
         if not 1 <= self.session_hours <= 24:
             raise ValueError("Session lifetime must be between 1 and 24 hours")
         if not 1 <= self.block_retention_hours <= 168:

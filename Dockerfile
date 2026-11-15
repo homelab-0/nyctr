@@ -26,4 +26,5 @@ USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)"
-CMD ["uvicorn", "nyctr.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+# --no-proxy-headers: Nyctr works out the client address itself (nyctr/peer.py) from the real peer.
+CMD ["uvicorn", "nyctr.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header", "--no-proxy-headers"]
