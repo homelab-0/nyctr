@@ -512,7 +512,7 @@ describe('recognising devices at sign-in, in Setup', () => {
       expect(screen.getByText(/Kim signed in on it on .+ and was not tied to it/)).toBeDefined();
       expect(document.body.textContent).not.toContain('Lee'); // an ended tie is not listed under the device
       expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
-        "End Sam's tie to Laptop",
+        'End this tie',
       ]);
       fireEvent.click(screen.getByRole('button', { name: "End Sam's tie to Laptop" }));
       await waitFor(

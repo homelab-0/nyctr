@@ -170,7 +170,12 @@ function Forget({ data, device, name }: { data: Data; device: string; name: stri
   };
   return (
     <>
-      <button type="button" className="button quiet small" onClick={() => void forget()}>
+      <button
+        type="button"
+        className="button quiet small"
+        style={{ justifySelf: 'start' }}
+        onClick={() => void forget()}
+      >
         Forget {name}
       </button>
       <InlineError message={error} />
@@ -897,11 +902,11 @@ function MyDevices({ data }: { data: Data }) {
                     ? 'Yours'
                     : 'You signed in on it'}
               </span>
+              <Forget data={data} device={device.id} name={device.name} />
             </span>
             {data.device.data?.device_id === device.id && (
               <span className="tag blue">This device</span>
             )}
-            <Forget data={data} device={device.id} name={device.name} />
           </div>
         ))}
       </section>

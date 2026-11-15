@@ -212,7 +212,8 @@ function PeoplePanel() {
                               : `${item.user_name} signed in on it on ${dateTime(item.last_at)} and was not tied to it, because it is someone else's.`}
                             {item.kind === 'tie' && (
                               <button
-                                className="linklike"
+                                className="button quiet small"
+                                aria-label={`End ${item.user_name}'s tie to ${row.name}`}
                                 onClick={() =>
                                   void run(() =>
                                     api(`/presence/${encodeURIComponent(item.id)}`, {
@@ -221,7 +222,7 @@ function PeoplePanel() {
                                   )
                                 }
                               >
-                                End {item.user_name}'s tie to {row.name}
+                                End this tie
                               </button>
                             )}
                           </div>
