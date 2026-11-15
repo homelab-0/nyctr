@@ -586,19 +586,21 @@ def test_the_work_under_the_write_lock_does_not_grow_with_addresses_times_lookup
 
 
 def test_an_address_looked_up_after_the_run_read_what_may_go_is_kept(world, monkeypatch):
-    """What may go is read once, with no lock held. Each batch looks again at the items it was given."""
+    """What may go is read once, with no lock held. A batch that finds a collection stored since reads again."""
     world.read(source="dns")
     world.change(address("again.example"), address("quiet.example"))
-    batch = retention._batch
+    batch, calls = retention._batch, []
 
     def meanwhile(db, integration_id, *args):
-        if integration_id == "dns":
-            again = lookup()
-            again.domain = "again.example"
-            world.change(again)
+        calls.append(integration_id)
+        if calls == ["dns"]:
+            world.read(source="dns", lookups=["again.example"])  # A whole collection, before the first batch.
         return batch(db, integration_id, *args)
     monkeypatch.setattr(retention, "_batch", meanwhile)
-    assert world.drop() == 1
+    factory, ran = world.app.state.session_factory, {}
+    assert retention.drop(factory, world.now, ran) == 0 and "dns" not in ran  # Not done: tried again next time.
+    assert {"dns:domain:again.example", "dns:domain:quiet.example"} <= set(world.stored())
+    assert retention.drop(factory, world.now, ran) == 1 and "dns" in ran
     assert "dns:domain:again.example" in world.stored() and "dns:domain:quiet.example" not in world.stored()
 
 

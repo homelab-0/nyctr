@@ -127,8 +127,10 @@ source (`nyctr/retention.py`):
   addresses and the addresses its stored lookups name are each read through
   the index on their source and compared, so the cost grows with their sum.
   The drop then works in batches of 500 items, each in its own transaction
-  that locks the source's row first, as the store step of a collection does,
-  and looks again at the items it was given. So a drop and a store of one
+  that locks the source's row first, as the store step of a collection does.
+  Lookups are stored only by that step, so a batch that finds a collection
+  has stored since the read stops, and the run starts again at the next
+  tick. So a drop and a store of one
   source never work at once: a collection waits for one batch at most, and a
   collection that has taken the source stops the run until the next tick.
   SQLite has one write lock for the whole database, so there a batch keeps

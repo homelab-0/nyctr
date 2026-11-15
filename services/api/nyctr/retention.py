@@ -188,33 +188,43 @@ def _held(db, integration_id: str, rows: list[Resource], now: datetime) -> set[s
     return held
 
 
-def _candidates(db, integration_id: str) -> list[str]:
+def _latest(db, integration_id: str) -> Audit | None:
+    """The record of the source's latest stored collection, written in the transaction that stored it."""
+    return db.scalar(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == integration_id)
+                     .order_by(Audit.created_at.desc()).limit(1))
+
+
+def _candidates(db, integration_id: str) -> tuple[str | None, list[str]]:
     """Name, in id order, the source's items that may be dropped: read once a run, with no lock held.
 
     A blocked address is one when no stored lookup of the source names it. Both sides are read
     whole, each by the index on its source, and compared here, so the cost grows with the
     number of addresses plus the number of lookups and not with one times the other. The
-    other kinds are the marked items. Each batch looks again at the ones it is given.
+    other kinds are the marked items, which each batch looks at again. Lookups are stored only
+    by a collection's store step, which writes its record with them, so that record is read
+    first and named: a batch that finds a later one knows these names may be out of date.
     """
+    last = _latest(db, integration_id)
+    stamp = last.id if last is not None else None
     named = set(db.scalars(select(Observation.domain).where(Observation.integration_id == integration_id).distinct()))
     addresses = db.execute(select(Resource.id, Resource.source_id).where(
         Resource.integration_id == integration_id, Resource.kind == "domain")).all()
     marked = db.scalars(select(Resource.id).where(
         Resource.integration_id == integration_id, Resource.kind != "domain", flagged()))
-    return sorted([id_ for id_, name in addresses if name not in named] + list(marked))
+    return stamp, sorted([id_ for id_, name in addresses if name not in named] + list(marked))
 
 
-def _batch(db, integration_id: str, now: datetime, ids: list[str]) -> tuple[list[Resource], str | None]:
+def _batch(db, integration_id: str, now: datetime, ids: list[str], stamp: str | None) -> tuple[list[Resource], str | None]:
     """Drop what has left among these candidates of the source, `BATCH` of them at most.
 
     Works in the caller's transaction and returns the items that went and why the run must
-    stop here, if it must: `BUSY` when a collection has the source, `UNKNOWN` when it may not
-    be touched for another reason. The source's row is locked first, as the store step of a
+    stop here, if it must: `BUSY` when a collection has the source or has stored since the
+    candidates were read (`stamp`), `UNKNOWN` when it may not be touched for another reason. The source's row is locked first, as the store step of a
     collection does, and only when its latest collection stored and none is going. So a
     collection, an edit and a removal each wait for this batch or stop the run, and a drop and
     a store of one source never work at once. The candidates are then locked in id order, as
-    removal does, and looked at again: every statement under the lock names the items it is
-    about, so the lock is held for as long as `BATCH` items take and no longer.
+    removal does. Every statement under the lock names the items it is about, so the lock is
+    held for as long as `BATCH` items take and no longer.
     """
     from .removal import forget
 
@@ -225,20 +235,18 @@ def _batch(db, integration_id: str, now: datetime, ids: list[str]) -> tuple[list
     if locked.rowcount != 1:
         going = db.scalar(select(Integration.status).where(Integration.id == integration_id)) == "syncing"
         return [], BUSY if going else UNKNOWN  # Collecting; or failed, edited, never collected, removed.
-    last = db.scalar(select(Audit).where(Audit.action == "integration.collected", Audit.target_id == integration_id)
-                     .order_by(Audit.created_at.desc()).limit(1))
+    last = _latest(db, integration_id)
     doubt = last.details.get("unread") if last is not None else None
     if not isinstance(doubt, list):
         return [], UNKNOWN  # Collected before this was recorded: not known.
+    if last.id != stamp:
+        return [], BUSY  # A collection stored between the read of what may go and this batch: read again.
     cutoff = utc(db.get(Integration, integration_id).last_sync) - timedelta(days=KEEP_DAYS)
     rows = list(db.scalars(select(Resource).where(
         Resource.integration_id == integration_id, Resource.id.in_(ids),
     ).order_by(Resource.id).with_for_update()))
-    names = [row.source_id for row in rows if row.kind == "domain"]
-    named = set(db.scalars(select(Observation.domain).where(
-        Observation.integration_id == integration_id, Observation.domain.in_(names)))) if names else set()
-    gone = [row for row in rows if (row.source_id not in named if row.kind == "domain" else (
-        is_missing(row) and EVERY_KIND not in doubt and row.kind not in doubt and _due(row, cutoff)))]
+    gone = [row for row in rows if row.kind == "domain" or (
+        is_missing(row) and EVERY_KIND not in doubt and row.kind not in doubt and _due(row, cutoff))]
     held = _held(db, integration_id, gone, now) if gone else set()
     gone = [row for row in gone if row.id not in held]
     for row in gone:
@@ -257,12 +265,12 @@ def drop_from(factory, integration_id: str, now: datetime) -> tuple[int, bool]:
     """
     kinds, record = Counter(), None
     with factory() as db:
-        ids = _candidates(db, integration_id)
+        stamp, ids = _candidates(db, integration_id)
     for start in range(0, len(ids), BATCH):
         if start:
             time.sleep(PAUSE)
         with factory() as db:
-            gone, stop = _batch(db, integration_id, now, ids[start:start + BATCH])
+            gone, stop = _batch(db, integration_id, now, ids[start:start + BATCH], stamp)
             if gone:
                 kinds.update(row.kind for row in gone)
                 details = {"name": db.get(Integration, integration_id).name, "resources": kinds.total(),
