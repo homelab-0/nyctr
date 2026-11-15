@@ -24,6 +24,7 @@ from .models import (
     Audit,
     DeviceGrant,
     DeviceLink,
+    GuestAction,
     Integration,
     Lease,
     Observation,
@@ -157,7 +158,7 @@ def _held(db, integration_id: str, rows: list[Resource], now: datetime) -> set[s
     the source has not run out.
     """
     from .collection import parsed_date
-    from .guests import is_guest, standing_of
+    from .guests import is_guest, state_of
 
     ids = [row.id for row in rows]
     held = {row.id for row in rows if row.classification != "unassigned" or row.owner_id}
@@ -171,6 +172,12 @@ def _held(db, integration_id: str, rows: list[Resource], now: datetime) -> set[s
         AccessRequest.integration_id == integration_id, AccessRequest.status == "pending")))
     tied = {id_ for pair in db.execute(select(Observation.device_id, Observation.source_device_id).where(
         or_(Observation.device_id.in_(ids), Observation.source_device_id.in_(ids)))).all() for id_ in pair if id_}
+    # What Nyctr did to each guest among them, newest first, in one read: a batch holds the source's row.
+    acted: dict[str, list[GuestAction]] = {}
+    guests = [row.id for row in rows if is_guest(row)]
+    for action in db.scalars(select(GuestAction).where(GuestAction.device_id.in_(guests))
+                             .order_by(GuestAction.created_at.desc())) if guests else ():
+        acted.setdefault(action.device_id, []).append(action)
     for row in rows:
         if row.kind == "domain":
             keep = row.source_id in names
@@ -182,7 +189,7 @@ def _held(db, integration_id: str, rows: list[Resource], now: datetime) -> set[s
                 live = grant.get("authorized") is True and parsed_date(grant["expires_at"]) > now
             except (KeyError, TypeError, ValueError, AttributeError):
                 live = False
-            keep = live or standing_of(db, row)["state"] in ("cut", "locked")
+            keep = live or state_of(row, acted.get(row.id, [])) in ("cut", "locked")
         if keep:
             held.add(row.id)
     return held

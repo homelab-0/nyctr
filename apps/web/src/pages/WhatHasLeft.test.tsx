@@ -86,6 +86,14 @@ describe('what a source no longer reports', () => {
     expect(within(note).getByRole('link', { name: 'Inventory' })).toBeDefined();
   });
 
+  it('is said on the Map when the item asked for was the last one stored', async () => {
+    mockApi({ 'GET /graph': { nodes: [], edges: [] }, 'GET /findings': [] });
+    render(<MapPage params={new URLSearchParams('focus=tablet')} />);
+    const note = await screen.findByRole('complementary', { name: 'Not on the map' });
+    expect(within(note).getByRole('link', { name: 'Inventory' })).toBeDefined();
+    expect(screen.queryByText('Nothing to draw yet')).toBeNull();
+  });
+
   it('is recorded in Activity by source and by how many of each kind went', async () => {
     const dropped: AuditEvent = {
       id: 'a',
@@ -105,5 +113,20 @@ describe('what a source no longer reports', () => {
     const row = (await screen.findByText('Dropped what has left Office DNS')).closest('tr')!;
     expect(row.textContent).toContain('2 devices, 1 network and 1,183 blocked addresses');
     expect(row.textContent).not.toContain('items');
+  });
+
+  it('keeps the total in Activity when a kind that went has no plain name', async () => {
+    const dropped = {
+      id: 'b',
+      created_at: new Date().toISOString(),
+      actor_id: null as unknown as string,
+      action: 'inventory.dropped',
+      target_id: 'unifi',
+      details: { name: 'UniFi', resources: 2, kinds: { client: 1, site: 1 } },
+    } as AuditEvent;
+    mockApi({ 'GET /audit': [dropped], 'GET /users': [], 'GET /integrations': [] });
+    render(<Activity />);
+    const row = (await screen.findByText('Dropped what has left UniFi')).closest('tr')!;
+    expect(row.textContent).toContain('2 items (1 device)');
   });
 });

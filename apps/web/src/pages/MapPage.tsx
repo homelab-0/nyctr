@@ -95,6 +95,16 @@ function facts(resource: Resource): [string, string][] {
  * sources reported something, so an administrator can start on the network side, pick a host,
  * and follow it into the source that runs it.
  */
+/** What is said when the Map is asked for an item it does not draw. */
+function Absent() {
+  return (
+    <p>
+      This item is not on the map. Its source did not list it at the last collection, or it has been
+      dropped since. <a href="#/inventory">Inventory</a> lists what is still stored.
+    </p>
+  );
+}
+
 export default function MapPage({
   params,
   sources,
@@ -128,6 +138,13 @@ export default function MapPage({
   if (graph.loading) return <Loading text="Drawing the map…" />;
   if (graph.error) return <ErrorState message={graph.error} retry={graph.reload} />;
   const data = graph.data!;
+  // Asked for one item and nothing at all is stored any more: say so, not "connect a source".
+  if (data.nodes.length === 0 && selected)
+    return (
+      <aside className="inspector" aria-label="Not on the map">
+        <Absent />
+      </aside>
+    );
   if (data.nodes.length === 0)
     return (
       <Empty
@@ -209,11 +226,7 @@ export default function MapPage({
         />
         {selected && !node && (
           <aside className="inspector" ref={inspector} aria-label="Not on the map">
-            <p>
-              This item is not on the map. Its source did not list it at the last collection, or it
-              has been dropped since. <a href="#/inventory">Inventory</a> lists what is still
-              stored.
-            </p>
+            <Absent />
           </aside>
         )}
         {node && (

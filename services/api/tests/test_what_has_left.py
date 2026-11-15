@@ -304,6 +304,28 @@ def collected(world, source="dns"):
             Audit.action == "integration.collected", Audit.target_id == source).order_by(Audit.created_at))]
 
 
+def test_a_gap_moves_the_time_doubt_ends_and_not_the_time_the_stored_log_is_whole_from(world):
+    """Two times in one record, each with its own reader: `whole_from` says the stored log has no hole and
+    is what the next read that picks up stands on for "partial"; `unread_from` says nothing is in doubt."""
+    world.read(source="dns", lookups=["a.example"])
+    first = collected(world)[-1]
+    assert first["partial"] is False and first["unread"] == []
+    assert first["whole_from"] == first["unread_from"] == (world.now - timedelta(days=1)).isoformat()
+    world.read(source="dns", days=0.25, resumed=True, gaps=["a_code_nobody_declared"])
+    gap = collected(world)[-1]
+    # No row was left unread, so the log has no hole; what the gap hid is in doubt from this read's end.
+    assert gap["whole_from"] == first["whole_from"] and gap["partial"] is False
+    assert gap["unread"] == ["*"] and gap["unread_from"] == world.now.isoformat()
+    world.read(source="dns", days=0.25, resumed=True)
+    after = collected(world)[-1]
+    # The read after it stands on both: still whole from the first read's start and so not partial,
+    # still in doubt from the gap. Were one key read for the other, this read would be called partial.
+    assert after["whole_from"] == first["whole_from"] and after["partial"] is False
+    assert after["unread"] == ["*"] and after["unread_from"] == gap["unread_from"]
+    with world.app.state.session_factory() as db:
+        assert db.get(Integration, "dns").status == "connected"
+
+
 def test_a_read_that_picks_up_after_one_that_kept_only_part_is_in_doubt_until_the_hole_has_left_the_window(world):
     """One failed run makes the next read the whole window; on a busy source that read keeps only part.
 
@@ -658,6 +680,7 @@ def test_a_device_being_filed_while_a_batch_reads_it_is_kept_on_postgresql(world
         dropping.start()
         with engine.connect() as watch:
             for _ in range(3000):  # Until the drop is waiting for that row, however long that takes.
+                watch.rollback()  # A transaction sees the activity as it was at its first look.
                 if watch.exec_driver_sql("select count(*) from pg_stat_activity where wait_event_type = 'Lock'"
                                          " and datname = current_database()").scalar():
                     break
@@ -807,6 +830,26 @@ def test_an_item_something_still_rests_on_is_kept_until_that_ends_then_goes(worl
             db.delete(held)
         db.commit()
     assert world.drop() == 1 and item["id"] not in world.stored()
+
+
+def test_what_was_done_to_the_guests_in_a_batch_is_read_once_not_once_a_guest(world):
+    world.read(LAPTOP)
+    visitors = []
+    for n in range(6):
+        row = world.gone(f"visitor{n}")
+        row.attributes = {**row.attributes, "guest": {"authorized": False}}
+        visitors.append(row)
+    world.change(*visitors, GuestAction(id="cut", device_id="unifi:client:visitor0", action="cut",
+                                        actor="owner", execution="applied"))
+    reads = []
+
+    @event.listens_for(world.app.state.session_factory.kw["bind"], "before_cursor_execute")
+    def seen(_conn, _cursor, statement, *_rest):
+        if statement.lstrip().upper().startswith("SELECT") and "FROM guest_actions" in statement:
+            reads.append(statement)
+    assert world.drop() == 5 and len(reads) == 1
+    event.remove(world.app.state.session_factory.kw["bind"], "before_cursor_execute", seen)
+    assert set(world.stored()) == {LAPTOP, "unifi:client:visitor0"}  # The one Nyctr cut off is kept.
 
 
 def test_a_guest_whose_access_at_the_source_has_not_run_out_is_kept_until_it_has(world):

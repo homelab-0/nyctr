@@ -56,6 +56,11 @@ export function namedCounts(kinds: Record<string, number>) {
   return `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 }
 
+/** How many of these items are of a kind `namedCounts` has a name for. */
+export const namedTotal = (kinds: Record<string, number>) =>
+  NAMED.reduce((sum, kind) => sum + (kinds[kind] || 0), 0);
+const NAMED = ['domain', ...Object.values(GROUPS).flatMap((group) => group.kinds ?? [])];
+
 /**
  * How many blocked lookups are stored and the span they actually cover, from the oldest and
  * newest one kept. Never a fixed window: a busy source's stored lookups may cover far less.
