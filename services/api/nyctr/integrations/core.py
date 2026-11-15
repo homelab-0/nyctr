@@ -71,6 +71,9 @@ class ProbeEvidence:
     gap_causes: dict[str, set[str]] = field(default_factory=dict)
     # How the latest request was turned away, until the next request or the gap that records it.
     last_fault: str | None = None
+    # What the work cost the source: requests sent, and seconds spent waiting for a turn at its limit.
+    requests: int = 0
+    waited: float = 0.0
 
 
 _probe_evidence: ContextVar[ProbeEvidence | None] = ContextVar("nyctr_probe_evidence", default=None)
@@ -163,6 +166,19 @@ def _transport_category(error: Exception) -> str:
     return "transport"
 
 
+@dataclass(frozen=True)
+class LogRead:
+    """The stretch of its log a source that declares `resumes` read in one collection.
+
+    `window_from` is where the configured window starts. `read_from` is where this read started:
+    the same, or later when it picked up where an earlier collection ended. `read_to` is where it
+    ended. Rows inside the stretch that were left unread are said by `Snapshot.partial_rows`.
+    """
+    window_from: datetime
+    read_from: datetime
+    read_to: datetime
+
+
 @dataclass
 class Snapshot:
     """Normalized evidence returned only after a provider collection succeeds."""
@@ -175,8 +191,11 @@ class Snapshot:
     # so stored passes are left alone; a list is the complete current set.
     passes: list[dict[str, Any]] | None = None
     # Set when the source held more log rows than one collection may read: the number of
-    # most recent rows kept. None means the whole requested window was read.
+    # most recent rows kept. None means everything the read set out to read was read.
     partial_rows: int | None = None
+    # Set by a source that declares `resumes` once it has read its log. When the read started after
+    # the window did, the observed items here are only those the newly read rows name.
+    log: LogRead | None = None
 
 
 def utc_now() -> datetime:
@@ -465,6 +484,8 @@ async def _take_turn(pace: Pace) -> list[float]:
         allowed.left -= wait
         if allowed.waited:
             allowed.waited(wait)
+        if (evidence := _probe_evidence.get()) is not None:
+            evidence.waited += wait
         await pause(wait)
 
 
@@ -522,6 +543,8 @@ async def exchange(reader: ReadClient, method: str, path: str, params: dict[str,
         raise BudgetExceeded("Collection exceeded its request budget; narrow the site scope.")
     _fault(None)
     turn = await _take_turn(self.pace) if self.pace else None
+    if (evidence := _probe_evidence.get()) is not None:
+        evidence.requests += 1
     try:
         async with self.client.stream(method, self.base_url + path, params=params, json=body) as response:
             if (evidence := _probe_evidence.get()) is not None:

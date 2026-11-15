@@ -19,7 +19,14 @@ from starlette.staticfiles import StaticFiles
 
 from . import __version__, access, assistant, guests, query, removal, worker
 from . import blocks as block_list
-from .collection import after_collection, apply_snapshot, collect_integration, last_gaps, parsed_date  # noqa: F401
+from .collection import (  # noqa: F401
+    after_collection,
+    apply_snapshot,
+    collect_integration,
+    last_gaps,
+    parsed_date,
+    show_log,
+)
 from .config import Settings
 from .database import make_engine, migrate, session_factory
 from .deps import (  # noqa: F401  (re-exported for callers that import them from here)
@@ -159,6 +166,7 @@ def create_app(settings: Settings | None = None):
     @asynccontextmanager
     async def lifespan(app):
         """Migrate and bootstrap before serving, then release the engine when the app stops."""
+        show_log()
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)

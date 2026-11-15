@@ -115,8 +115,11 @@ async def _sign_in(reader: ReadClient, password: str) -> str:
     return sid
 
 
-async def collect_pihole(integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
+async def collect_pihole(integration_id: str, config: dict[str, Any], api_key: str,
+                         since: datetime | None = None) -> Snapshot:
     """Read recently blocked lookups and the client label Pi-hole reports for each.
+
+    With `since`, the log is read from that time on, never from before the window.
 
     Client names come from the Pi-hole's own network table and are not proof of
     who made a lookup, so every block stays unassigned until an administrator
@@ -135,9 +138,11 @@ async def collect_pihole(integration_id: str, config: dict[str, Any], api_key: s
                                 attributes={"scope": "entire_resolver"})
             snapshot.resources.append(resolver)
             seen: set[str] = set()
+            start = min(max(cutoff, since), now) if since else cutoff
+            snapshot.log = core.LogRead(cutoff, start, now)
             for page in range(MAX_QUERY_PAGES):
                 payload = await reader.get("/queries", {
-                    "from": int(cutoff.timestamp()), "until": int(now.timestamp()),
+                    "from": int(start.timestamp()), "until": int(now.timestamp()),
                     "length": PAGE, "start": page * PAGE})
                 rows = payload.get("queries")
                 if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
@@ -238,5 +243,5 @@ PROVIDER = Provider(
             "The session could not be closed",
             "Nyctr could not sign out. The session expires on its own after a few minutes."),
     },
-    validate=validate, collect=collect_pihole, classify=classify,
+    validate=validate, collect=collect_pihole, classify=classify, resumes=True,
 )
