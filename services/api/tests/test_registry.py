@@ -165,14 +165,16 @@ def test_unknown_integrations_are_refused_everywhere(tmp_path):
 
 
 def _fake_resolver() -> Provider:
-    """A made-up DNS source that reports blocks and can change nothing."""
+    """A made-up DNS source that reports blocks, says what kind its tracker list is, and can change nothing."""
     async def collect(_id, _config, _key):
         """Return an empty snapshot; the test inserts evidence directly."""
         return Snapshot()
 
     return Provider(id="acme_dns", name="Acme Resolver", summary="Test only.", letter="A", tone="grey",
                     fields=(ConfigField("base_url", "Address"),), reads=(("blocked_dns_logs:read", "Blocks"),),
-                    provides=frozenset({"dns.blocks"}), validate=lambda config: config, collect=collect)
+                    provides=frozenset({"dns.blocks"}), validate=lambda config: config, collect=collect,
+                    classify=lambda text: ("privacy_list", 16, "An advert list covers it", "list", "third_party")
+                    if "tracker" in text.lower() else None)
 
 
 def test_a_new_integration_changes_behaviour_by_declaration_alone(tmp_path, monkeypatch):
