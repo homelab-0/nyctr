@@ -7,10 +7,27 @@ updated and resolved by re-running the rules after every collection.
 
 from __future__ import annotations
 
+import threading
+
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .integrations import registry
 from .models import Finding, GuestAction, Integration, Lease, Resource, utc
+
+# Held from the start of an analysis to its commit, so two in one process never add the same finding.
+ONE_AT_A_TIME = threading.Lock()
+
+
+def refresh_alone(bind) -> None:
+    """Refresh the findings in a session and transaction of its own, after any analysis that is running.
+
+    Blocking database work over everything stored, and it may wait for the lock: call it through
+    `collection.off_loop`, never on the server's loop. The caller has committed its own work first.
+    """
+    with ONE_AT_A_TIME, Session(bind, expire_on_commit=False) as own:
+        refresh_findings(own)
+        own.commit()
 
 
 def _workload_firewall(resources: list[Resource]) -> list[dict]:

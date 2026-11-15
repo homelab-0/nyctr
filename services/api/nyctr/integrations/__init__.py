@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 from . import core, registry
@@ -30,8 +31,12 @@ def validate_config(provider: str, config: dict[str, Any]) -> dict[str, Any]:
     return registry.get(provider).validate(config)
 
 
-async def collect(provider: str, integration_id: str, config: dict[str, Any], api_key: str) -> Snapshot:
+async def collect(provider: str, integration_id: str, config: dict[str, Any], api_key: str, *,
+                  since: datetime | None = None) -> Snapshot:
     """Collect a complete read-only snapshot within one bounded operation.
+
+    `since` asks a source that declares `resumes` to read its log from that time
+    on instead of from the start of its window; any other source never sees it.
 
     Validate configuration before dispatch and convert the overall timeout into
     a sanitized provider error; callers must discard failed partial collections.
@@ -43,6 +48,8 @@ async def collect(provider: str, integration_id: str, config: dict[str, Any], ap
     try:
         async with asyncio.timeout(READING_SECONDS) as limit:
             with core.patience(waited=lambda wait: limit.reschedule(limit.when() + wait)):
+                if since is not None and definition.resumes:
+                    return await definition.collect(integration_id, clean, api_key, since=since)
                 return await definition.collect(integration_id, clean, api_key)
     except TimeoutError:
         raise IntegrationError("Collection timed out; narrow its site scope or log lookback.",

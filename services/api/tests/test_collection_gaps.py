@@ -160,6 +160,7 @@ def test_the_attention_list_names_sources_that_stored_only_part_and_the_assistan
         assert about["dns", "card"] == {
             "kind": "source", "id": "dns", "severity": "medium", "at": None, "action": "card",
             "title": "Office DNS could not read everything", "detail": f"{NOTES[GAP][0]}. {NOTES[OTHER][0]}."}
+        assert "later collections read everything new" in about["unifi", "edit"]["detail"]
         assert "shorter time window" in about["unifi", "edit"]["detail"]
         with app.state.session_factory() as db:
             pack, _refs = evidence_pack(db, app.state.settings)

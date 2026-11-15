@@ -391,7 +391,8 @@ async def enforce(db: Session, settings: Settings, due: list[tuple[str, str]]) -
     """Cut off devices the rule named and re-cut locked devices that were let back on elsewhere.
 
     Each action is committed on its own, so no source or device row is held into the next device's call,
-    and a source removed during one call is recorded and skips only that device.
+    and a source removed during one call is recorded and skips only that device. The findings are
+    refreshed last, off the server's loop.
     """
     async def act_on(device_id: str, action: str, reason: str) -> int:
         device = db.get(Resource, device_id)
@@ -413,11 +414,24 @@ async def enforce(db: Session, settings: Settings, due: list[tuple[str, str]]) -
     for device_id in [device.id for device in guest_devices(db)
                       if state_of(device, _actions(db, device.id)) == "locked" and _grant(device).get("authorized")]:
         count += await act_on(device_id, "lock", "Locked device was authorised again")
-    from .analysis import refresh_findings
-
-    refresh_findings(db)
-    db.commit()
+    await refresh_after(db)
     return count
+
+
+async def refresh_after(db: Session) -> None:
+    """Commit what this session did, then refresh the findings off the server's loop.
+
+    The refresh runs on a worker thread in a session of its own, one analysis at a time, so the loop
+    never waits for an analysis that is running and what was just done is on record whatever the
+    refresh meets. This session sees the refreshed findings afterwards.
+    """
+    from .analysis import refresh_alone
+    from .collection import off_loop
+
+    db.commit()
+    bind = db.get_bind()
+    await off_loop(lambda: refresh_alone(bind))
+    db.expire_all()
 
 
 class InputModel(BaseModel):
@@ -633,14 +647,15 @@ async def act(body: ActionInput, request: Request, user=Depends(admin), db: Sess
         raise HTTPException(409, str(error)) from None
     except NotCollected as error:
         raise HTTPException(409, str(error)) from None
-    from .analysis import refresh_findings
-
-    refresh_findings(db)
-    db.commit()
-    if record.execution == "failed":
-        raise HTTPException(502, record.error or "The source refused the change.")
-    passes = list(db.scalars(select(GuestPass)))
-    return guest_json(db, device, passes)
+    db.commit()  # the action is on record before the findings are touched
+    # The answer is built before the refresh: a source removed while the refresh waits takes the device
+    # with it, and the administrator is still told what was just done.
+    failed, refused = record.execution == "failed", record.error
+    answer = None if failed else guest_json(db, device, list(db.scalars(select(GuestPass))))
+    await refresh_after(db)
+    if failed:
+        raise HTTPException(502, refused or "The source refused the change.")
+    return answer
 
 
 @router.post("/demo/guest-activity")

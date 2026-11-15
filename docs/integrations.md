@@ -71,7 +71,39 @@ gaps". Its card says what could not be read and what that means, and the
 Briefing lists it under "Needs you" until a later collection reads everything. A
 collection that fails stores nothing, so the gaps of the last stored collection
 stay on the card beside the error. A partly collected source is listed there
-too, with a link to its Edit form, where a shorter time window is the cure.
+too, with a link to its Edit form. It clears once the lookups that were left
+out are older than the time window and later collections have stopped leaving
+lookups unread. On a source too busy for that, waiting is not enough, and a
+shorter time window is the cure.
+
+A source of blocked lookups is read from where its last stored collection
+ended, ten minutes earlier to be safe, so a collection every 15 minutes reads
+those 25 minutes and not the whole window again. The read never starts later
+than ten minutes before the newest lookup already stored, whose time is the
+source's own, so a source whose clock is behind Nyctr's loses nothing. The
+whole window is read the first time, after an edit, and while no lookup is
+stored. A failed collection stored nothing, so the one after it picks up from
+the last stored one.
+
+The ten minutes are a limit. A lookup the source adds to its log more than ten
+minutes after it happened may be missed: it is read only if the next read
+still starts before it. Often it does not, once a later lookup has been
+stored, but it can: the place a read picks up from is also held back by where
+the last read ended, and an edit makes the next read the whole window. Nothing
+on the source's card says so: the card still says connected. Nyctr cannot see
+a lookup it missed, so it cannot count them. If a source is known to list
+lookups that late, its blocked lookups in Nyctr may not be complete.
+
+A source is partly collected when lookups inside what a collection set out to
+read were left unread: typically the first collection on a busy source, which
+keeps the most recent 4,000. The collections after it pick up from there, and
+on most sources they leave nothing more unread, but the older lookups that
+first read left out are not gone back for. The source therefore stays partly
+collected until the stretch that was left out has passed out of its time
+window, and then says connected again: one window's length after the last read
+that left lookups out. A source with more than 4,000 new blocked lookups
+between two collections leaves some unread each time, and stays partly
+collected for as long as that goes on.
 
 Where the source's answer says why, the card says it: the source refused the
 read (this key may not read it), or the source had an error of its own (the next
@@ -306,8 +338,9 @@ The adapter uses the fixed official `https://api.nextdns.io` endpoint and a
 profile ID. It collects profile configuration and recent blocked-query records.
 The provider's account API key is resolved from the environment reference.
 
-Optional `lookback_hours` is bounded to 1–72. Collection is bounded, so a busy
-profile may require the later incremental collector to establish full coverage.
+Optional `lookback_hours` is bounded to 1–72. Collection is bounded to the most
+recent 4,000 blocked lookups per read; later collections read from where the
+last one ended (see "What a collection could not read").
 Logging must be enabled and available at the provider for events to exist.
 
 If your gateway forwards all DNS upstream, the upstream records may lack useful

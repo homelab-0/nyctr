@@ -38,6 +38,39 @@ one copy claims the same way as a run. A Collect pressed by a person and a
 connection test are not retried. Moving scheduled collection and background
 analysis to a separate worker process is future work.
 
+Reading a source is network work on the server's loop, and so is turning its
+answer into a snapshot. Storing what was read is blocking database work and
+runs on a worker thread, in a database session of its own, so the API goes on
+answering meanwhile. The analysis after a collection runs the same way, whether
+the schedule, a person or a nudge started it, and one analysis runs at a time
+in a process. After the analysis the guest rule is applied on the loop, one
+call to the source per device it acts on, each committed as it is made. The
+refresh of findings that ends it, and the one after an administrator's guest
+action, run on a worker thread in a session of their own and take their turn
+behind any analysis that is running, so the loop does not wait for either. A
+guest action is committed before that refresh, so it is on record whatever the
+refresh meets.
+
+A store is one transaction that begins by checking the lease on the source: it
+is stored whole or not at all. A scheduled pass or a person's Collect that is
+stopped during a store waits for the store to end, however often it is
+cancelled. A collection started by the nudge address is not waited for when the
+server stops: it ends as if killed, with nothing stored and its lease left to
+run out, whether or not its store had begun. A store reads what is already stored in a fixed number of statements
+plus one per 500 new identifiers, never one per item. On SQLite, which allows
+one writer, a request that writes waits for a store in progress and fails if
+the wait passes five seconds. On PostgreSQL a request waits only if it locks
+the row of the source being stored, as opening or ending an exception at that
+source does, and then for at most that one store.
+
+Each collection writes two log lines, at its start and at its end: the source's
+name as saved, who started it (`schedule`, `person` or `nudge`), which retry it
+is, how long it took and how long the store took, items and lookups read and
+new, requests sent to the source, seconds spent waiting for a turn at a request
+limit, and the outcome (`stored`, `partial`, `failed` with its category,
+`replaced`, or `stopped` for a run that was cancelled, with whether its store
+was finished). No key, address or lookup is logged.
+
 The upkeep loop ticks every 30 seconds, and a tick never waits for a provider.
 It starts ending the exceptions whose time is up, and it starts a collection
 pass (the scheduled run if one is due, then the retries that are due) unless
