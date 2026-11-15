@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from test_collection_store import POSTGRES, postgres_database
 
-from nyctr import access, peer, presence, retention
+from nyctr import access, collection, peer, presence, retention
 from nyctr.deps import observation_permitted, observations_permitted
 from nyctr.integrations import IntegrationError, core, registry, unifi
 from nyctr.models import Audit, DevicePresence, Integration, Observation, Resource, Setting, User, utc, utcnow
@@ -346,15 +346,16 @@ WRITERS = {
 
 
 @contextmanager
-def stopped_before_it_writes(second):
+def stopped_before_it_writes(second, at=1):
     """Stop the next writer after its reads and just before it sends its first change, and run `second` then.
 
     That is the moment a writer holds what it read and has changed nothing yet, so a second writer that
     is not made to wait would have its work overwritten. `second` runs on another thread and connection.
+    With `at=2` the writer is stopped before it sends its second lot of changes, holding what the first took.
 
     Yields what happened: whether `second` was still waiting when the first went on, and what it raised.
     """
-    seen = {"armed": True, "waiting": [], "raised": []}
+    seen = {"armed": at, "waiting": [], "raised": []}
 
     def run():
         try:
@@ -364,7 +365,10 @@ def stopped_before_it_writes(second):
 
     def before_flush(session, *_rest):
         if seen["armed"] and (session.dirty or session.new or session.deleted):
-            seen["armed"] = False
+            seen["armed"] -= 1
+        else:
+            return
+        if not seen["armed"]:
             seen["other"] = threading.Thread(target=run)
             seen["other"].start()
             seen["other"].join(0.5)  # under the locks it is still waiting, however long this machine takes
@@ -437,6 +441,43 @@ def test_removing_the_source_waits_for_a_writer_of_a_tie(tmp_path, monkeypatch, 
         assert seen["waiting"] == [True] and seen["raised"] == []
         assert done is None or done.status_code == 200  # the writer finished its own work first, undisturbed
     assert stored(app) == [] and stored(app, "conflict") == []
+
+
+@BOTH_ENGINES
+def test_a_collection_being_stored_and_a_change_of_the_setting_never_wait_for_each_other(tmp_path, monkeypatch,
+                                                                                          request, engine):
+    """A store holds the rows of what its read listed, then marks what it missed. The switch holds no device's row.
+
+    Two devices are tied. The read listed the phone and missed the laptop. The store has written the phone's
+    row and is about to mark the laptop when an administrator changes the setting. If the switch took the
+    tied devices' rows it would hold the laptop's and wait for the phone's, the store the other way round.
+    """
+    app, _gateway = home(tmp_path, monkeypatch, **on(engine, request))
+    with browser(app, LAPTOP) as sam, browser(app, PHONE, KIM) as kim, \
+            browser(app, "198.51.100.9", LIVE_ADMIN) as chief:
+        sam.get("/api/me/device")
+        kim.get("/api/me/device")
+        answers = []
+
+        def change_the_setting():
+            answers.append(chief.put("/api/presence", json={"enabled": True, "reach_back_hours": 1}).status_code)
+
+        with app.state.session_factory() as db:
+            listed = [{key: getattr(row, key) for key in ("id", "name", "kind", "provider", "source_id", "site_id",
+                                                          "evidence_kind", "attributes")}
+                      for row in db.scalars(select(Resource).where(Resource.integration_id == "gw"))
+                      if row.id != "gw:client:laptop"]
+            with stopped_before_it_writes(change_the_setting, at=2) as seen:
+                collection.apply_snapshot(db, db.get(Integration, "gw"), core.Snapshot(resources=listed),
+                                          app.state.settings)
+                db.commit()
+        assert seen["raised"] == [] and answers == [200]  # neither was ended for the other's sake
+        if engine == "postgresql":
+            assert seen["waiting"] == [False]  # the switch had no row of the store's to wait for
+    with app.state.session_factory() as db:
+        assert retention.is_missing(db.get(Resource, "gw:client:laptop"))
+        assert not retention.is_missing(db.get(Resource, "gw:client:phone"))
+    assert all(tie.reach_from == tie.first_at - timedelta(hours=1) for tie in stored(app))
 
 
 def test_a_source_that_declares_no_lookup_takes_no_part_in_finding_a_device(tmp_path, monkeypatch):

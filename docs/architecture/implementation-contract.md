@@ -110,9 +110,11 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   that row before it reads who is tied to the device, so of two people signing in on one
   unshared device at the same moment one is tied and the other is answered `other_person`.
   Every writer of a tie (a sign-in, `PUT /api/presence`, an assignment, `DELETE
-  /api/presence/{id}` and the worker's record keeping) takes its locks in one order before it
-  reads a tie: the setting's row, the devices' rows, then the ties. So an assignment saved
-  while the setting is being changed is never overwritten by it.
+  /api/presence/{id}` and the worker's closing of lapsed ties) takes its locks in one order
+  before it reads a tie: the setting's row first and the ties last. A sign-in, an assignment
+  and forgetting take the one device's row in between; `PUT /api/presence` and the worker take
+  no device's row, so they cannot wait on a collection that is being stored while it waits on
+  them. So an assignment saved while the setting is being changed is never overwritten by it.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as

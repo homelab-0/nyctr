@@ -11,13 +11,21 @@ whose network holds the address. What a tie lets a member see is decided in
 conflict where one must not be made. Its record keeping runs in the worker
 (`keep`), so that a member's page writes nothing unless a tie is made.
 
-Everything that writes a tie takes the same locks in the same order before it
-reads one: the stored setting's row (`hold`), then the rows of the devices
-concerned (`_devices`), then the ties themselves (`_ties`). That is a sign-in,
-the switch, an assignment, forgetting and the worker's record keeping. So none
-of them works from a tie another is changing, and none can deadlock another.
-Removing a source or dropping a device comes from the other side, holding the
-device's row before it deletes the ties, which fits the same order.
+Which write takes which locks, always in this order and before it reads a tie:
+- A sign-in, an assignment and forgetting take the stored setting's row
+  (`hold`), then the one device's row, then the ties (`_ties`).
+- The switch and the worker's closing of lapsed ties take the setting's row and
+  then the ties, and no device's row. They concern many devices at once, and a
+  collection's store holds device rows in an order of its own (what a read
+  listed, then what it missed), so a writer holding many could wait for the
+  store while the store waits for it.
+- Removing a source or dropping a device holds the devices' rows and then the
+  ties, without the setting's row.
+- The worker's delete of records 90 days old takes none of these, by design:
+  nothing else changes a record that old.
+Every writer in the first two lines waits on the setting's row, so only one of
+them runs at a time and none works from a tie another is changing. Ties are
+always taken in id order. Reads that write nothing take no lock.
 """
 
 from __future__ import annotations
@@ -125,7 +133,10 @@ def hold(db: Session) -> Recognition:
 
 
 def _devices(db: Session, ids) -> None:
-    """Hold these devices' rows, in id order, until this transaction ends. Second in the order, after `hold`."""
+    """Hold these devices' rows, in id order, until this transaction ends. Second in the order, after `hold`.
+
+    For a writer that concerns one device. One that concerns many holds none: see the module's opening.
+    """
     wanted = sorted(set(ids))
     if wanted:
         db.execute(select(Resource.id).where(Resource.id.in_(wanted)).order_by(Resource.id).with_for_update()).all()
@@ -161,8 +172,7 @@ def keep(factory, now) -> None:
                   DevicePresence.last_at <= now - timedelta(days=TIE_DAYS))
         # The locks are taken only when a tie is waiting to be closed, so an idle tick holds nobody up.
         if db.scalar(select(DevicePresence.id).where(*lapsed).limit(1)) is not None:
-            hold(db)
-            _devices(db, db.scalars(select(DevicePresence.device_id).where(*lapsed)))
+            hold(db)  # and no device's row: a collection being stored may hold some of them
             for tie in _ties(db, *lapsed):
                 tie.ended_at, tie.ended_by = _ended(tie, now), "expired"
                 _said(db, None, tie, "lapsed")
@@ -438,8 +448,9 @@ def switch(body: Recognition, user=Depends(admin), db: Session = Depends(get_db)
     if db.get(Setting, KEY) is None:  # the lock below needs a row to hold
         db.add(Setting(key=KEY, value=Recognition().model_dump(), updated_at=now))
         db.flush()
-    hold(db)  # a sign-in that is writing a tie finishes first, and none starts until this commits
-    _devices(db, db.scalars(select(DevicePresence.device_id).where(*live_ties(now))))
+    # A sign-in that is writing a tie finishes first, and none starts until this commits. No device's row is
+    # taken: a collection being stored holds some, in its own order, and the two would wait for each other.
+    hold(db)
     for tie in _ties(db, *live_ties(now)):  # read under the locks, so nothing written meanwhile is put back
         if not body.enabled:
             tie.ended_at, tie.ended_by, ended = now, user.id, ended + 1
