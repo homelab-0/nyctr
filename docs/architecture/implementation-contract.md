@@ -155,7 +155,7 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   tier can be named. The form before tiers (`{enabled,max_score,max_minutes,
   per_day}`) is read from storage and refused here. Each request the rule looks
   at leaves an audit record `access.rule_checked` with
-  `{domain,tier,outcome: opens|would_open|waits,checks,limits,minutes?,why?}`.
+  `{domain,tier,outcome: may_open|would_open|waits,checks,limits,minutes?,why?}`.
 - `PUT /api/rules/guest` with `{enabled,hits 1–50,minutes 1–120}`.
 - `GET /api/leases` -> Lease[]; members see their own. Reading reconciles expiry.
 - `POST /api/leases/{id}/end` (admin). 502 if the provider entry could not be

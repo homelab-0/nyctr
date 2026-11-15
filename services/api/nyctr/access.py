@@ -760,7 +760,7 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
         """Keep what the rule said about this request: its tier and limits, and every check with its result."""
         limits = getattr(rule, verdict.tier).model_dump() if verdict.tier in policy.AUTOMATIC else {}
         audit(db, None, "access.rule_checked", row.id, domain=row.domain, tier=verdict.tier,
-              outcome="opens" if verdict.allow else "would_open" if verdict.would else "waits",
+              outcome="may_open" if verdict.allow else "would_open" if verdict.would else "waits",
               checks=[list(check) for check in verdict.checks],
               limits={"per_day": rule.per_day, "daily_total": rule.daily_total, **limits},
               **({"minutes": verdict.minutes} if verdict.allow or verdict.would else {}),
