@@ -30,7 +30,14 @@ The referenced PostgreSQL database must be dedicated to this demo, never a live 
 {{- else }}
 
 Live-mode configuration targets {{ .Values.publicUrl }}.
-Verify TLS, proxy header normalization, actual proxy peer IPs and network restrictions.
+Verify TLS, actual proxy peer IPs and network restrictions.
+Client addresses: Nyctr reads entry {{ .Values.proxyHops }} from the right of X-Forwarded-For, and only from a peer in forwardedAllowIps.
+{{- if eq (int .Values.proxyHops) 1 }}
+Your proxy must append the address it saw to that header.
+{{- else }}
+Your edge must keep the client's address, each proxy after it must append the address it saw, and every request must pass all {{ .Values.proxyHops }}.
+{{- end }}
+Check it after install: sign in as an administrator and open Setup, This installation, "The address Nyctr sees for you".
 Secret values and external PostgreSQL connectivity are not validated by Helm rendering.
 {{- if .Values.httpRoute.enabled }}
 Verify the HTTPRoute Accepted/ResolvedRefs conditions and the parent Gateway's HTTPS listener.

@@ -182,12 +182,9 @@ reach the pod:
 
 If you cannot establish all three, use exact proxy addresses.
 
-Known gap: those three cover who can connect to the pod. They do not cover a
-client that reaches Nyctr through your proxy from an address inside the trusted
-range, such as another pod in the same cluster. Nyctr skips that address as if
-it were a proxy and believes the client address the request claimed. Nyctr
-grants nothing on the client address alone, but treat it as a hint when you
-trust a range, and use exact proxy addresses if that is not acceptable.
+Those three cover who can connect to the pod. A client that reaches Nyctr
+through your proxy from an address inside the trusted range, such as another pod
+in the same cluster, is recorded under its own address: see the next section.
 
 ```yaml
 forwardedAllowIps:
@@ -202,12 +199,42 @@ networkPolicy:
         matchLabels:
           app.kubernetes.io/name: envoy
 ```
- The public edge must replace untrusted client-supplied
-forwarding headers; subsequent trusted hops must maintain a verified chain.
-Uvicorn uses these addresses to determine whether `X-Forwarded-For` and
-`X-Forwarded-Proto` are trustworthy. A missing/untrusted proxy collapses users
-onto the same peer login quota; overbroad trust enables spoofing. See the
+
+### Which address Nyctr takes for a client
+
+Nyctr works out the client's address itself; the web server no longer does.
+
+1. A peer that is not in `forwardedAllowIps` is the client. Its headers are
+   ignored.
+2. For a peer that is, Nyctr reads `X-Forwarded-For` from the right and takes
+   the entry at position `proxyHops` (default 1): the one your own proxy wrote.
+   Entries to its left came from the client and are never read.
+3. A missing or malformed entry gives no address. Such requests share one
+   sign-in quota, and no device is recognised for them.
+
+What you must provide:
+
+- **The proxy appends the address it saw** to `X-Forwarded-For`, or replaces the
+  header with it. Most gateways and ingress controllers do so by default.
+- **The edge keeps the client's address.** If a load balancer or node in front
+  of the proxy replaces the client's address with its own, the proxy can only
+  write that one, and every member appears at it.
+- **Two proxies** (an edge in front of the gateway): set `proxyHops: 2`. The
+  edge writes the client's address, the gateway appends the edge's, and every
+  request must pass both. A client that can reach the gateway directly writes
+  the entry Nyctr would read, and so chooses its own address. If some clients
+  do reach it directly, leave `proxyHops: 1`: clients behind the edge then
+  appear at the edge's address, which is wrong for them but cannot be forged.
+
+`X-Forwarded-Proto` is taken from a listed peer only. Nyctr's cookies and its
+single sign-on return address do not depend on it: they follow `publicUrl` and
+`portalUrl`. An unlisted proxy puts all its users in one sign-in quota; a list
+that is too wide lets a peer in it name any address. See the
 [deployment proxy guidance](../../deploy/README.md#trusted-reverse-proxies-and-login-limits).
+
+To check the path, sign in as an administrator and open Setup, This
+installation, "The address Nyctr sees for you". It shows the address, whether
+the connection came from a listed proxy, and which entry was read.
 
 Exact IP lists must be updated when proxy peer addresses change. Do not trust a NAT or
 bridge address unless network controls guarantee that connections through it

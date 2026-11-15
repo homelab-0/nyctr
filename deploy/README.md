@@ -70,7 +70,8 @@ must also explicitly allow the console's hostname through
 
 Set `FORWARDED_ALLOW_IPS` to the comma-separated **actual proxy peer IP addresses
 seen by the application**. The production Compose override requires this value.
-It is a Uvicorn setting, so it has no `NYCTR_` prefix. For example, use
+It keeps the name the web server gave it, so it has no `NYCTR_` prefix, but Nyctr
+reads it now and accepts only addresses and ranges. For example, use
 `FORWARDED_ALLOW_IPS=10.42.0.10,10.42.0.11` only if those are your trusted proxies.
 Do not use `*`, a client network, or a shared container/cluster subnet. (The Helm
 chart accepts a bounded range only together with its NetworkPolicy, and only
@@ -81,29 +82,38 @@ sees; confirm it from connection/access logs before configuring trust. Trust a
 NAT/bridge address only when network controls ensure that every connection from
 it must pass through your trusted proxy.
 
-Uvicorn uses `X-Forwarded-For` and `X-Forwarded-Proto` only from trusted peers to
-set the request's client address and scheme. Nyctr's login limiter uses that
-resolved client address, with a separate per-account quota. If the proxy is not
-trusted or does not forward the client address, all its users share the same
-60-attempt peer quota. See the official [Uvicorn proxy settings](https://uvicorn.dev/settings/#http)
-and [proxy deployment guidance](https://uvicorn.dev/deployment/#proxies-and-forwarded-headers).
+Nyctr works out the client's address itself, and the image starts the web server
+with its own forwarded-header handling off (`--no-proxy-headers`). A peer that is
+not listed is the client and its headers are ignored. For a listed peer, Nyctr
+reads `X-Forwarded-For` from the right and takes the entry at position
+`NYCTR_PROXY_HOPS` (default 1), the one your own proxy wrote; entries to its left
+came from the client and are never read. A missing or malformed entry gives no
+address. The sign-in limit counts by that address, with a separate per-account
+quota. If the proxy is not listed, all its users share one 60-attempt quota, and
+so do all requests that have no address.
 
-The public-facing proxy must **replace client-supplied forwarding headers** with
-values derived from its incoming connection. For a single Nginx proxy terminating
-HTTPS, the relevant directives are:
+Your proxy must **write the address it saw** as the last entry, by appending it
+or by replacing the header. What is in front of the proxy must **keep the
+client's address**: a load balancer or NAT that replaces it leaves the proxy
+nothing else to write. For a single Nginx proxy terminating HTTPS, either
+`$remote_addr` or `$proxy_add_x_forwarded_for` does it:
 
 ```nginx
 proxy_set_header X-Forwarded-For $remote_addr;
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
-For multiple proxies, the public edge must first normalize untrusted headers;
-subsequent trusted hops may append their verified peer address. List each trusted
-hop explicitly. Keep direct application access restricted to those proxies using
-the loopback binding, firewall rules, or Kubernetes NetworkPolicy. Forwarding
-headers from other peers are ignored; permitting untrusted traffic to arrive
-under a trusted proxy/NAT address would defeat that protection. Retain the exact
-external `NYCTR_PUBLIC_URL` and secure cookies independently of this setting.
+With two proxies, set `NYCTR_PROXY_HOPS=2` and list the inner one. The edge
+writes the client's address, the inner proxy appends the edge's, and every
+request must pass both: a client that can reach the inner proxy directly writes
+the entry Nyctr would read. Keep direct application access restricted to your
+proxies using the loopback binding, firewall rules, or Kubernetes NetworkPolicy;
+a peer that arrives under a listed address is believed. `X-Forwarded-Proto` is
+taken from a listed peer only, and cookies and sign-in do not depend on it: they
+follow the exact external `NYCTR_PUBLIC_URL` and the secure-cookie setting.
+
+To check the path, sign in as an administrator and open Setup, This
+installation, "The address Nyctr sees for you".
 
 ## Kubernetes / GitOps
 
@@ -114,8 +124,10 @@ Initial requirements:
 - A writable temporary mount and PostgreSQL accessible through a secret-backed
   `NYCTR_DATABASE_URL`.
 - `NYCTR_MODE=live`, HTTPS public URL, secure cookies and local bootstrap or OIDC.
-- `FORWARDED_ALLOW_IPS` set to the trusted ingress peer addresses, with forwarded
-  headers normalized and direct application access restricted as described above.
+- `FORWARDED_ALLOW_IPS` set to the trusted ingress peer addresses and
+  `NYCTR_PROXY_HOPS` to the number of your proxies, the server started with
+  `--no-proxy-headers` as the image does, and direct application access
+  restricted as described above.
 - Provider credentials injected from Kubernetes Secrets/External Secrets; never
   bake tokens or API keys into the image.
 - Readiness/liveness probes on `/api/health` and network policy permitting only

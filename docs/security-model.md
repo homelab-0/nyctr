@@ -80,6 +80,22 @@ way a browser sends an origin, lower-case and without the scheme's default port.
 Without `NYCTR_PORTAL_URL` there is one address and roles alone decide what a
 session can do, as before.
 
+## Where a request came from
+
+Nyctr works out a request's address in one place (`nyctr/peer.py`), and the web
+server's own forwarded-header handling is off. A peer that is not one of the
+operator's listed proxies is the client and its headers are ignored. Behind a
+listed proxy Nyctr reads `X-Forwarded-For` from the right and takes the entry
+that proxy wrote, at position `NYCTR_PROXY_HOPS`; entries to its left came from
+the client and are never read, and a missing or malformed entry gives no
+address. The sign-in limit counts by that address, and requests with none share
+one quota. The address is evidence of where a request came from. It grants
+nothing by itself.
+
+This holds only as far as the operator's set-up does: a peer that can connect
+under a listed address is believed, and with more than one hop a client that
+can reach an inner proxy directly writes the entry Nyctr reads.
+
 ## Threats considered
 
 | Threat | Required boundary |
@@ -97,6 +113,7 @@ session can do, as before.
 | Expiry removes a rule Nyctr did not create | A pre-existing allowlist entry is recorded as not owned and never removed; overlapping leases keep the entry until the last one ends |
 | A guest is cut off on a guessed identity | DNS lookups are tied to a guest only by an administrator link or a unique name match, which is labelled inferred and shown in the guest's timeline |
 | A guest device attacks the system that polices it | Nyctr is never the captive portal and nothing on the guest network needs to reach it; a guard test fails if any API route answers without a session ([guest Wi-Fi design](guest-wifi.md)) |
+| A client claims another address in a forwarded header | Only a listed proxy is believed, and only about the entry it wrote itself; entries the client sent are never read |
 | Someone forges the collection nudge | It needs a shared secret, reads nothing from the request, only starts a read-only collection, and runs at most once every 30 seconds |
 | Model is told to act by text in a log or request | The model has no tools or credentials; evidence is passed as data in a bounded pack with addresses, emails, codes and identifiers removed |
 | Model cites something it was not shown | Citations are resolved against the pack on the server and dropped when they do not match |
@@ -178,7 +195,8 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   not a reputation service and must not be presented as one.
 - Device recognition in the member portal matches the connecting address to
   inventory among devices already assigned to the caller. It does not work
-  through NAT or a proxy that hides the member's LAN address.
+  through NAT, or through a proxy that is not listed or does not pass the
+  member's LAN address on.
 - Audit export and tamper-evidence. A database audit table is not an immutable log.
 - Explicit schema upgrade and rollback testing beyond the initial schema.
 - Image signing/SBOM publication, pinned release images and upgrade policy.

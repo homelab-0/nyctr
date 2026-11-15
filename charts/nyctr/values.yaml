@@ -30,6 +30,13 @@ portalUrl: ""
 # because every peer in the range that can connect is believed. Ranges wider
 # than /16 (IPv4) or /48 (IPv6) are rejected.
 forwardedAllowIps: []
+# How many of your own proxies a request passes before it reaches the pod. Nyctr
+# reads the X-Forwarded-For entry at this position from the right, the one your
+# proxy wrote, and nothing to its left. 1 fits one proxy that appends the address
+# it saw. With two (an edge in front of the gateway) set 2: the edge must write
+# the client's address, the gateway must append the edge's, and every request
+# must pass both. See "Proxy identity and network restrictions" in the README.
+proxyHops: 1
 sessionHours: 12
 blockRetentionHours: 24
 

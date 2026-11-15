@@ -15,7 +15,7 @@ From this directory, using Python 3.12 or later:
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 NYCTR_MODE=demo NYCTR_PUBLIC_URL=http://localhost:5173 \
-  .venv/bin/uvicorn nyctr.main:app --host 127.0.0.1 --port 8000
+  .venv/bin/uvicorn nyctr.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
 Run the web development server separately and proxy `/api` to this server. Set

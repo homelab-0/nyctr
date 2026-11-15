@@ -54,6 +54,10 @@ interface text in plain words a non-technical member can read.
   traffic are distinct evidence types.
 - Members must pass API authorization against event-time identity and current
   device access. A network address or DNS profile alone is not user identity.
+- Only `nyctr/peer.py` says which address a request came from: the peer, or
+  behind a listed proxy the `X-Forwarded-For` entry that proxy wrote, counted
+  from the right by `NYCTR_PROXY_HOPS`. No other module reads the peer or a
+  forwarded header, and a caller given no address must not fall back to one.
 - Expiring an inbox observation must not delete an existing request or its audit
   history. Revalidate freshness before starting a new request or execution.
 - Temporary access uses owned durable leases, explicit scope, verification and

@@ -64,6 +64,8 @@ spec:
               value: {{ eq .Values.mode "live" | quote }}
             - name: FORWARDED_ALLOW_IPS
               value: {{ join "," .Values.forwardedAllowIps | quote }}
+            - name: NYCTR_PROXY_HOPS
+              value: {{ .Values.proxyHops | quote }}
             - name: NYCTR_SESSION_HOURS
               value: {{ .Values.sessionHours | quote }}
             - name: NYCTR_BLOCK_RETENTION_HOURS

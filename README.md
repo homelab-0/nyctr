@@ -153,7 +153,8 @@ demo mode. Live mode never creates the demonstration accounts or sample topology
 
 1. Copy `.env.production.example` to `.env.production` and set the database
    password, initial administrator credentials, public HTTPS URL, and the actual
-   reverse-proxy peer addresses in `FORWARDED_ALLOW_IPS`.
+   reverse-proxy peer addresses in `FORWARDED_ALLOW_IPS` (and `NYCTR_PROXY_HOPS`
+   if a request passes more than one of your proxies).
 2. Place Nyctr behind your HTTPS ingress or reverse proxy.
 3. Start the production Compose override:
 
@@ -262,7 +263,7 @@ python3 -m venv .venv
 python -m pip install -e './services/api[dev]'
 NYCTR_MODE=demo NYCTR_DATABASE_URL=sqlite:///./nyctr-demo.db \
   NYCTR_PUBLIC_URL=http://localhost:5173 \
-  uvicorn nyctr.main:app --host 127.0.0.1 --port 8000 --reload
+  uvicorn nyctr.main:app --host 127.0.0.1 --port 8000 --reload --no-proxy-headers
 ```
 
 ```sh
