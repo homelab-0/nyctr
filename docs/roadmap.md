@@ -81,7 +81,8 @@ UniFi console, NextDNS profile and Proxmox node, with differences fixed.
 - Proxmox cluster/node/guest firewall and virtual-network relationships.
   **(first version: nodes, bridges, guests, cards and firewall switches)**
 - Device identity reconciliation, temporal assignments and attribution confidence.
-  **(first version: administrator links from DNS labels to devices)**
+  **(first version: administrator links from DNS labels to devices, and a tie
+  between a signed-in person and the device they are on, off by default)**
 - Guest Wi-Fi history beyond connected clients, and a UniFi-side block for
   locked-out devices. Guests keep signing in on UniFi's portal
   ([design](guest-wifi.md)); Nyctr does not become an external portal.

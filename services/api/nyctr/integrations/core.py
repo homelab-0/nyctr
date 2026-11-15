@@ -209,6 +209,21 @@ def log_read(window_from: datetime, since: datetime | None, now: datetime) -> tu
     return start, {"window_from": iso(window_from), "read_from": iso(start), "read_to": iso(now)}
 
 
+def plain_address(value: Any):
+    """Read one address as an address, so two spellings of it compare equal; None for anything else.
+
+    A name, a zone, or IPv4 written with leading zeros is not one. IPv4 written
+    inside IPv6 is that IPv4 address. Case and zero compression do not matter.
+    """
+    try:
+        address = ipaddress.ip_address(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    if address is None or (address.version == 6 and address.scope_id):
+        return None
+    return address.ipv4_mapped or address if address.version == 6 else address
+
+
 def source_id(value: Any) -> str:
     """Validate a bounded source identifier without altering its original value."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,255}", value):

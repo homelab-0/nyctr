@@ -9,6 +9,7 @@ from .config import Settings
 from .models import (
     AccessRequest,
     DeviceGrant,
+    DevicePresence,
     Finding,
     GuestAction,
     GuestPass,
@@ -17,6 +18,7 @@ from .models import (
     Observation,
     Relationship,
     Resource,
+    Setting,
     Sighting,
     User,
     Workspace,
@@ -177,6 +179,12 @@ def seed_demo(db):
     db.add(DeviceGrant(device_id="old-laptop", user_id="user-jamie", valid_from=now - timedelta(days=30),
                        valid_until=now - timedelta(hours=1)))
     db.add(DeviceGrant(device_id="old-laptop", user_id="user-admin", valid_from=now - timedelta(hours=1)))
+    # Recognition at sign-in, as it looks once switched on: one tie, and one sign-in on someone else's device.
+    db.add(Setting(key="device_recognition", value={"enabled": True, "reach_back_hours": 2}))
+    for kind, device, hours in [("tie", "tablet-family", 6), ("conflict", "workstation", 2)]:
+        when = now - timedelta(hours=hours)
+        db.add(DevicePresence(kind=kind, user_id="user-jamie", device_id=device, basis="live", first_at=when,
+                              last_at=when, reach_from=when - timedelta(hours=2) if kind == "tie" else None))
     privacy, threat = ["blocklist:hagezi-multi-pro-plusplus"], ["threat-intelligence-feeds"]
     events = [
         ("block-gallery", "laptop-jamie", "Jamie's MacBook", "click.proofing-studio.example", "HaGeZi Multi PRO++", privacy, 8),

@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, access, assistant, guests, model, query, removal, retention, worker
+from . import __version__, access, assistant, guests, model, presence, query, removal, retention, worker
 from . import blocks as block_list
 from .collection import (  # noqa: F401
     after_collection,
@@ -269,7 +269,7 @@ def create_app(settings: Settings | None = None):
         return {"ok": True}
 
     app.include_router(oidc_router)
-    for feature in (access, guests, query, assistant):
+    for feature in (access, guests, query, assistant, presence):
         app.include_router(feature.router)
 
     @app.get("/api/model")

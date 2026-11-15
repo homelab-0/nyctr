@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
@@ -31,6 +31,13 @@ def _upgrade_to_2(connection):
                 kind = column.type.compile(dialect=dialect)
                 connection.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {kind}'))
     connection.execute(SchemaVersion.__table__.insert().values(version=2))
+
+
+def _upgrade_to_3(connection):
+    """Add the table of sign-in ties. Nothing that exists is altered, so every stored row stays as it was."""
+    if "device_presence" not in inspect(connection).get_table_names():
+        Base.metadata.create_all(connection, tables=[Base.metadata.tables["device_presence"]])
+    connection.execute(SchemaVersion.__table__.insert().values(version=3))
 
 
 def make_engine(database_url: str):
@@ -74,6 +81,9 @@ def migrate(engine):
         if version == 1:
             _upgrade_to_2(connection)
             version = 2
+        if version == 2:
+            _upgrade_to_3(connection)
+            version = 3
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

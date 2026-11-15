@@ -234,6 +234,7 @@ successful collection. A successful probe proves only the reported read scope.
 | Relationship | Typed edge with source, collection time and evidence kind |
 | Observation | Event, destination, reason, source time and expiry |
 | Device assignment | Identity authorization with time-valid attribution |
+| Sign-in tie | A signed-in person was on a device at a time, or a conflict where no tie was made. Never an assignment |
 | Finding | Explanation, affected resources, supporting evidence and uncertainty |
 | Access request | Durable user intent linked to a specific eligible observation |
 | Integration | Provider, validated configuration, secret reference and collection health |
@@ -333,6 +334,19 @@ device, attributed at event time and still authorized at read time. An upstream
 DNS profile or gateway address often represents multiple people, so unidentified
 events remain administrator-visible. Infrastructure devices are excluded from
 the member workflow unless intentionally classified and assigned.
+
+With recognition at sign-in switched on, a member also sees the device they
+signed in on. On the first portal request after signing in (never inside
+sign-in) `nyctr/presence.py` takes the request's address from `nyctr/peer.py`,
+requires it to lie inside a network a source collected and not to be a listed
+proxy's, and asks that source's integration, through its `devices.lookup`
+capability, which client holds it now: one read with a five-second limit,
+paced, its answer remembered for a minute. If the read fails, the stored
+inventory stands in while the last collection is under 15 minutes old.
+Exactly one client must hold the address. The tie reaches back a set time
+before the first sign-in and assumes the person signing in was the one using
+the device in that time; `nyctr/deps.py` alone turns a tie or an assignment
+into what a member may see.
 
 Inbox freshness and durable history are separate. Expired entries disappear
 from the requestable inbox; existing requests retain their evidence snapshot and

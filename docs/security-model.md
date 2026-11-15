@@ -133,6 +133,8 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | --- | --- |
 | Member requests another person's event by ID | Server authorization, including event-time ownership and current access |
 | Shared upstream resolver is mistaken for a person | Unattributed events remain administrator-only |
+| Signing in on a device shows a member what someone else did on it | Off until an administrator switches it on. A tie is made only for a signed-in person, on the one device the gateway says holds the request's address, never on infrastructure, on another person's device or on a device another person is tied to unless it is shared. It reaches back a set time before the first sign-in (two hours unless set otherwise, 24 at most) and assumes the person signing in was the one using the device in that time. That is the one place a member sees events from before Nyctr knew who was on the device |
+| Everyone arrives from one address because a proxy hides theirs | A listed proxy's address is tied to nobody and administrators are told. An address outside every collected network, held by no device or by two, is tied to nobody |
 | A total, a filter count or where a page ends gives away another person's event | The list of blocked lookups applies member rights in the database query, before the page is cut and before anything is counted |
 | Stale block becomes an access grant | Reject stale requests. An approval is refused once the blocked lookup behind it has expired; refusing or noting a request needs no fresh evidence |
 | Provider redirects leak an API key | No redirected credential-bearing requests |
@@ -237,9 +239,17 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
 - The risk score reads only the block reason and the shape of the name. It is
   not a reputation service and must not be presented as one.
 - Device recognition in the member portal matches the connecting address to
-  inventory among devices already assigned to the caller. It does not work
-  through NAT, or through a proxy that is not listed or does not pass the
-  member's LAN address on.
+  inventory among devices the caller may already see. With "Recognise members'
+  devices when they sign in" switched on (Setup, off by default), Nyctr also
+  asks the gateway which device holds the address and ties the signed-in person
+  to it: a record of its own that never changes whose a device is, ends 30 days
+  after the last sign-in from it or when the member or an administrator ends
+  it, and is kept 90 days after that. Neither works through NAT, or through a
+  proxy that is not listed or does not pass the member's LAN address on. A
+  router or address translator that is not a listed proxy and is itself in the
+  inventory would be tied to the first person who signs in through it: check
+  the address Nyctr sees for you before switching recognition on. The gateway
+  lookup has been run only against fabricated answers.
 - Audit export and tamper-evidence. A database audit table is not an immutable log.
 - Explicit schema upgrade and rollback testing beyond the initial schema.
 - Image signing/SBOM publication, pinned release images and upgrade policy.

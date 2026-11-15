@@ -20,6 +20,7 @@ from .models import (
     Audit,
     DeviceGrant,
     DeviceLink,
+    DevicePresence,
     Finding,
     GuestAction,
     GuestPass,
@@ -153,6 +154,7 @@ def forget(db, ids: list[str]) -> None:
     for start in range(0, len(ids), 500):
         items = ids[start:start + 500]
         db.execute(delete(DeviceGrant).where(DeviceGrant.device_id.in_(items)))
+        db.execute(delete(DevicePresence).where(DevicePresence.device_id.in_(items)))
         db.execute(delete(DeviceLink).where(or_(DeviceLink.source_id.in_(items), DeviceLink.device_id.in_(items))))
         db.execute(update(Observation).where(Observation.device_id.in_(items))
                    .values(device_id=None, attribution="unverified"))

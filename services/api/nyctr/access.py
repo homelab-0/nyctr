@@ -23,10 +23,10 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import peer, risk, schedule
+from . import peer, presence, risk, schedule
 from .collection import SECRET_REF
 from .config import Settings
-from .deps import admin, columns, device_permitted, get_db, identity, observation_permitted
+from .deps import admin, columns, device_assigned, device_permitted, get_db, identity, observation_permitted
 from .integrations import IntegrationError, registry
 from .models import (
     AccessRequest,
@@ -43,6 +43,7 @@ from .models import (
 )
 from .policy import AccessRule, GuestRule, get_list, get_rule, put_list, put_rule
 from .security import audit
+from .sites import site_of
 
 router = APIRouter(prefix="/api")
 
@@ -1093,25 +1094,34 @@ def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(
 
 
 @router.get("/me/device")
-def this_device(request: Request, auth=Depends(identity), db: Session = Depends(get_db)):
+async def this_device(request: Request, auth=Depends(identity), db: Session = Depends(get_db)):
     """Recognise the device this browser is on, only among devices the caller is allowed to see.
 
-    The connecting address is matched to inventory. An address alone never
-    grants anything: the device must already be assigned to the caller.
+    With recognition switched on, `presence` asks the gateway which device
+    holds the connecting address and ties the signed-in caller to it, or says
+    why not. Otherwise, and when that finds nothing, the address is matched to
+    the stored inventory among devices the caller may already see. An address
+    alone never grants anything.
     """
-    user = auth[0]
+    user, session = auth
     settings: Settings = request.app.state.settings
-    address = peer.client_address(request)
-    rows = [r for r in db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name))
-            if device_permitted(db, r, user)]
-    match = next((r for r in rows if address and address == r.attributes.get("ip")), None)
+    seen = peer.seen(request)
+    found = presence.Found()
+    if settings.mode != "demo":
+        found = await presence.recognise(db, settings, user, session, seen, site_of(request))
+    match = found.device
+    rows = [] if match else [r for r in db.scalars(select(Resource).where(Resource.kind == "client")
+                                                   .order_by(Resource.name)) if device_permitted(db, r, user)]
+    match = match or next((r for r in rows if seen.address and seen.address == r.attributes.get("ip")), None)
     simulated = False
     if match is None and settings.mode == "demo":
         # Demo has no real network. Pretend the browser is on the member's own device.
         match = next((r for r in rows if r.classification == "personal"), None)
         simulated = match is not None
+    how = None if match is None else "assigned" if device_assigned(db, match, user) else "signed_in"
     return {"device_id": match.id if match else None, "name": match.name if match else None,
-            "simulated": simulated}
+            "simulated": simulated, "how": how, "reason": None if match else found.why,
+            "message": None if match else presence.WHY.get(found.why)}
 
 
 @router.get("/me/address")
