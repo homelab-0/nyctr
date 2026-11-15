@@ -53,6 +53,8 @@ WHY = {
     "proxy": "This request reached Nyctr from an address your device shares with other people, so Nyctr cannot "
              "tell which device this is.",
     "outside": "This request did not come from your network, so Nyctr cannot tell which device this is.",
+    "ipv6": "This request reached Nyctr over IPv6, a kind of address Nyctr cannot yet match to a device, so it "
+            "cannot tell which device this is.",
     "not_answering": "Nyctr could not ask your network which device this is just now. Open this page again in a "
                      "few minutes.",
     "nobody": "Your network lists no device at the address this request came from, so Nyctr cannot tell which "
@@ -209,7 +211,8 @@ async def recognise(db: Session, app_settings, user, session, seen, site: str) -
     address = core.plain_address(seen.address)
     sources = _sources(db, address) if address is not None else []
     if not sources:
-        return Found(why="outside")
+        # No source collects a network's IPv6 range yet, so such a request is said to be that, not "outside".
+        return Found(why="ipv6" if address is not None and address.version == 6 else "outside")
     holders, basis = [], "live"
     for integration in sources:
         answer, how = await _holders(db, integration, address, now)
@@ -246,6 +249,24 @@ def attention(db: Session) -> list[dict]:
                        "Nyctr sees for you under Setup, This installation."}]
 
 
+def release(db: Session, device: Resource, by: str, now) -> int:
+    """End at once every tie on a device held by anyone but its owner, and say how many. The caller commits.
+
+    For when an administrator changes whose a device is, so that it never stays
+    listed under people it no longer belongs to. A device that is shared now
+    keeps its ties: several people may hold one there.
+    """
+    if device.classification == "shared":
+        return 0
+    ended = 0
+    for tie in db.scalars(select(DevicePresence).where(
+            *live_ties(now), DevicePresence.device_id == device.id,
+            DevicePresence.user_id != (device.owner_id or ""))):
+        tie.ended_at, tie.ended_by, ended = now, by, ended + 1
+        audit(db, by, "presence.ended", device.id, user_id=tie.user_id, because="assignment")
+    return ended
+
+
 def _end(db: Session, tie: DevicePresence, by: str, now) -> None:
     """End every tie in force of that person on that device, at once."""
     for row in db.scalars(select(DevicePresence).where(
@@ -257,7 +278,10 @@ def _end(db: Session, tie: DevicePresence, by: str, now) -> None:
 
 @router.get("/presence")
 def listed(auth=Depends(identity), db: Session = Depends(get_db)):
-    """List sign-in ties. A member gets their own ties in force; an administrator every tie and conflict on record."""
+    """List sign-in ties. A member gets their own ties in force; an administrator every tie and conflict on record.
+
+    Only an administrator is shown the address a person signed in from and the device's hardware address.
+    """
     user, now = auth[0], utcnow()
     _sweep(db, now)
     db.commit()
@@ -268,6 +292,7 @@ def listed(auth=Depends(identity), db: Session = Depends(get_db)):
     for row in rows:
         device = db.get(Resource, row.device_id)
         items.append({**columns(row, "id kind user_id device_id basis first_at last_at ended_at"),
+                      **(columns(row, "address mac") if user.role == "admin" else {}),
                       "user_name": names.get(row.user_id, ""), "device_name": device.name if device else ""})
     return {"items": items, **(settings(db).model_dump() if user.role == "admin" else {})}
 

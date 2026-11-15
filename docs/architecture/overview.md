@@ -343,7 +343,11 @@ proxy's, and asks that source's integration, through its `devices.lookup`
 capability, which client holds it now: one read with a five-second limit,
 paced, its answer remembered for a minute. If the read fails, the stored
 inventory stands in while the last collection is under 15 minutes old.
-Exactly one client must hold the address. The tie reaches back a set time
+Exactly one client must hold the address, and only an IPv4 address can be
+matched: a request over IPv6 is tied to nothing and the member is told why.
+A tie ends when its person or an administrator ends it, 30 days after the
+last sign-in, and when the device is given to someone else, to nobody or to
+infrastructure. The tie reaches back a set time
 before the first sign-in and assumes the person signing in was the one using
 the device in that time; `nyctr/deps.py` alone turns a tie or an assignment
 into what a member may see.

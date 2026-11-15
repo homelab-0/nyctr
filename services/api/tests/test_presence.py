@@ -128,6 +128,7 @@ def test_the_switch_is_off_until_an_administrator_turns_it_on(tmp_path, monkeypa
 
 @pytest.mark.parametrize("address, holds, code, says", [
     ("198.51.100.7", {}, "outside", "did not come from your network"),
+    ("2001:db8::10", {}, "ipv6", "over IPv6"),
     ("192.0.2.99", {}, "nobody", "lists no device"),
     (LAPTOP, {"phone": LAPTOP}, "several", "more than one device"),
     (LAPTOP, {"laptop": None, "newcomer": LAPTOP}, "not_collected", "has not read this device"),
@@ -135,11 +136,11 @@ def test_the_switch_is_off_until_an_administrator_turns_it_on(tmp_path, monkeypa
 ])
 def test_an_address_that_names_no_one_device_of_a_person_is_tied_to_nothing(tmp_path, monkeypatch, address, holds,
                                                                              code, says):
-    """Outside every collected network, held by nobody, claimed by two, not yet collected, or infrastructure."""
+    """Outside every collected network, over IPv6, held by nobody, claimed by two, not yet collected, or infrastructure."""
     app, gateway = home(tmp_path, monkeypatch)
     gateway["holds"].update(holds)
     refused(app, address, code, says)
-    assert gateway["reads"] == (0 if code == "outside" else 1)
+    assert gateway["reads"] == (0 if code in {"outside", "ipv6"} else 1)
 
 
 def test_a_listed_proxys_address_is_tied_to_nothing_and_administrators_are_told(tmp_path, monkeypatch):
@@ -226,6 +227,7 @@ def test_the_first_portal_request_ties_the_person_and_a_later_sign_in_moves_its_
         assert [row["id"] for row in sam.get("/api/devices").json()] == ["gw:client:laptop"]
         mine = sam.get("/api/presence").json()
         assert [(row["kind"], row["device_name"]) for row in mine["items"]] == [("tie", "Laptop")] and "enabled" not in mine
+        assert "address" not in mine["items"][0] and "mac" not in mine["items"][0]  # for administrators only
     first, = stored(app)
     assert (first.user_id, first.basis, first.address, first.mac) == ("sam", "live", LAPTOP, "00:00:5e:00:53:01")
     assert first.reach_from == first.first_at - timedelta(hours=2)
@@ -382,6 +384,8 @@ def test_a_shared_device_holds_several_ties_and_an_administrator_sees_and_ends_t
             assert sorted((row["kind"], row["user_name"], row["device_name"]) for row in told["items"]) == [
                 ("conflict", "Sam", "Tablet"), ("tie", "Kim", "Shared"), ("tie", "Sam", "Shared")]
             assert all(row["first_at"] and row["last_at"] and row["ended_at"] is None for row in told["items"])
+            assert {(row["address"], row["mac"]) for row in told["items"] if row["kind"] == "tie"} == {
+                (SHARED, "00:00:5e:00:53:01")}  # where each signed in from, shown to administrators only
             assert admin.put("/api/presence", json={"enabled": True, "reach_back_hours": 25}).status_code == 422
             kims = next(row for row in told["items"] if row["kind"] == "tie" and row["user_name"] == "Kim")
             assert admin.delete(f"/api/presence/{kims['id']}").json() == {"ok": True}
@@ -392,6 +396,52 @@ def test_a_shared_device_holds_several_ties_and_an_administrator_sees_and_ends_t
     with app.state.session_factory() as db:
         changed = db.scalars(select(Audit).where(Audit.action == "presence.setting_changed")).all()[-1]
         assert changed.details == {"enabled": False, "reach_back_hours": 2, "ties_ended": 1}
+
+
+def assigned(admin, device, classification, *owners):
+    """Have an administrator say whose a device is, as the console does."""
+    answer = admin.put(f"/api/devices/gw:client:{device}/assignment",
+                       json={"classification": classification, "user_ids": list(owners)})
+    assert answer.status_code == 200, answer.text
+
+
+@pytest.mark.parametrize("was, becomes, owners, keeps", [
+    ("shared", "personal", ["kim"], ["kim"]),      # stops being shared: only the new owner's tie stays
+    ("shared", "unassigned", [], []),              # set to nobody yet
+    ("shared", "infrastructure", [], []),          # set to not a personal device
+    ("personal", "personal", ["sam"], []),         # its owner changes: the old owner's tie ends
+    ("personal", "unassigned", [], []),            # its owner goes
+    ("unassigned", "personal", ["kim"], []),       # nobody's, then someone else's than the one tied
+    ("unassigned", "shared", ["sam", "kim"], ["sam"]),  # becoming shared ends nothing
+    ("shared", "shared", ["sam"], ["kim", "sam"]),      # still shared, other people listed: nothing ends
+    ("unassigned", "unassigned", [], ["sam"]),          # saved again with nothing changed: nothing ends
+])
+def test_a_device_that_changes_hands_keeps_no_tie_but_its_new_owners(tmp_path, monkeypatch, was, becomes, owners,
+                                                                       keeps):
+    """Whoever a device no longer belongs to is no longer listed under it: their ties end at once, audited."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    device = {"shared": "shared", "personal": "tablet", "unassigned": "laptop"}[was]
+    people = {"shared": [LIVE_MEMBER, KIM], "personal": [KIM], "unassigned": [LIVE_MEMBER]}[was]
+    for who in people:
+        with browser(app, DEVICES[device][0], who) as person:
+            assert person.get("/api/me/device").json()["device_id"] == f"gw:client:{device}"
+    with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        assigned(admin, device, becomes, *owners)
+        listed = admin.get("/api/presence").json()["items"]
+    assert sorted(row["user_id"] for row in listed if row["kind"] == "tie" and not row["ended_at"]) == keeps
+    ended = [tie for tie in stored(app) if tie.ended_at is not None]
+    with app.state.session_factory() as db:
+        admin_id = db.scalar(select(User.id).where(User.email == LIVE_ADMIN[0]))
+        audits = db.scalars(select(Audit).where(Audit.action == "presence.ended")).all()
+    assert {tie.ended_by for tie in ended} <= {admin_id} and len(ended) == len(people) - len(keeps)
+    assert sorted((row.actor_id, row.target_id, row.details["user_id"], row.details["because"]) for row in audits) == \
+        sorted((admin_id, f"gw:client:{device}", tie.user_id, "assignment") for tie in ended)
+    for who in people:  # and what a person may see follows at once
+        with browser(app, "testclient", who) as person:
+            mine = [row["id"] for row in person.get("/api/devices").json()]
+        name = "sam" if who is LIVE_MEMBER else "kim"
+        may = name in keeps or (becomes in {"personal", "shared"} and name in owners)
+        assert (f"gw:client:{device}" in mine) == may, (name, mine)
 
 
 # --- AC-5: the gateway lookup ------------------------------------------------------------------------------------

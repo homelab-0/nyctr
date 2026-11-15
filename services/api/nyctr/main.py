@@ -648,7 +648,9 @@ def create_app(settings: Settings | None = None):
 
         Validate classification and active users, close existing grants at the current
         time, and open the new grants without backdating visibility. Record the
-        classification change in the same committed transaction.
+        classification change in the same committed transaction. When the device
+        stops being shared or its owner changes, every sign-in tie on it held by
+        anyone but the new owner ends in that transaction too.
         """
         row = db.scalar(select(Resource).where(Resource.id == device_id).with_for_update())
         if not row or row.kind != "client":
@@ -666,10 +668,14 @@ def create_app(settings: Settings | None = None):
                                               DeviceGrant.valid_until.is_(None)).values(valid_until=now))
         for id_ in body.user_ids:
             db.add(DeviceGrant(device_id=device_id, user_id=id_, valid_from=now))
+        before = (row.classification, row.owner_id)
         row.classification = body.classification
         row.owner_id = body.user_ids[0] if body.classification == "personal" else None
         audit(db, user.id, "device.assignment_changed", device_id, classification=body.classification,
               user_ids=body.user_ids)
+        if (row.classification, row.owner_id) != before:
+            # A device that changed hands is no longer listed under people who signed in on it before.
+            presence.release(db, row, user.id, now)
         db.commit()
         return resource_json(row)
 

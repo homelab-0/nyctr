@@ -244,12 +244,20 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   asks the gateway which device holds the address and ties the signed-in person
   to it: a record of its own that never changes whose a device is, ends 30 days
   after the last sign-in from it or when the member or an administrator ends
-  it, and is kept 90 days after that. Neither works through NAT, or through a
+  it, and is kept 90 days after that. When an administrator sets a device to
+  one person, to nobody or to not a personal device, or changes its owner,
+  every tie on it held by anyone but the new owner ends at once and is
+  audited. A tie or conflict record holds the address the request came from
+  and the device's hardware address. Only administrators are shown them, and
+  they go when the record does, 90 days after a tie ends or after a
+  conflict's last attempt. Neither works through NAT, or through a
   proxy that is not listed or does not pass the member's LAN address on. A
   router or address translator that is not a listed proxy and is itself in the
   inventory would be tied to the first person who signs in through it: check
-  the address Nyctr sees for you before switching recognition on. The gateway
-  lookup has been run only against fabricated answers.
+  the address Nyctr sees for you before switching recognition on. A request
+  that reaches Nyctr over IPv6 is never tied: sources collect IPv4 ranges
+  only, and the portal tells the member so. The gateway lookup has been run
+  only against fabricated answers.
 - Audit export and tamper-evidence. A database audit table is not an immutable log.
 - Explicit schema upgrade and rollback testing beyond the initial schema.
 - Image signing/SBOM publication, pinned release images and upgrade policy.

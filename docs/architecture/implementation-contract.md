@@ -80,14 +80,20 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   caller's devices. `how` is `assigned` or `signed_in`. With recognition at sign-in switched on,
   the first request after signing in ties the caller to the one device the gateway says holds
   the request's address; when no device is recognised, `reason` is a code and `message` the
-  sentence to show (never whose a device is).
+  sentence to show (never whose a device is). A request over IPv6 has its own reason, `ipv6`:
+  no source collects IPv6 ranges, so it is never tied.
 - `GET /api/presence` -> `{items}`: a member's own ties in force; for an administrator every
   tie and conflict on record, with `enabled` and `reach_back_hours`. An item is
   `{id,kind,user_id,user_name,device_id,device_name,basis,first_at,last_at,ended_at}`, `kind`
-  being `tie` or `conflict`.
+  being `tie` or `conflict`. An administrator's items also carry `address` (where the request
+  came from) and `mac` (the device's hardware address); a member's never do. Both are deleted
+  with the record, 90 days after a tie ends or after a conflict's last attempt.
 - `PUT /api/presence` with `{enabled,reach_back_hours}` (0 to 24) is admin-only. Switching it
   off ends every tie; a shorter reach applies to ties already made.
 - `DELETE /api/presence/{id}` ends a tie at once: a member their own, an administrator any.
+  Changing whose a device is (`PUT /api/devices/{id}/assignment`) also ends, in the same
+  transaction and audited, every tie on it held by anyone but the new owner, unless the device
+  is shared afterwards.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as
