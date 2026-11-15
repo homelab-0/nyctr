@@ -69,7 +69,9 @@ UniFi console, NextDNS profile and Proxmox node, with differences fixed.
 
 - Durable background collection, scheduling, bounded retries and health reporting.
   **(first version: in-process schedule set in the console; a failed scheduled
-  collection is retried up to three times before the source is shown as failed)**
+  collection is retried up to three times before the source is shown as failed;
+  what a collection read is stored without stopping the server, and a DNS log is
+  read from where the last read ended)**
 - UniFi ports, zones, rule ordering and configuration snapshots.
   **(done: equipment uplinks, each network's VLAN and address range, the gateway
   filed on evidence when the console does not list it as one, and devices placed
@@ -130,6 +132,8 @@ of pre-existing or independently changed provider configuration.
 - Multiple sites and organizations with explicit tenancy boundaries.
 - Chart upgrade compatibility and broader GitOps deployment workflows.
 - Retention policies, audit export, backups, upgrades and release verification.
+  **(first version of retention: expired blocked lookups are removed, and items a
+  source stopped reporting are dropped after whole reads on 7 separate days)**
 - Large-graph performance, accessibility review, localization and mobile polish.
 
 ## Out of scope without a separate design decision
