@@ -196,7 +196,7 @@ class Upkeep:
         self.dropped_at = None
 
     def tick(self) -> None:
-        """Start a collection pass if none is going, remove what has expired or left, then start the endings due.
+        """Start a collection pass if none is going and the endings that are due, then remove what expired or left.
 
         Lookups whose time is up go at every tick; what has left a source is looked for once
         an hour (`retention`). Neither calls a source.
@@ -206,12 +206,6 @@ class Upkeep:
         """
         if self.collecting is None or self.collecting.done():
             self.collecting = asyncio.create_task(self._collect())
-        now = self.clock()
-        retention.expire_lookups(self.factory, now)
-        if self.dropped_at is None or now - self.dropped_at >= retention.DROP_EVERY:
-            # Stamped first, so a run that fails is not tried again at every tick.
-            self.dropped_at = now
-            retention.drop(self.factory, now)
         with self.factory() as db:
             clear_stale_reviews(db)
             due = db.execute(select(Lease.id, Lease.integration_id).where(
@@ -224,6 +218,13 @@ class Upkeep:
             # Endings still going at this source cover it; what they miss is due again next tick.
             if source not in self.ending or self.ending[source].done():
                 self.ending[source] = asyncio.create_task(end_at_source(self.factory, self.settings, lease_ids))
+        # Last, so a failure here never holds up an ending.
+        now = self.clock()
+        retention.expire_lookups(self.factory, now)
+        if self.dropped_at is None or now - self.dropped_at >= retention.DROP_EVERY:
+            # Stamped first, so a run that fails is not tried again at every tick.
+            self.dropped_at = now
+            retention.drop(self.factory, now)
 
     async def _collect(self) -> None:
         """Run one collection pass. A failure is logged without its cause text; the next tick starts another."""

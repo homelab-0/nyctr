@@ -328,10 +328,10 @@ def create_app(settings: Settings | None = None):
         blocks, oldest, newest = db.execute(select(func.count(), func.min(Observation.observed_at),
                                                    func.max(Observation.observed_at)).where(live)).one()
         # What a source left out of its latest whole read is counted apart, never as present.
-        kinds, missing = {}, {}
-        for kind, gone, items in db.execute(select(Resource.kind, retention.flagged(), func.count())
-                                            .group_by(Resource.kind, retention.flagged())).all():
-            (missing if gone else kinds)[kind] = items
+        by_kind = select(Resource.kind, func.count()).group_by(Resource.kind)
+        missing = dict(db.execute(by_kind.where(retention.flagged())).all())
+        kinds = {kind: items - missing.get(kind, 0) for kind, items in db.execute(by_kind).all()
+                 if items > missing.get(kind, 0)}
         return {"resource_count": sum(kinds.values()), "kind_counts": kinds, "missing_counts": missing,
                 "relationship_count": count(Relationship), "finding_count": count(Finding),
                 "recent_block_count": blocks, "oldest_block_at": oldest and utc(oldest),
