@@ -152,10 +152,11 @@ def forget(db, ids: list[str], by: str | None = None) -> None:
     A sign-in tie on one of them ends on record, under `by` or under nobody's name, and goes too.
     """
     gone = set(ids)
+    # Once for all of them, before the lots below: the ties are taken in one order, whatever lot their device is in.
+    ties_gone(db, ids, by)
     for start in range(0, len(ids), 500):
         items = ids[start:start + 500]
         db.execute(delete(DeviceGrant).where(DeviceGrant.device_id.in_(items)))
-        ties_gone(db, items, by)
         db.execute(delete(DeviceLink).where(or_(DeviceLink.source_id.in_(items), DeviceLink.device_id.in_(items))))
         db.execute(update(Observation).where(Observation.device_id.in_(items))
                    .values(device_id=None, attribution="unverified"))

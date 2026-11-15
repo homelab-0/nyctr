@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from test_collection_store import POSTGRES, postgres_database
 
-from nyctr import access, collection, peer, presence, retention
+from nyctr import access, collection, peer, presence, removal, retention
 from nyctr.deps import observation_permitted, observations_permitted
 from nyctr.integrations import IntegrationError, core, registry, unifi
 from nyctr.models import Audit, DevicePresence, Integration, Observation, Resource, Setting, User, utc, utcnow
@@ -246,6 +246,19 @@ def test_a_busy_database_is_a_reason_not_an_error_and_the_work_is_off_the_server
 # The tests that run two writers against each other run on both engines. The PostgreSQL case needs a server
 # named in NYCTR_TEST_POSTGRES (its address, ending in /) and makes and drops a database of its own.
 BOTH_ENGINES = pytest.mark.parametrize("engine", ["sqlite", "postgresql"])
+# How long, in seconds, a test gives the second writer before it asks whether that one is still waiting.
+# On PostgreSQL a waiter waits for as long as it takes, so the bound is generous: a slow run must not make
+# a request that had nothing to wait for look like one that waited. SQLite itself gives up on a lock after
+# five seconds, so there the bound has to stay well inside that, or the waiter would fail before its turn.
+WAIT = {"sqlite": 0.5, "postgresql": 5.0}
+# How long the second writer gets to finish once the first is done. Only a writer that never finishes reaches it.
+FINISH = 60.0
+
+
+def finished(other):
+    """Wait for the second writer's thread and require that it ended, so a stuck one fails the test, not the run."""
+    other.join(FINISH)
+    assert not other.is_alive(), "the second writer never finished"
 
 
 def on(engine, request):
@@ -289,9 +302,9 @@ def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_i
 
     def record(*args):
         # The tie is about to be written. An administrator switches off now, on another connection.
-        other = threading.Thread(target=lambda: answers.append(switch_off(app)))
+        other = threading.Thread(target=lambda: answers.append(switch_off(app)), daemon=True)
         other.start()
-        other.join(1.0)  # with the lock it is still waiting when this gives up, however long that takes
+        other.join(WAIT[engine])  # with the lock it is still waiting when this gives up, however long that takes
         waiting.append(other.is_alive())
         others.append(other)
         return write(*args)
@@ -299,7 +312,7 @@ def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_i
     monkeypatch.setattr(presence, "_record", record)
     with browser(app, LAPTOP) as sam:
         sam.get("/api/me/device")
-        others[0].join()
+        finished(others[0])
         assert waiting == [True] and answers == [{"enabled": False, "reach_back_hours": 2}]
         assert sam.get("/api/devices").json() == []
     tie, = stored(app)
@@ -319,16 +332,17 @@ def test_two_people_signing_in_on_one_unshared_device_at_the_same_moment_are_not
     with browser(app, LAPTOP) as sam, browser(app, LAPTOP, KIM) as kim:
         def record(*args):
             if not others:  # Sam's write, the first: Kim asks now, on another thread and another connection
-                other = threading.Thread(target=lambda: answers.append(kim.get("/api/me/device").json()))
+                other = threading.Thread(target=lambda: answers.append(kim.get("/api/me/device").json()),
+                                         daemon=True)
                 others.append(other)
                 other.start()
-                other.join(1.0)  # under the lock Kim is still waiting when this gives up, however long that takes
+                other.join(WAIT[engine])  # under the lock Kim is still waiting when this gives up
                 waiting.append(other.is_alive())
             return write(*args)
 
         monkeypatch.setattr(presence, "_record", record)
         assert sam.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
-        others[0].join()
+        finished(others[0])
         assert waiting == [True] and answers[0]["reason"] == "other_person" and answers[0]["device_id"] is None
         assert kim.get("/api/devices").json() == [] and len(sam.get("/api/devices").json()) == 1
     assert [(tie.user_id, tie.ended_at) for tie in stored(app)] == [("sam", None)]
@@ -346,7 +360,7 @@ WRITERS = {
 
 
 @contextmanager
-def stopped_before_it_writes(second, at=1):
+def stopped_before_it_writes(second, wait, at=1):
     """Stop the next writer after its reads and just before it sends its first change, and run `second` then.
 
     That is the moment a writer holds what it read and has changed nothing yet, so a second writer that
@@ -369,15 +383,15 @@ def stopped_before_it_writes(second, at=1):
         else:
             return
         if not seen["armed"]:
-            seen["other"] = threading.Thread(target=run)
+            seen["other"] = threading.Thread(target=run, daemon=True)
             seen["other"].start()
-            seen["other"].join(0.5)  # under the locks it is still waiting, however long this machine takes
+            seen["other"].join(wait)  # under the locks it is still waiting, however long this machine takes
             seen["waiting"].append(seen["other"].is_alive())
 
     event.listen(Session, "before_flush", before_flush)
     try:
         yield seen
-        seen["other"].join()
+        finished(seen["other"])
     finally:
         event.remove(Session, "before_flush", before_flush)
 
@@ -402,7 +416,7 @@ def test_no_writer_of_a_tie_overtakes_another_between_its_read_and_its_write(tmp
         change(app, DevicePresence, kims.id, last_at=utcnow() - timedelta(days=31))  # lapsed, for the worker to close
         who = {"app": app, "sam": sam, "again": again, "chief": chief, "deputy": deputy, "tie": mine.id}
         start = utcnow()
-        with stopped_before_it_writes(lambda: WRITERS[second](who)) as seen:
+        with stopped_before_it_writes(lambda: WRITERS[second](who), WAIT[engine]) as seen:
             WRITERS[first](who)
         assert seen["waiting"] == [True] and seen["raised"] == []
         both = {first, second}
@@ -436,7 +450,7 @@ def test_removing_the_source_waits_for_a_writer_of_a_tie(tmp_path, monkeypatch, 
                 answer = third.request("DELETE", "/api/integrations/gw", json={"name": "Gateway"})
                 assert answer.status_code == 200, answer.text
 
-        with stopped_before_it_writes(remove) as seen:
+        with stopped_before_it_writes(remove, WAIT[engine]) as seen:
             done = WRITERS[first](who)
         assert seen["waiting"] == [True] and seen["raised"] == []
         assert done is None or done.status_code == 200  # the writer finished its own work first, undisturbed
@@ -467,7 +481,7 @@ def test_a_collection_being_stored_and_a_change_of_the_setting_never_wait_for_ea
                                                           "evidence_kind", "attributes")}
                       for row in db.scalars(select(Resource).where(Resource.integration_id == "gw"))
                       if row.id != "gw:client:laptop"]
-            with stopped_before_it_writes(change_the_setting, at=2) as seen:
+            with stopped_before_it_writes(change_the_setting, WAIT[engine], at=2) as seen:
                 collection.apply_snapshot(db, db.get(Integration, "gw"), core.Snapshot(resources=listed),
                                           app.state.settings)
                 db.commit()
@@ -478,6 +492,41 @@ def test_a_collection_being_stored_and_a_change_of_the_setting_never_wait_for_ea
         assert retention.is_missing(db.get(Resource, "gw:client:laptop"))
         assert not retention.is_missing(db.get(Resource, "gw:client:phone"))
     assert all(tie.reach_from == tie.first_at - timedelta(hours=1) for tie in stored(app))
+
+
+@BOTH_ENGINES
+def test_removing_many_devices_and_a_change_of_the_setting_never_wait_for_each_other(tmp_path, monkeypatch, request,
+                                                                                      engine):
+    """Removal deletes devices 500 at a time. It takes every tie on them first, in the order the switch takes ties.
+
+    Two devices are tied and go in different lots of 500, the one with the later tie first. If each lot took
+    its own ties, removal would hold the later tie and want the earlier, the switch the other way round.
+    """
+    app, _gateway = home(tmp_path, monkeypatch, **on(engine, request))
+    with browser(app, LAPTOP) as sam, browser(app, PHONE, KIM) as kim, \
+            browser(app, "198.51.100.9", LIVE_ADMIN) as chief:
+        sam.get("/api/me/device")
+        kim.get("/api/me/device")
+        earlier_tie, later_tie = sorted(stored(app), key=lambda tie: tie.id)
+        going = [later_tie.device_id, *(f"gw:client:spare-{n}" for n in range(499)), earlier_tie.device_id]
+        answers = []
+
+        def change_the_setting():
+            answers.append(chief.put("/api/presence", json={"enabled": True, "reach_back_hours": 1}).status_code)
+
+        with app.state.session_factory() as db:
+            # As the removal route does: the devices' rows first, in id order, then everything that hangs on them.
+            db.scalars(select(Resource.id).where(Resource.id.in_(going)).order_by(Resource.id).with_for_update()).all()
+            with stopped_before_it_writes(change_the_setting, WAIT[engine]) as seen:
+                removal.forget(db, going)
+                db.commit()
+        assert seen["raised"] == [] and answers == [200]  # neither was ended for the other's sake
+        if engine == "postgresql":
+            assert seen["waiting"] == [True]  # the switch waited for the ties removal held, all of them
+    assert stored(app) == []
+    with app.state.session_factory() as db:
+        assert sorted(row.details["user_id"] for row in db.scalars(select(Audit).where(
+            Audit.action == "presence.ended"))) == ["kim", "sam"]
 
 
 def test_a_source_that_declares_no_lookup_takes_no_part_in_finding_a_device(tmp_path, monkeypatch):

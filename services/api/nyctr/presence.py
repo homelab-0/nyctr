@@ -19,8 +19,8 @@ Which write takes which locks, always in this order and before it reads a tie:
   collection's store holds device rows in an order of its own (what a read
   listed, then what it missed), so a writer holding many could wait for the
   store while the store waits for it.
-- Removing a source or dropping a device holds the devices' rows and then the
-  ties, without the setting's row.
+- Removing a source or dropping a device holds the devices' rows and then
+  every tie on them, taken in one pass in id order, without the setting's row.
 - The worker's delete of records 90 days old takes none of these, by design:
   nothing else changes a record that old.
 Every writer in the first two lines waits on the setting's row, so only one of
@@ -186,11 +186,25 @@ def gone(db: Session, ids: list[str], by: str | None) -> None:
     """Take the ties and conflicts on these devices off record, because the devices are going. The caller commits.
 
     Each tie still in force is ended on record first, so the audit trail says whose it was.
-    The caller already holds these devices' rows, which every writer of a tie takes before the tie.
+    The caller already holds these devices' rows, which a sign-in takes before it writes a tie.
+
+    Called once for everything that is going, however many devices, and before any of it is
+    deleted: every tie and conflict on them is taken first, in one pass in id order, the order
+    the switch and the worker take ties in. Taken a lot of devices at a time instead, a later
+    lot could want a tie the switch holds while the switch waits for one an earlier lot took.
     """
-    for tie in _ties(db, *live_ties(), DevicePresence.device_id.in_(ids)):
-        _said(db, by, tie, "device_removed")
-    db.execute(delete(DevicePresence).where(DevicePresence.device_id.in_(ids)))
+    rows: list[str] = []
+    for start in range(0, len(ids), 500):
+        rows += db.scalars(select(DevicePresence.id).where(DevicePresence.device_id.in_(ids[start:start + 500])))
+    rows.sort()
+    lots = [rows[start:start + 500] for start in range(0, len(rows), 500)]
+    for lot in lots:
+        _ties(db, DevicePresence.id.in_(lot))
+    for lot in lots:
+        for tie in db.scalars(select(DevicePresence).where(*live_ties(), DevicePresence.id.in_(lot))
+                              .order_by(DevicePresence.id)):
+            _said(db, by, tie, "device_removed")
+        db.execute(delete(DevicePresence).where(DevicePresence.id.in_(lot)))
 
 
 def _places(db: Session, address) -> list[tuple[Integration, Resource | None]]:
