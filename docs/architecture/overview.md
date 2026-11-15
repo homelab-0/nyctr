@@ -343,8 +343,10 @@ source, one site) and not a listed proxy's, and asks that source's
 integration, through its `devices.lookup` capability, which client of that
 site holds it now: one read with a five-second limit, paced, its answer
 remembered for a minute. If the read fails, that site's stored inventory
-stands in while the last collection is under 15 minutes old. Exactly one
-client must hold the address. A request over IPv6 is refused by rule, and an
+stands in while the last collection is under 15 minutes old, and a tie made
+that way reaches back to nothing before its own first sign-in. Exactly one
+client must hold the address. A source that does not declare the capability
+takes no part. A request over IPv6 is refused by rule, and an
 address two sites both use is tied to nothing; the member is told why. The
 route does its database work on a worker thread and writes only when a tie
 is made, so a busy database holds up that one request and answers it with a

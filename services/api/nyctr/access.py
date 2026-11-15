@@ -1111,13 +1111,14 @@ def this_device(request: Request, auth=Depends(identity), db: Session = Depends(
     if settings.mode != "demo":
         found = presence.recognise(db, settings, user, session, seen, site_of(request))
     match = found.device
-    rows = [] if match else [r for r in db.scalars(select(Resource).where(Resource.kind == "client")
-                                                   .order_by(Resource.name)) if device_permitted(db, r, user)]
-    match = match or next((r for r in rows if seen.address and seen.address == r.attributes.get("ip")), None)
+    rows = [] if match else list(db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name)))
+    # The address is compared first, so only a device that holds it is checked for the caller's access.
+    match = match or next((r for r in rows if seen.address and seen.address == r.attributes.get("ip")
+                           and device_permitted(db, r, user)), None)
     simulated = False
     if match is None and settings.mode == "demo":
         # Demo has no real network. Pretend the browser is on the member's own device.
-        match = next((r for r in rows if r.classification == "personal"), None)
+        match = next((r for r in rows if r.classification == "personal" and device_permitted(db, r, user)), None)
         simulated = match is not None
     how = None if match is None else "assigned" if device_assigned(db, match, user) else "signed_in"
     return {"device_id": match.id if match else None, "name": match.name if match else None,

@@ -4,6 +4,7 @@ import ast
 import asyncio
 import dataclasses
 import inspect
+import threading
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -239,6 +240,74 @@ def test_a_busy_database_is_a_reason_not_an_error_and_the_work_is_off_the_server
     assert not inspect.iscoroutinefunction(access.this_device) and not inspect.iscoroutinefunction(presence.recognise)
 
 
+def switch_off(app):
+    """Have an administrator switch recognition off, through the route's own function, and say what it answered."""
+    with app.state.session_factory() as db:
+        admin = db.scalars(select(User).where(User.role == "admin")).first()
+        return presence.switch(presence.Recognition(enabled=False, reach_back_hours=2), admin, db)
+
+
+def test_recognition_switched_off_while_the_network_is_being_asked_ties_nobody(tmp_path, monkeypatch):
+    """The sign-in passed the check while recognition was on. Switched off before the tie is written, none is made."""
+    app, gateway = home(tmp_path, monkeypatch)
+    provider, asked = registry.get("unifi_network"), []
+
+    async def client_at(integration_id, *_rest):
+        asked.append(switch_off(app))  # the administrator's change lands while the lookup is out
+        return [{"id": f"{integration_id}:client:laptop", "mac": None}]
+
+    monkeypatch.setitem(registry.providers(), provider.id, dataclasses.replace(provider, client_at=client_at))
+    refused(app, LAPTOP, "off", "not set to recognise")
+    assert asked == [{"enabled": False, "reach_back_hours": 2}] and gateway["reads"] == 0
+
+
+def test_switching_recognition_off_waits_for_a_tie_being_written_and_then_ends_it(tmp_path, monkeypatch):
+    """Whichever comes first, no tie is in force once recognition is off: the switch and the write take one lock."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    write, others, answers, waiting = presence._record, [], [], []
+
+    def record(*args):
+        # The tie is about to be written. An administrator switches off now, on another connection.
+        other = threading.Thread(target=lambda: answers.append(switch_off(app)))
+        other.start()
+        other.join(1.0)  # with the lock it is still waiting when this gives up, however long that takes
+        waiting.append(other.is_alive())
+        others.append(other)
+        return write(*args)
+
+    monkeypatch.setattr(presence, "_record", record)
+    with browser(app, LAPTOP) as sam:
+        sam.get("/api/me/device")
+        others[0].join()
+        assert waiting == [True] and answers == [{"enabled": False, "reach_back_hours": 2}]
+        assert sam.get("/api/devices").json() == []
+    tie, = stored(app)
+    assert tie.ended_at is not None
+    with app.state.session_factory() as db:
+        assert db.scalars(select(Audit).where(Audit.action == "presence.setting_changed")).all()[-1].details[
+            "ties_ended"] == 1
+
+
+def test_a_source_that_declares_no_lookup_takes_no_part_in_finding_a_device(tmp_path, monkeypatch):
+    """Its networks and its stored devices tie nobody, and its range does not put another source's in doubt."""
+    app, gateway = home(tmp_path, monkeypatch)
+    other = next(row.id for row in registry.providers().values() if "devices.lookup" not in row.provides)
+    with app.state.session_factory() as db:
+        made = {"integration_id": "plain", "provider": other, "observed_at": utcnow(), "evidence_kind": "observed"}
+        db.add(Integration(id="plain", provider=other, name="Plain", status="connected", last_sync=utcnow(),
+                           config={}))
+        db.flush()
+        db.add(Resource(id="plain:network:lan", name="LAN", kind="network", source_id="lan",
+                        attributes={"subnets": ["192.0.2.0/24", "198.51.100.0/24"]}, **made))
+        db.add(Resource(id="plain:client:desk", name="Desk", kind="client", source_id="desk",
+                        attributes={"ip": "198.51.100.7"}, **made))
+        db.commit()
+    refused(app, "198.51.100.7", "outside", "did not come from your network")
+    with browser(app, LAPTOP) as sam:  # the range both sources hold is asked of the one that can answer
+        assert sam.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
+    assert gateway["reads"] == 1
+
+
 def test_a_listed_proxys_address_is_tied_to_nothing_and_administrators_are_told(tmp_path, monkeypatch):
     """Everyone behind a proxy that hides them arrives from its address, which may itself be in the inventory."""
     app, gateway = home(tmp_path, monkeypatch, trusted_proxies=LAPTOP)
@@ -258,9 +327,15 @@ def test_a_gateway_that_does_not_answer_and_an_old_inventory_tie_nothing(tmp_pat
     refused(app, LAPTOP, "not_answering", "could not ask your network")
     monkeypatch.setattr(presence, "_answers", {})
     change(app, Integration, "gw", last_sync=utcnow())
+    blocked(app, recent=("laptop", 10), early=("laptop", 60))
     with browser(app, LAPTOP) as client:
         assert client.get("/api/me/device").json()["device_id"] == "gw:client:laptop"
-    assert [(tie.device_id, tie.basis) for tie in stored(app)] == [("gw:client:laptop", "stored")]
+        # The inventory may be a quarter of an hour behind, so such a tie shows nothing from before it was made.
+        assert seen_by(client) == []
+        blocked(app, phones=("laptop", 0))
+        assert seen_by(client) == ["phones"]
+    tie, = stored(app)
+    assert (tie.device_id, tie.basis) == ("gw:client:laptop", "stored") and tie.reach_from == tie.first_at
 
 
 def test_an_address_that_changed_hands_since_the_last_collection_goes_to_who_holds_it_now(tmp_path, monkeypatch):
@@ -278,6 +353,9 @@ def test_another_persons_device_is_a_conflict_the_member_learns_nothing_from(tmp
     told = refused(app, TABLET, "other_person", "another person's account")
     assert "Kim" not in str(told) and "tablet" not in str(told).lower()
     assert [(row.user_id, row.device_id) for row in stored(app, "conflict")] == [("sam", "gw:client:tablet")]
+    with app.state.session_factory() as db:
+        assert db.scalars(select(Audit).where(Audit.action == "presence.conflict")).one().details == {
+            "device_name": "Tablet"}
     refused(app, TABLET, "other_person", "another person's account")
     assert len(stored(app, "conflict")) == 1  # asking again moves its time, it does not add a row
 
@@ -343,8 +421,9 @@ def test_the_first_portal_request_ties_the_person_and_a_later_sign_in_moves_its_
     with app.state.session_factory() as db:
         assert [(db.get(Resource, f"gw:client:{name}").classification, db.get(Resource, f"gw:client:{name}").owner_id)
                 for name in DEVICES] == [(row[1], row[2]) for row in DEVICES.values()]
-        assert [row.action for row in db.scalars(select(Audit).where(Audit.action.like("presence.%")))] == [
-            "presence.tied"]
+        assert [(row.action, row.target_id, row.details) for row in db.scalars(
+            select(Audit).where(Audit.action.like("presence.%")))] == [
+                ("presence.tied", "gw:client:laptop", {"device_name": "Laptop"})]
 
 
 def test_a_tie_ends_30_days_after_the_last_sign_in_and_stays_on_record_90_days(tmp_path, monkeypatch):
@@ -369,7 +448,7 @@ def test_a_tie_ends_30_days_after_the_last_sign_in_and_stays_on_record_90_days(t
     with app.state.session_factory() as db:
         assert [(row.actor_id, row.target_id, row.details) for row in db.scalars(
             select(Audit).where(Audit.action == "presence.ended"))] == [
-                (None, "gw:client:laptop", {"user_id": "sam", "because": "lapsed"})]
+                (None, "gw:client:laptop", {"user_id": "sam", "device_name": "Laptop", "because": "lapsed"})]
     change(app, DevicePresence, tie.id, ended_at=utcnow() - timedelta(days=90, minutes=1))
     change(app, DevicePresence, stored(app, "conflict")[0].id, last_at=utcnow() - timedelta(days=89))
     asyncio.run(upkeep._clear(utcnow()))
@@ -602,9 +681,10 @@ def test_a_shared_device_holds_several_ties_and_an_administrator_sees_and_ends_t
         changed = db.scalars(select(Audit).where(Audit.action == "presence.setting_changed")).all()[-1]
         assert changed.details == {"enabled": False, "reach_back_hours": 2, "ties_ended": 2}
         ended = db.scalars(select(Audit).where(Audit.action == "presence.ended")).all()
-        assert sorted((row.target_id, row.details["user_id"], row.details.get("because")) for row in ended) == [
-            ("gw:client:phone", "kim", "switched_off"), ("gw:client:shared", "kim", None),
-            ("gw:client:shared", "sam", "switched_off")]
+        assert sorted((row.details["device_name"], row.details["user_id"], row.details.get("because"))
+                      for row in ended) == [
+            ("Phone", "kim", "switched_off"), ("Shared", "kim", None), ("Shared", "sam", "switched_off")]
+        assert all(row.target_id == "gw:client:" + row.details["device_name"].lower() for row in ended)
         assert {row.actor_id for row in ended} == {changed.actor_id}
 
 
@@ -656,6 +736,28 @@ def test_a_device_that_changes_hands_keeps_no_tie_but_its_new_owners(tmp_path, m
         assert (f"gw:client:{device}" in mine) == may, (name, mine)
 
 
+@pytest.mark.parametrize("device, becomes, owners", [
+    ("laptop", "shared", ["sam", "kim"]),   # nobody's, then shared with the person tied among those named
+    ("laptop", "personal", ["sam"]),        # nobody's, then given to the person tied
+    ("laptop", "unassigned", []),           # saved again with nothing changed
+])
+def test_a_tie_an_assignment_keeps_starts_again_at_the_assignment(tmp_path, monkeypatch, device, becomes, owners):
+    """What an administrator's word does not cover from before it, a tie made earlier must not show either."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    blocked(app, recent=(device, 10), early=(device, 60))
+    with browser(app, DEVICES[device][0]) as sam:
+        sam.get("/api/me/device")
+        assert seen_by(sam) == ["early", "recent"]
+        before = utcnow()
+        with browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+            assigned(admin, device, becomes, *owners)
+        tie, = stored(app)
+        assert tie.ended_at is None and utc(tie.reach_from) >= before
+        assert seen_by(sam) == []
+        blocked(app, phones=(device, 0))
+        assert seen_by(sam) == ["phones"]
+
+
 def test_saving_a_shared_device_again_with_the_same_people_ends_nobodys_tie(tmp_path, monkeypatch):
     """Someone not named who signed in on it afterwards stays tied until the administrator changes who it is for."""
     app, _gateway = home(tmp_path, monkeypatch)
@@ -693,8 +795,8 @@ def test_a_device_that_is_dropped_or_whose_source_is_removed_takes_its_ties_with
         admin_id = db.scalar(select(User.id).where(User.email == LIVE_ADMIN[0]))
         assert [(row.actor_id, row.target_id, row.details) for row in db.scalars(
             select(Audit).where(Audit.action == "presence.ended").order_by(Audit.created_at))] == [
-                (None, "gw:client:laptop", {"user_id": "sam", "because": "device_removed"}),
-                (admin_id, "gw:client:phone", {"user_id": "kim", "because": "device_removed"})]
+                (None, "gw:client:laptop", {"user_id": "sam", "device_name": "Laptop", "because": "device_removed"}),
+                (admin_id, "gw:client:phone", {"user_id": "kim", "device_name": "Phone", "because": "device_removed"})]
     for who in (LIVE_MEMBER, KIM):
         with browser(app, "testclient", who) as person:
             assert person.get("/api/devices").json() == [] and person.get("/api/presence").json() == {"items": []}
@@ -796,3 +898,17 @@ def test_an_integration_declares_the_lookup_and_its_read_together_or_not_at_all(
     monkeypatch.setattr(unifi, "PROVIDER", dataclasses.replace(unifi.PROVIDER, **values))
     with pytest.raises(RuntimeError, match="declares devices.lookup without its actions"):
         registry.providers()
+
+
+def test_a_request_that_matches_no_device_asks_about_nobodys_access(tmp_path, monkeypatch):
+    """The address is compared first. Only a device that holds it is checked for whether the person may see it."""
+    app, _gateway = home(tmp_path, monkeypatch, switched_on=False)
+    with browser(app, "198.51.100.7") as sam, browser(app, "198.51.100.9", LIVE_ADMIN) as admin:
+        assigned(admin, "phone", "personal", "sam")
+        asked = []
+        event.listen(app.state.engine, "before_cursor_execute", lambda _c, _cursor, statement, *_rest: asked.append(
+            statement) if "FROM device_grants" in statement or "FROM device_presence" in statement else None)
+        assert sam.get("/api/me/device").json()["device_id"] is None and asked == []
+    with browser(app, PHONE) as sam:  # the one device at this address is checked, and it is Sam's
+        told = sam.get("/api/me/device").json()
+        assert (told["device_id"], told["how"]) == ("gw:client:phone", "assigned") and len(asked) >= 1

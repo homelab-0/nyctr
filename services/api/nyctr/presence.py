@@ -24,7 +24,7 @@ from datetime import timedelta
 from anyio import from_thread
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -92,11 +92,33 @@ class Found:
 
 def settings(db: Session) -> Recognition:
     """Read the setting in force. Never written, or no longer valid, is off."""
-    row = db.get(Setting, KEY)
+    # The stored value itself is read, never a copy this session already holds: see `_held`.
+    value = db.scalar(select(Setting.value).where(Setting.key == KEY))
     try:
-        return Recognition(**row.value) if row else Recognition()
+        return Recognition(**value) if value is not None else Recognition()
     except ValueError:
         return Recognition()
+
+
+def _held(db: Session) -> Recognition:
+    """Hold the setting's row until this transaction ends, and read the setting again under that hold.
+
+    The one lock that making a tie and switching recognition off both take. Whichever comes
+    second waits for the first to commit, so a tie is never committed after the switch: either
+    the switch finds it and ends it, or the sign-in finds recognition off and makes none.
+    Written as an update that changes nothing, which locks the row on PostgreSQL and takes the
+    one write lock on SQLite.
+    """
+    db.execute(update(Setting).where(Setting.key == KEY).values(updated_at=Setting.updated_at)
+               .execution_options(synchronize_session=False))
+    return settings(db)
+
+
+def _said(db: Session, by: str | None, tie: DevicePresence, because: str | None = None) -> None:
+    """One audit record that a tie ended: whose it was, on which device by name, and why unless a person ended it."""
+    device = db.get(Resource, tie.device_id)
+    audit(db, by, "presence.ended", tie.device_id, user_id=tie.user_id, device_name=device.name if device else "",
+          **({"because": because} if because else {}))
 
 
 def _ended(row: DevicePresence, now):
@@ -117,7 +139,7 @@ def keep(factory, now) -> None:
                 DevicePresence.kind == "tie", DevicePresence.ended_at.is_(None),
                 DevicePresence.last_at <= now - timedelta(days=TIE_DAYS))):
             tie.ended_at, tie.ended_by = _ended(tie, now), "expired"
-            audit(db, None, "presence.ended", tie.device_id, user_id=tie.user_id, because="lapsed")
+            _said(db, None, tie, "lapsed")
         old = now - timedelta(days=KEPT_DAYS)
         db.execute(delete(DevicePresence).where(or_(
             DevicePresence.ended_at <= old, (DevicePresence.kind == "conflict") & (DevicePresence.last_at <= old))))
@@ -130,12 +152,16 @@ def gone(db: Session, ids: list[str], by: str | None) -> None:
     Each tie still in force is ended on record first, so the audit trail says whose it was.
     """
     for tie in db.scalars(select(DevicePresence).where(*live_ties(), DevicePresence.device_id.in_(ids))):
-        audit(db, by, "presence.ended", tie.device_id, user_id=tie.user_id, because="device_removed")
+        _said(db, by, tie, "device_removed")
     db.execute(delete(DevicePresence).where(DevicePresence.device_id.in_(ids)))
 
 
 def _places(db: Session, address) -> list[tuple[Integration, Resource | None]]:
-    """Each source, and site of it, that collected a network whose range holds this address."""
+    """Each source that declares the lookup, and site of it, that collected a network whose range holds this address.
+
+    A source whose integration does not declare `devices.lookup` takes no part: its networks
+    neither tie anybody through its stored inventory nor put another source's range in doubt.
+    """
     found = set()
     for network in db.scalars(select(Resource).where(Resource.kind == "network")):
         for subnet in network.attributes.get("subnets") or []:
@@ -147,7 +173,8 @@ def _places(db: Session, address) -> list[tuple[Integration, Resource | None]]:
     places = []
     for source, site_id in sorted(found):
         site = db.get(Resource, site_id) if site_id else None
-        if (integration := db.get(Integration, source)) is not None:
+        integration = db.get(Integration, source)
+        if integration is not None and registry.provides(integration.provider, "devices.lookup"):
             places.append((integration, site))
     return places
 
@@ -217,14 +244,16 @@ def _record(db: Session, kind: str, user, device: Resource, holder: dict, basis:
     if row is None:
         reach = None
         if kind == "tie":
-            reach = now - timedelta(hours=settings(db).reach_back_hours)
+            # Stored inventory may be 15 minutes behind the network, so a tie that rests on it reaches back
+            # to nothing: if the address has changed hands since, it shows nothing from before this sign-in.
+            reach = now if basis == "stored" else now - timedelta(hours=settings(db).reach_back_hours)
             reach = max(reach, _own_from(db, device, user, now) or reach)
         row = DevicePresence(kind=kind, user_id=user.id, device_id=device.id, first_at=now, reach_from=reach)
         db.add(row)
         if kind == "tie":
-            audit(db, user.id, "presence.tied", device.id)
+            audit(db, user.id, "presence.tied", device.id, device_name=device.name)
         else:
-            audit(db, user.id, "presence.conflict", device.id)
+            audit(db, user.id, "presence.conflict", device.id, device_name=device.name)
     mac = holder.get("mac")
     row.last_at, row.session, row.basis = now, mark, basis
     row.address, row.mac = str(address), mac[:64] if isinstance(mac, str) else None
@@ -300,6 +329,10 @@ def _recognise(db: Session, app_settings, user, session, seen, site: str) -> Fou
     taken = db.scalar(select(DevicePresence.id).where(
         *live_ties(now), DevicePresence.device_id == device.id, DevicePresence.user_id != user.id).limit(1))
     kind = "conflict" if barred or (taken and device.classification != "shared") else "tie"
+    # From here to the commit the switch cannot run, and if it ran since the first check nothing is written.
+    if not _held(db).enabled:
+        db.rollback()
+        return Found(why="off")
     row = _record(db, kind, user, device, holders[0], basis, mark, now, address)
     db.commit()
     return Found(device, row) if kind == "tie" else Found(why="other_person")
@@ -317,19 +350,23 @@ def attention(db: Session) -> list[dict]:
                        "Nyctr sees for you under Setup, This installation."}]
 
 
-def release(db: Session, device: Resource, named: list[str], by: str, now) -> int:
-    """End at once every tie on a device held by anyone its new assignment does not name. The caller commits.
+def release(db: Session, device: Resource, named: list[str], by: str, now, changed: bool = True) -> int:
+    """Bring the ties on a device in line with what an administrator just said about it. The caller commits.
 
-    For when an administrator changes whose a device is or who shares it: their
-    word replaces what sign-ins suggested, so the device never stays listed under
-    people it is no longer for. Someone else who does use a shared device is tied
-    again the next time they sign in on it.
+    When the assignment changed whose the device is or who shares it, every tie held by
+    anyone it does not name ends at once: their word replaces what sign-ins suggested, so
+    the device never stays listed under people it is no longer for. Someone else who does
+    use a shared device is tied again the next time they sign in on it. Every tie that
+    stays, also after a save that changed nothing, starts again at this moment: an
+    assignment does not show what came before it, and a tie made earlier must not either.
     """
     ended = 0
-    for tie in db.scalars(select(DevicePresence).where(
-            *live_ties(now), DevicePresence.device_id == device.id, DevicePresence.user_id.not_in(named))):
-        tie.ended_at, tie.ended_by, ended = now, by, ended + 1
-        audit(db, by, "presence.ended", device.id, user_id=tie.user_id, because="assignment")
+    for tie in db.scalars(select(DevicePresence).where(*live_ties(now), DevicePresence.device_id == device.id)):
+        if changed and tie.user_id not in named:
+            tie.ended_at, tie.ended_by, ended = now, by, ended + 1
+            _said(db, by, tie, "assignment")
+        else:
+            tie.reach_from = max(utc(tie.reach_from), now)
     return ended
 
 
@@ -369,14 +406,17 @@ def switch(body: Recognition, user=Depends(admin), db: Session = Depends(get_db)
     A shorter reach applies to ties already made; a longer one never widens them.
     """
     now, ended = utcnow(), 0
+    if db.get(Setting, KEY) is None:  # the lock below needs a row to hold
+        db.add(Setting(key=KEY, value=Recognition().model_dump(), updated_at=now))
+        db.flush()
+    _held(db)  # a sign-in that is writing a tie finishes first, and none starts until this commits
     for tie in db.scalars(select(DevicePresence).where(*live_ties(now))):
         if not body.enabled:
             tie.ended_at, tie.ended_by, ended = now, user.id, ended + 1
-            audit(db, user.id, "presence.ended", tie.device_id, user_id=tie.user_id, because="switched_off")
+            _said(db, user.id, tie, "switched_off")
         tie.reach_from = max(utc(tie.reach_from), utc(tie.first_at) - timedelta(hours=body.reach_back_hours))
-    row = db.get(Setting, KEY) or Setting(key=KEY)
+    row = db.get(Setting, KEY)
     row.value, row.updated_at, row.updated_by = body.model_dump(), now, user.id
-    db.add(row)
     audit(db, user.id, "presence.setting_changed", KEY, **body.model_dump(), ties_ended=ended)
     db.commit()
     return body.model_dump()
@@ -391,6 +431,6 @@ def forget(tie_id: str, auth=Depends(identity), db: Session = Depends(get_db)):
         raise HTTPException(404, "That device is not on record")
     if tie.ended_at is None:
         _end(db, tie, user.id, utcnow())
-        audit(db, user.id, "presence.ended", tie.device_id, user_id=tie.user_id)
+        _said(db, user.id, tie)
         db.commit()
     return {"ok": True}

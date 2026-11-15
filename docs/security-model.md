@@ -133,7 +133,7 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | --- | --- |
 | Member requests another person's event by ID | Server authorization, including event-time ownership and current access |
 | Shared upstream resolver is mistaken for a person | Unattributed events remain administrator-only |
-| Signing in on a device shows a member what someone else did on it | Off until an administrator switches it on. A tie is made only for a signed-in person, on the one device the gateway says holds the request's address, never on infrastructure, on another person's device or on a device another person is tied to unless it is shared. It reaches back a set time before the first sign-in (two hours unless set otherwise, 24 at most) and assumes the person signing in was the one using the device in that time, but never past the last time an administrator said whose the device is, nor, on a device that is not shared, past the end of another person's tie on it. That is the one place a member sees events from before Nyctr knew who was on the device. A client inside a listed proxy range that reaches the server directly can name any address, and is then tied to the device at the address it names |
+| Signing in on a device shows a member what someone else did on it | Off until an administrator switches it on. A tie is made only for a signed-in person, on the one device the gateway says holds the request's address, never on infrastructure, on another person's device or on a device another person is tied to unless it is shared. It reaches back a set time before the first sign-in (two hours unless set otherwise, 24 at most) and assumes the person signing in was the one using the device in that time, but never past the last time an administrator said whose the device is, nor, on a device that is not shared, past the end of another person's tie on it. That is the one place a member sees events from before Nyctr knew who was on the device. When the gateway does not answer, the stored inventory stands in while the last collection is under 15 minutes old; an address can change hands in that time, so such a tie could name the wrong device, and it therefore reaches back to nothing before its own first sign-in. An administrator finds these ties by `basis: stored` in `GET /api/presence`. A client inside a listed proxy range that reaches the server directly can name any address, and is then tied to the device at the address it names |
 | Everyone arrives from one address because a proxy hides theirs | A listed proxy's address is tied to nobody and administrators are told. An address outside every collected network, held by no device or by two, is tied to nobody |
 | A total, a filter count or where a page ends gives away another person's event | The list of blocked lookups applies member rights in the database query, before the page is cut and before anything is counted |
 | Stale block becomes an access grant | Reject stale requests. An approval is refused once the blocked lookup behind it has expired; refusing or noting a request needs no fresh evidence |
@@ -255,7 +255,17 @@ accounts and synthetic events. Do not expose demo to an untrusted network.
   tie reaches back no further than the last time an administrator set whose
   the device is (saved again unchanged counts too) and, on a device that is
   not shared, no further than the end of the last tie another person held on
-  it. A tie or conflict record holds the address the request came from
+  it. A tie that an assignment keeps starts again at that assignment, so it
+  shows nothing the new assignment does not cover. Making a tie and switching
+  recognition off take one lock on the stored setting, so no tie is committed
+  after the switch. When the gateway does not answer, Nyctr falls back to
+  the stored inventory while the last collection is under 15 minutes old.
+  An address can change hands in that time, and the tie would then name the
+  wrong device. Such a tie has `basis: stored` in `GET /api/presence`, which
+  is how an administrator finds it, and it does not reach back before its
+  own first sign-in, so a wrong match shows nothing from before. Only a
+  source whose integration declares the lookup takes part at all. A tie or
+  conflict record holds the address the request came from
   and the device's hardware address. Only administrators are shown them, and
   they go when the record does, 90 days after a tie ends or after a
   conflict's last attempt. Neither works through NAT, or through a

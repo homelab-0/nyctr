@@ -651,7 +651,7 @@ def create_app(settings: Settings | None = None):
         classification change in the same committed transaction. When the
         classification, the owner or the people named change, every sign-in tie on
         the device held by anyone the new assignment does not name ends in that
-        transaction too.
+        transaction too, and every tie that stays starts again at this save.
         """
         row = db.scalar(select(Resource).where(Resource.id == device_id).with_for_update())
         if not row or row.kind != "client":
@@ -675,9 +675,10 @@ def create_app(settings: Settings | None = None):
         row.owner_id = body.user_ids[0] if body.classification == "personal" else None
         audit(db, user.id, "device.assignment_changed", device_id, classification=body.classification,
               user_ids=body.user_ids)
-        if (row.classification, row.owner_id, set(body.user_ids)) != before:
-            # The administrator's word replaces what sign-ins suggested: nobody it does not name stays tied.
-            presence.release(db, row, body.user_ids, user.id, now)
+        # The administrator's word replaces what sign-ins suggested: after a change nobody it does not name
+        # stays tied, and a tie that stays shows nothing from before this save.
+        presence.release(db, row, body.user_ids, user.id, now,
+                         (row.classification, row.owner_id, set(body.user_ids)) != before)
         db.commit()
         return resource_json(row)
 

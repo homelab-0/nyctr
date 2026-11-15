@@ -100,7 +100,13 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   list is the recorded ending or, until the worker records it, 30 days after `last_at`.
   A new tie's reach starts at the later of `first_at` minus `reach_back_hours`, the device's
   last `device.assignment_changed` record and, unless the device is shared, the end of the
-  last tie another person held on it.
+  last tie another person held on it. A tie made on stored inventory (`basis: stored`) reaches
+  back to nothing: its reach starts at `first_at`. A tie an assignment keeps has its reach moved
+  to that assignment, also when the save changed nothing. The `presence.tied`,
+  `presence.conflict` and `presence.ended` records carry `device_name`. Only a source whose
+  integration declares `devices.lookup` is considered when the address is placed. `PUT
+  /api/presence` and the write of a tie hold the stored setting's row, so no tie commits after
+  recognition is switched off; a sign-in that lost that race answers `off`.
 
 BlockList: `{rows,next,page_size,total,matching,oldest_at,newest_at,counts}`. `rows`
 is Block[]. `total`, `oldest_at`, `newest_at` and `counts` (`band`, `source` as
