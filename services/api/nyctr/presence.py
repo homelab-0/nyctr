@@ -200,10 +200,11 @@ async def recognise(db: Session, app_settings, user, session, seen, site: str) -
     if seen.address is None:
         return Found(why="no_address")
     if seen.address_is_proxy:
-        row = db.get(Setting, PROXY_SEEN) or Setting(key=PROXY_SEEN)
-        row.value, row.updated_at = {"at": now.isoformat()}, now
-        db.add(row)
-        db.commit()
+        row = db.get(Setting, PROXY_SEEN) or Setting(key=PROXY_SEEN, updated_at=now - timedelta(days=1))
+        if utc(row.updated_at) <= now - timedelta(hours=1):  # noted once an hour, not on every request
+            row.value, row.updated_at = {"at": now.isoformat()}, now
+            db.add(row)
+            db.commit()
         return Found(why="proxy")
     address = core.plain_address(seen.address)
     sources = _sources(db, address) if address is not None else []

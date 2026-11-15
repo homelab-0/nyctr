@@ -454,10 +454,10 @@ def test_the_demo_shows_one_tie_and_one_conflict_and_its_simulated_device_is_as_
     """Fabricated names only; signing in to the demo ties nothing and reads no gateway."""
     told = client.get("/api/presence").json()
     assert sorted((row["kind"], row["user_name"], row["device_name"]) for row in told["items"]) == [
-        ("conflict", "Jamie Rivera", "Alex's workstation"), ("tie", "Jamie Rivera", "Front desk tablet")]
+        ("conflict", "Jamie Rivera", "Alex's workstation"), ("tie", "Alex Morgan", "Front desk tablet")]
     assert told["enabled"] is True
     live_signin(client, ("jamie@nyctr.demo", "nyctr-demo"))
     assert client.get("/api/me/device").json() == {
         "device_id": "laptop-jamie", "name": "Jamie's MacBook", "simulated": True, "how": "assigned",
         "reason": None, "message": None}
-    assert len(client.get("/api/presence").json()["items"]) == 1
+    assert client.get("/api/presence").json() == {"items": []}  # a conflict is never listed to the member

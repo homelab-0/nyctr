@@ -180,10 +180,12 @@ def seed_demo(db):
                        valid_until=now - timedelta(hours=1)))
     db.add(DeviceGrant(device_id="old-laptop", user_id="user-admin", valid_from=now - timedelta(hours=1)))
     # Recognition at sign-in, as it looks once switched on: one tie, and one sign-in on someone else's device.
+    # The tie is the administrator's, on a device already theirs, so it shows the member nothing new.
     db.add(Setting(key="device_recognition", value={"enabled": True, "reach_back_hours": 2}))
-    for kind, device, hours in [("tie", "tablet-family", 6), ("conflict", "workstation", 2)]:
+    for kind, user, device, hours in [("tie", "user-admin", "tablet-family", 6),
+                                      ("conflict", "user-jamie", "workstation", 2)]:
         when = now - timedelta(hours=hours)
-        db.add(DevicePresence(kind=kind, user_id="user-jamie", device_id=device, basis="live", first_at=when,
+        db.add(DevicePresence(kind=kind, user_id=user, device_id=device, basis="live", first_at=when,
                               last_at=when, reach_from=when - timedelta(hours=2) if kind == "tie" else None))
     privacy, threat = ["blocklist:hagezi-multi-pro-plusplus"], ["threat-intelligence-feeds"]
     events = [
