@@ -21,7 +21,7 @@ import logging
 
 from sqlalchemy import select, update
 
-from . import schedule
+from . import retention, schedule
 from .access import OPEN, BeingEnded, clear_stale_reviews, end_lease
 from .collection import analyse, collect_integration, off_loop
 from .guests import enforce
@@ -193,15 +193,25 @@ class Upkeep:
         self.factory, self.settings, self.clock = factory, settings, clock
         self.collecting: asyncio.Task | None = None
         self.ending: dict[str | None, asyncio.Task] = {}
+        self.dropped_at = None
 
     def tick(self) -> None:
-        """Start a collection pass if none is going, then the endings that are due.
+        """Start a collection pass if none is going, remove what has expired or left, then start the endings due.
+
+        Lookups whose time is up go at every tick; what has left a source is looked for once
+        an hour (`retention`). Neither calls a source.
 
         A run or retry that comes due during a pass is not claimed until the pass
         ends, so it stays due in the database for the next tick, or for another copy.
         """
         if self.collecting is None or self.collecting.done():
             self.collecting = asyncio.create_task(self._collect())
+        now = self.clock()
+        retention.expire_lookups(self.factory, now)
+        if self.dropped_at is None or now - self.dropped_at >= retention.DROP_EVERY:
+            # Stamped first, so a run that fails is not tried again at every tick.
+            self.dropped_at = now
+            retention.drop(self.factory, now)
         with self.factory() as db:
             clear_stale_reviews(db)
             due = db.execute(select(Lease.id, Lease.integration_id).where(

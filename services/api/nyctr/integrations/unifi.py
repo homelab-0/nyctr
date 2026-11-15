@@ -500,6 +500,11 @@ PROVIDER = Provider(
             "No sites were visible to the credential",
             "Site discovery returned an empty list. Device, network, client, and policy reads were not exercised."),
     },
+    # Every list of items was read in full when only these were recorded; no visible site is not among them.
+    detail_gaps=frozenset({
+        "unifi_networks_details_unavailable", "unifi_devices_details_unavailable", "unifi_detail_limit",
+        "unifi_gateway_not_identified", "unifi_guest_details_unavailable", "unifi_guest_detail_limit",
+        "unifi_vouchers_unavailable", "unifi_wifi_unavailable"}),
     validate=validate, collect=collect_unifi, scope=lambda config: config.get("site_id"),
     issue_pass=actions.unifi_create_voucher, end_pass=actions.unifi_delete_voucher,
     guest_access=actions.unifi_set_guest_access,

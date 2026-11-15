@@ -185,6 +185,9 @@ class Snapshot:
     # it picked up where an earlier collection ended) and where it ended. When the read started
     # after the window did, the observed items here are only those the newly read rows name.
     log: dict[str, str] | None = None
+    # Kinds of item this read did not list in full (log rows cut short, a log that is switched off).
+    # Nothing of these kinds is marked missing on the strength of this read.
+    unread: list[str] = field(default_factory=list)
 
 
 def utc_now() -> datetime:

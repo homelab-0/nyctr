@@ -119,6 +119,9 @@ class Provider:
     # collect(integration_id, config, secret, since=<time>) to pick up where the last stored read
     # ended, and the snapshot says what was read in `Snapshot.log`. See docs/integration-contract.md.
     resumes: bool = False
+    # Gap codes that miss a detail, a setting or a side read and leave every list of items whole.
+    # After any other recorded gap, Nyctr marks nothing of this source as missing.
+    detail_gaps: frozenset[str] = field(default_factory=frozenset)
     # Optional: map one block reason (an identifier or a name) to (category, base score, explanation).
     # A score of None says "this source cannot tell", which the core keeps as unknown. A provider
     # that classifies is the only authority on its own reasons; the core's generic table is not used.

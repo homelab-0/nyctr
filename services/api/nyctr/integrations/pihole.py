@@ -242,5 +242,6 @@ PROVIDER = Provider(
             "The session could not be closed",
             "Nyctr could not sign out. The session expires on its own after a few minutes."),
     },
+    detail_gaps=frozenset({"pihole_sign_out_failed"}),
     validate=validate, collect=collect_pihole, classify=classify, resumes=True,
 )
