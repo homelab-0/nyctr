@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, put, useApi } from '../api';
+import { ModelPanel } from '../components/ModelPanel';
 import {
   ErrorState,
   InlineError,
@@ -15,7 +16,6 @@ import { UNREACHABLE, nextCollection, useSchedule } from '../lib/schedule';
 import type {
   AccessRule,
   AddressSeen,
-  AssistantConfig,
   AuthConfig,
   CollectionSchedule,
   DeviceLabel,
@@ -425,7 +425,6 @@ function SchedulePanel() {
 /** What this installation is configured to do. All of it is set on the server, not here. */
 function SystemPanel({ rules }: { rules: Rules }) {
   const auth = useApi<AuthConfig>('/auth/config');
-  const assistant = useApi<AssistantConfig>('/assistant');
   const rows: [string, string, string][] = [
     ['Mode', auth.data?.mode === 'demo' ? 'Demo' : 'Live', 'NYCTR_MODE'],
     [
@@ -445,15 +444,6 @@ function SystemPanel({ rules }: { rules: Rules }) {
         writeText(source.write_mode as WriteMode),
         'NYCTR_PROVIDER_WRITES',
       ]),
-    [
-      'Assistant',
-      assistant.data?.provider === 'model'
-        ? `Model: ${assistant.data.model}`
-        : assistant.data?.provider === 'sample'
-          ? 'Sample answers (no model connected)'
-          : 'Off (no model connected)',
-      'NYCTR_AI_BASE_URL, NYCTR_AI_MODEL, NYCTR_AI_API_KEY',
-    ],
   ];
   return (
     <Panel
@@ -587,6 +577,7 @@ export default function Setup({ params }: { params: URLSearchParams }) {
       {tab === 'system' && (
         <div className="stack">
           <SchedulePanel />
+          <ModelPanel />
           <SystemPanel rules={rules.data} />
           <AddressPanel />
         </div>

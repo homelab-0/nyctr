@@ -143,7 +143,7 @@ export default function Assistant({
           <div className="stack">
             <p className="aside">
               {provider === 'off'
-                ? 'No model is connected, so questions are off. Set NYCTR_AI_BASE_URL and NYCTR_AI_MODEL on the server to turn them on. The list below is rule-based and always works.'
+                ? 'No model is connected, so questions are off. An administrator can connect one under Setup, This installation. The list below is rule-based and always works.'
                 : provider === 'sample'
                   ? 'Demo mode has no model connected. Answers here are assembled from the stored evidence by fixed templates, and say so.'
                   : 'It reads the same evidence you can see and links to it. It cannot change anything.'}
