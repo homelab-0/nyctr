@@ -14,9 +14,12 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .models import Audit, LoginAttempt, LoginSession, User, utc, utcnow
+from .peer import client_address
 from .sites import PortalIdentity
 
 COOKIE_NAME = "nyctr_session"
+# The one sign-in quota shared by every request whose address Nyctr cannot tell.
+NO_ADDRESS = "unknown"
 
 
 def digest(value: str) -> str:
@@ -106,14 +109,15 @@ def issue_session(db: Session, user: User, response, settings: Settings, old_tok
 
 
 def check_login_attempt(db: Session, request: Request, email: str):
-    # Per-account AND peer quotas. Never trust arbitrary X-Forwarded-For values.
-    """Atomically consume account and peer login quotas in a 15-minute window.
+    """Atomically consume account and address login quotas in a 15-minute window.
 
-    Database upserts serialize concurrent attempts. Exhausting either quota
-    rolls back the transaction and raises HTTP 429; accepted attempts commit
-    before expensive password verification.
+    The address is the one `peer.client_address` works out. A request with no
+    address shares one quota with every other such request, so it is limited
+    like any other and never unlimited. Database upserts serialize concurrent
+    attempts. Exhausting either quota rolls back the transaction and raises
+    HTTP 429; accepted attempts commit before expensive password verification.
     """
-    peer = request.client.host if request.client else "unknown"
+    peer = client_address(request) or NO_ADDRESS
     now = utcnow()
     next_reset = now + timedelta(minutes=15)
     insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert

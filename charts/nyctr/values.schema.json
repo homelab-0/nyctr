@@ -135,6 +135,11 @@
       "maxItems": 128,
       "uniqueItems": true
     },
+    "proxyHops": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10
+    },
     "sessionHours": {
       "type": "integer",
       "minimum": 1,
