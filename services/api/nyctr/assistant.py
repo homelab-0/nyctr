@@ -142,8 +142,8 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
             items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
                           "action": "edit", "title": f"{integration.name} was only partly collected",
                           "detail": "Some older blocked lookups in its time window were not read. This clears "
-                                    "by itself once they are older than the window. A shorter time window "
-                                    "clears it sooner."})
+                                    "once they are older than the window and later collections read everything "
+                                    "new. If it stays, give it a shorter time window."})
         if gaps := last_gaps(db, integration):
             items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
                           "action": "card", "title": f"{integration.name} could not read everything",

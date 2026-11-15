@@ -45,9 +45,9 @@ const FIXED_SOURCE =
 const PARTIAL_NOTE =
   "Only the most recent blocked lookups were read. Older ones in this source's time window were not.";
 
-/** Added on the card, so nobody is asked to act where waiting is enough. */
+/** Added on the card: when waiting is enough, and when it is not. */
 const PARTIAL_CLEARS =
-  'This clears by itself once the missing ones are older than the time window. A shorter time window clears it sooner.';
+  'This clears once the missing ones are older than the time window and later collections read everything new. If it stays, give this source a shorter time window.';
 
 /**
  * Collects configuration for one integration and a server secret reference.

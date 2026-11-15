@@ -71,9 +71,10 @@ gaps". Its card says what could not be read and what that means, and the
 Briefing lists it under "Needs you" until a later collection reads everything. A
 collection that fails stores nothing, so the gaps of the last stored collection
 stay on the card beside the error. A partly collected source is listed there
-too, with a link to its Edit form. It clears by itself once the lookups that
-were left out are older than the time window; a shorter time window clears it
-sooner.
+too, with a link to its Edit form. It clears once the lookups that were left
+out are older than the time window and later collections have stopped leaving
+lookups unread. On a source too busy for that, waiting is not enough, and a
+shorter time window is the cure.
 
 A source of blocked lookups is read from where its last stored collection
 ended, ten minutes earlier to be safe, so a collection every 15 minutes reads
@@ -86,10 +87,12 @@ the last stored one.
 
 The ten minutes are a limit. A lookup the source adds to its log more than ten
 minutes after it happened may be missed: it is read only if the next read
-still starts before it, which it does not once a later lookup has been stored
-more than ten minutes after it. Nothing on the source's card says so: the card
-still says connected. Nyctr cannot see such a lookup, so it cannot count them. If a source is known
-to list lookups that late, its blocked lookups in Nyctr are not complete.
+still starts before it. Often it does not, once a later lookup has been
+stored, but it can: the place a read picks up from is also held back by where
+the last read ended, and an edit makes the next read the whole window. Nothing
+on the source's card says so: the card still says connected. Nyctr cannot see
+a lookup it missed, so it cannot count them. If a source is known to list
+lookups that late, its blocked lookups in Nyctr may not be complete.
 
 A source is partly collected when lookups inside what a collection set out to
 read were left unread: typically the first collection on a busy source, which

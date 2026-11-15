@@ -669,10 +669,10 @@ describe('integrations add capabilities', () => {
         /Only the most recent blocked lookups were read\. Older ones in this source's time window were not\./,
       ),
     ).toBeTruthy();
-    // Nobody is asked to act where waiting is enough.
+    // Says when waiting is enough and when it is not.
     expect(
       screen.getByText(
-        /This clears by itself once the missing ones are older than the time window\./,
+        /This clears once the missing ones are older than the time window and later collections read everything new\. If it stays, give this source a shorter time window\./,
       ),
     ).toBeTruthy();
     expect(screen.getByText('Partial')).toBeTruthy();
