@@ -50,6 +50,7 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
   'integration.collection_failed': (name) => `Could not collect from ${name}`,
   'integration.diagnosed': (name) => `Tested ${name}`,
   'integration.removed': (name) => `Removed the source ${name}`,
+  'inventory.dropped': (name) => `Dropped what has left ${name}`,
   'integration.updated': (name) => `Edited the source ${name}`,
   'integration.retries_stopped': (name) => `Stopped retrying ${name} and showed it as failed`,
 };

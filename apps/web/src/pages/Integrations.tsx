@@ -296,6 +296,8 @@ function CapabilityTable({ catalog, connected }: { catalog: Catalog; connected: 
 interface RemovalPlan {
   name: string;
   remove: Record<string, number>;
+  /** Stored items the source left out of its latest read. They go too, counted apart from what is present. */
+  missing?: number;
   keep: Record<string, number>;
   refusal: string | null;
   notice: string | null;
@@ -309,6 +311,9 @@ const GOES: [string, string, string][] = [
   ['lookups', 'blocked lookup', 'blocked lookups'],
   ['assignments', 'device assignment to a person', 'device assignments to people'],
   ['links', 'link from a DNS label', 'links from DNS labels'],
+];
+const GONE: [string, string, string][] = [
+  ['missing', 'item not seen at the last collection', 'items not seen at the last collection'],
 ];
 const STAYS: [string, string, string][] = [
   ['requests', 'request', 'requests'],
@@ -351,7 +356,9 @@ function RemoveSource({
       setPending(false);
     }
   };
-  const goes = plan.data ? counted(plan.data.remove, GOES) : [];
+  const goes = plan.data
+    ? [...counted(plan.data.remove, GOES), ...counted({ missing: plan.data.missing || 0 }, GONE)]
+    : [];
   const stays = plan.data ? counted(plan.data.keep, STAYS) : [];
   return (
     <Modal title="Remove source" onClose={onClose}>

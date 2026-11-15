@@ -1066,6 +1066,7 @@ describe('editing a saved source', () => {
 /** Server counts for removing the fabricated source. */
 const plan = {
   name: connection.name,
+  missing: 2,
   remove: {
     devices: 2,
     networks: 1,
@@ -1090,6 +1091,8 @@ describe('removing a saved source', () => {
         /2 devices, 1 network, 5 blocked lookups, 1 device assignment to a person/,
       ),
     ).toBeDefined();
+    // What the source left out of its latest read goes too, counted apart from what is present.
+    expect(within(dialog).getByText(/, 2 items not seen at the last collection\./)).toBeDefined();
     expect(within(dialog).getByText(/1 request, the activity history/)).toBeDefined();
     const confirm = within(dialog).getByRole('button', { name: 'Remove source' });
     expect(confirm).toHaveProperty('disabled', true);

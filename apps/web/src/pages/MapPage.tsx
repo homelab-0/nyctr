@@ -207,6 +207,15 @@ export default function MapPage({
           pinned={pinned}
           sourceNames={named}
         />
+        {selected && !node && (
+          <aside className="inspector" ref={inspector} aria-label="Not on the map">
+            <p>
+              This item is not on the map. Its source did not list it at the last collection, or it
+              has been dropped since. <a href="#/inventory">Inventory</a> lists what is still
+              stored.
+            </p>
+          </aside>
+        )}
         {node && (
           <aside className="inspector" ref={inspector} aria-label={`About ${node.name}`}>
             <header>

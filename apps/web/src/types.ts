@@ -501,6 +501,8 @@ export interface Overview {
   resource_count: number;
   /** Stored inventory per kind, so each count can be named. */
   kind_counts: Record<string, number>;
+  /** Stored items per kind that their source left out of its latest read: kept, never counted as present. */
+  missing_counts?: Record<string, number>;
   relationship_count: number;
   finding_count: number;
   recent_block_count: number;

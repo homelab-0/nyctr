@@ -21,6 +21,14 @@ export const number = (value: number) => value.toLocaleString('en-US');
 export const counted = (value: number, one: string, many = `${one}s`) =>
   `${number(value)} ${value === 1 ? one : many}`;
 
+/** Whether an item's source left it out of its latest read. It stays listed, marked, until it is dropped. */
+export const isMissing = (row: { attributes: Record<string, unknown> }) =>
+  Boolean(row.attributes.missing_from_latest_snapshot);
+
+/** How many stored items were not in the latest collection, said wherever the present ones are counted. */
+export const notSeen = (missing: number) =>
+  missing ? `${number(missing)} not seen at the last collection` : '';
+
 const NOUNS: [Exclude<Group, 'all'> | 'blocked', string, string][] = [
   ['devices', 'device', 'devices'],
   ['gear', 'piece of network equipment', 'pieces of network equipment'],
