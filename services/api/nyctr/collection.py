@@ -302,7 +302,7 @@ def _resume_from(db, integration) -> datetime | None:
         return None
 
 
-async def _off_loop(work):
+async def off_loop(work):
     """Run blocking database work on a worker thread, so the server goes on answering meanwhile.
 
     If the caller is cancelled the work is still waited for: it ends as a whole,
@@ -434,7 +434,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
 
             # Off the server's loop: storing is blocking database work and requests go on meanwhile.
             read_at = time.monotonic()
-            new = await _off_loop(store)
+            new = await off_loop(store)
             if new is None:
                 _report("ended", name, outcome="replaced", **spent(evidence))
                 return None, "replaced"
