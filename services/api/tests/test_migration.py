@@ -120,13 +120,15 @@ def test_a_schema_four_database_gains_only_the_lease_columns_and_keeps_every_row
     engine = make_engine(place["database_url"])
     with engine.begin() as connection:
         Base.metadata.create_all(connection)
-        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_holder"))
-        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_heartbeat"))
         connection.execute(SchemaVersion.__table__.insert(),
                            [{"version": 1}, {"version": 2}, {"version": 3}, {"version": 4}])
     with session_factory(engine)() as db:
         seed_demo(db)
         db.commit()
+    # The rows are stored first. Dropping the columns afterwards is what a schema 4 database looks like.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_holder"))
+        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_heartbeat"))
 
     before = _rows(engine)
     assert sum(map(len, before.values())) > 100
