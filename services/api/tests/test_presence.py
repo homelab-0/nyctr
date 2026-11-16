@@ -247,7 +247,7 @@ def test_a_busy_database_is_a_reason_not_an_error_and_the_work_is_off_the_server
 
 # The tests that run two writers against each other run on both engines. The PostgreSQL case needs a server
 # named in NYCTR_TEST_POSTGRES (its address, ending in /) and makes and drops a database of its own.
-BOTH_ENGINES = pytest.mark.parametrize("engine", ["sqlite", "postgresql"])
+BOTH_ENGINES = pytest.mark.parametrize("engine", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 # How long, in seconds, a test gives the second writer before it asks whether that one is still waiting.
 # On PostgreSQL a waiter waits for as long as it takes, so the bound is generous: a slow run must not make
 # a request that had nothing to wait for look like one that waited. SQLite itself gives up on a lock after
@@ -570,6 +570,7 @@ def until(reached):
         time.sleep(0.05)
 
 
+@pytest.mark.postgres
 @pytest.mark.parametrize("records", ["two old records", "a lapsed tie and an old record"])
 def test_the_workers_record_keeping_and_a_removal_never_wait_for_each_other(tmp_path, monkeypatch, request, records):
     """PostgreSQL only: it takes two rows held by two transactions, which SQLite's one write lock cannot show.

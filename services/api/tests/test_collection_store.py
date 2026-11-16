@@ -668,6 +668,7 @@ def test_an_analysis_and_a_refresh_of_findings_each_wait_for_the_lock(tmp_path, 
             assert ran == [1] and db.scalar(select(func.count()).select_from(Finding)) == 1
 
 
+@pytest.mark.postgres
 def test_a_guest_action_during_an_analysis_that_holds_a_new_finding_is_recorded_and_answered(tmp_path, monkeypatch, request):
     """An administrator cuts a guest off while an analysis holds a finding it has not stored yet: the action
     is on record before the findings are touched, the refresh waits its turn, and the answer is 200."""

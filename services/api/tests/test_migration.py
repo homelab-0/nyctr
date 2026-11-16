@@ -36,7 +36,7 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
         assert db.get(User, "u1").name == "A"
 
 
-@pytest.mark.parametrize("engine_kind", ["sqlite", "postgresql"])
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tmp_path, request, engine_kind):
     """Schema 2, filled with the demonstration's rows, upgrades to 3 with every stored row unchanged."""
     place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/a6.db"}
