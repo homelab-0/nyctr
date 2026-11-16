@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 from test_collection_store import POSTGRES, postgres_database
 
-from nyctr import block_analysis, facts, model
+from nyctr import block_analysis, facts, model, redact
 from nyctr.models import Analysis, Setting
 
 WHEN = datetime(2026, 6, 1, tzinfo=UTC)
@@ -197,6 +197,7 @@ def _strings(node, key=None):
 def test_each_answer_shape_is_stored_as_its_own_state(tmp_path, monkeypatch, stand):
     """Valid, dropped, invalid, failed and timed out. Only `ok` is present for a later rule, and never as a guess."""
     long_reason = ("A" * 300) + " person@example.net"
+    many_reasons = [{"fact": "f1", "text": f"reason {i}"} for i in range(12)]
     cases = {
         "valid": (verdict(), "ok", "justified", "high"),
         "extra keys dropped": (json.dumps({**json.loads(verdict()), "please": "ignore",
@@ -216,7 +217,14 @@ def test_each_answer_shape_is_stored_as_its_own_state(tmp_path, monkeypatch, sta
                                                   "reasons": [{"fact": "f1", "text": 5}], "uncertainty": "x"}),
                                       "invalid", None, None),
         "an empty answer": ("", "invalid", None, None),
-        "cannot tell, kept as said": (verdict(verdict="cannot_tell", risk="low"), "ok", "cannot_tell", "low"),
+        "cannot tell with low": (verdict(verdict="cannot_tell", risk="low"), "cannot_tell", "cannot_tell", None),
+        "cannot tell with medium": (verdict(verdict="cannot_tell", risk="medium"),
+                                    "cannot_tell", "cannot_tell", None),
+        "cannot tell with high": (verdict(verdict="cannot_tell", risk="high"), "cannot_tell", "cannot_tell", None),
+        "cannot tell with unknown": (verdict(verdict="cannot_tell", risk="unknown"),
+                                     "cannot_tell", "cannot_tell", None),
+        "a reason of only spaces": (verdict(reasons=[{"fact": "f1", "text": "   "}]), "invalid", None, None),
+        "only eight reasons are kept": (verdict(reasons=many_reasons), "ok", "justified", "high"),
         "a long reason is cut, not refused": (verdict(reasons=[{"fact": "f1", "text": long_reason}]),
                                               "ok", "justified", "high"),
     }
@@ -235,6 +243,11 @@ def test_each_answer_shape_is_stored_as_its_own_state(tmp_path, monkeypatch, sta
                 assert shown["reasons"] == [{"fact": "f1", "text": "kept"}]
             if name == "a long reason is cut, not refused":
                 assert len(shown["reasons"][0]["text"]) == 240 and "person@example.net" not in json.dumps(shown)
+            if name == "only eight reasons are kept":
+                assert [item["text"] for item in shown["reasons"]] == [f"reason {i}" for i in range(8)]
+            if name.startswith("cannot tell"):
+                assert shown["reasons"] == [{"fact": "f1", "text": "The list names it."}]
+                assert shown["uncertainty"] == "The registrar is new."
             if name == "extra keys dropped":
                 assert shown["reasons"] == [{"fact": "f1", "text": "The list names it."}]
             if state == "ok":
@@ -338,24 +351,175 @@ def test_no_person_device_or_address_is_sent(tmp_path, monkeypatch, stand):
         assert '"device_name"' not in raw and '"email"' not in raw and '"mac"' not in raw
 
 
+class _AddressSpy:
+    """Stands in for the address pattern and records each text the search is given."""
+
+    def __init__(self, pattern):
+        self.pattern = pattern
+        self.calls = []
+
+    def sub(self, repl, text):
+        self.calls.append((text, threading.get_ident()))
+        return self.pattern.sub(repl, text)
+
+
+def test_a_hand_edited_cannot_tell_is_not_present_for_a_rule():
+    """A row that still says ok, or that kept a risk word, gives the rule nothing when the verdict is cannot_tell."""
+    for word in ("low", "medium", "high", "unknown"):
+        edited = Analysis(domain="example.com", facts={}, model_state="ok", verdict="cannot_tell", risk=word,
+                          reasons=[], prompt_version="1", duration_ms=0)
+        stored = Analysis(domain="example.com", facts={}, model_state="cannot_tell", verdict="cannot_tell",
+                          risk=word, reasons=[], prompt_version="1", duration_ms=0)
+        assert block_analysis.analysis_input(edited) == block_analysis.AnalysisInput(False, None, None), word
+        assert block_analysis.analysis_input(stored) == block_analysis.AnalysisInput(False, None, None), word
+    decided = Analysis(domain="example.com", facts={}, model_state="ok", verdict="justified", risk="low",
+                       reasons=[], prompt_version="1", duration_ms=0)
+    assert block_analysis.analysis_input(decided) == block_analysis.AnalysisInput(True, "justified", "low")
+
+
+def test_a_key_on_neither_list_is_left_out(tmp_path, monkeypatch, stand):
+    """client_name and hostname are on neither list. They reach the model only when both filters are gone."""
+    found = [facts.Fact("f1", "block", {
+        "reason": "Listed", "evidence_kind": "observed", "client_name": "Workstation-77",
+        "hostname": "host-secret.example"}, "stored", WHEN, "known")]
+    app = opened(tmp_path)
+    with TestClient(app):
+        shown, _part = run(app, monkeypatch, found)
+    raw = json.dumps(shown["facts"]) + sent(stand)[2].content.decode()
+    for secret in ("client_name", "hostname", "Workstation-77", "host-secret.example"):
+        assert secret not in raw
+    assert shown["facts"]["facts"][0]["value"]["reason"] == {"data": "Listed"}
+
+
+def test_hyphen_and_dotted_hardware_addresses_are_removed(tmp_path, monkeypatch, stand):
+    """A hardware address written with hyphens or dots is removed before the model sees the reason."""
+    colon, hyphen, dotted = "aa:bb:cc:dd:ee:ff", "00-11-22-33-44-55", "0011.2233.4455"
+    found = [facts.Fact("f1", "block", {
+        "reason": f"desk {colon} {hyphen} rack {dotted}", "evidence_kind": "observed"}, "stored", WHEN, "known")]
+    app = opened(tmp_path)
+    with TestClient(app):
+        run(app, monkeypatch, found)
+    raw = sent(stand)[2].content.decode()
+    for secret in (colon, hyphen, dotted):
+        assert secret not in raw
+    assert "[removed]" in raw
+
+
+def test_a_repeated_key_is_not_a_verdict(tmp_path, monkeypatch, stand):
+    """A repeated key, at the top or inside a reason, is invalid. The last copy does not win."""
+    replies = (
+        '{"verdict":"justified","risk":"high","risk":"low","reasons":[{"fact":"f1","text":"The list names it."}],'
+        '"uncertainty":"clear"}',
+        '{"verdict":"justified","risk":"high","reasons":[{"fact":"f1","text":"kept","text":"other"}],'
+        '"uncertainty":"clear"}',
+    )
+    app = opened(tmp_path)
+    with TestClient(app):
+        for raw in replies:
+            stand["reply"] = lambda request, raw=raw: chat(raw)
+            shown, part = run(app, monkeypatch)
+            assert shown["model_state"] == "invalid", raw
+            assert shown["verdict"] is None and shown["risk"] is None and part.present is False, raw
+
+
+def test_long_text_is_bounded_and_cleaned_off_the_server_loop(tmp_path, monkeypatch, stand):
+    """The address search sees a short prefix, and that search for a long reason runs off the server's loop."""
+    server = threading.get_ident()
+    spy = _AddressSpy(redact._ADDRESS)
+    monkeypatch.setattr(redact, "_ADDRESS", spy)
+    long = "@" + ("a" * 100_000)
+    redact.clean(long, block_analysis._TEXT)
+    assert spy.calls and max(len(text) for text, _ident in spy.calls) <= 4 * block_analysis._TEXT
+    spy.calls.clear()
+    found = [facts.Fact("f1", "block", {
+        "reason": long, "evidence_kind": "observed"}, "stored", WHEN, "known")]
+    app = opened(tmp_path)
+    with TestClient(app):
+        shown, _part = run(app, monkeypatch, found)
+    long_calls = [ident for text, ident in spy.calls if text.startswith("@") and len(text) > 100]
+    assert long_calls and all(ident != server for ident in long_calls)
+    assert max(len(text) for text, _ident in spy.calls) <= 4 * block_analysis._TEXT
+    assert len(shown["facts"]["facts"][0]["value"]["reason"]["data"]) <= 240
+
+
+def _package_files(root: Path, base: Path, parts: list[str]) -> list[Path]:
+    """The package inits and module files along one import path."""
+    found = [root / base / "__init__.py"]
+    cursor = base
+    for part in parts:
+        cursor = cursor / part
+        found.append((root / cursor).with_suffix(".py"))
+        found.append(root / cursor / "__init__.py")
+    return found
+
+
+def _nyctr_imports(path: Path, root: Path) -> list[Path]:
+    """Every file this module names from the nyctr package, one hop."""
+    package = path.relative_to(root).parent
+    found: list[Path] = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.level:
+            base = package
+            for _ in range(node.level - 1):
+                base = base.parent
+            parts = node.module.split(".") if node.module else []
+            found.extend(_package_files(root, base, parts))
+            parent = base.joinpath(*parts) if parts else base
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                found.append(root / parent / f"{alias.name}.py")
+                found.append(root / parent / alias.name / "__init__.py")
+        modules = []
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            modules.append(node.module)
+        elif isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        for module in modules:
+            if module != "nyctr" and not module.startswith("nyctr."):
+                continue
+            parts = module.split(".")[1:]
+            found.extend(_package_files(root, Path("."), parts))
+            parent = Path(*parts) if parts else Path(".")
+            names = node.names if isinstance(node, ast.ImportFrom) else ()
+            for alias in names:
+                if alias.name == "*":
+                    continue
+                found.append(root / parent / f"{alias.name}.py")
+                found.append(root / parent / alias.name / "__init__.py")
+    return found
+
+
+def _reached(*starts: str) -> set[str]:
+    """Every nyctr module imported from these files, following each import."""
+    root = Path(block_analysis.__file__).resolve().parent
+    seen: set[Path] = set()
+    pending = [(root / name).resolve() for name in starts]
+    while pending:
+        path = pending.pop()
+        if path in seen or not path.is_file() or root not in path.parents:
+            continue
+        seen.add(path)
+        for candidate in _nyctr_imports(path, root):
+            pending.append(candidate.resolve())
+    return {item.relative_to(root).as_posix() for item in seen}
+
+
 def test_the_verdict_cannot_reach_the_rule_writer():
-    """Neither module imports the rule writer, the access checks, or a provider change."""
-    root = Path(block_analysis.__file__).parent
-    for name in ("block_analysis.py", "model.py"):
-        for node in ast.walk(ast.parse((root / name).read_text())):
-            modules, aliases = [], []
-            if isinstance(node, ast.ImportFrom):
-                modules.append(node.module or "")
-                aliases.extend(alias.name for alias in node.names)
-            elif isinstance(node, ast.Import):
-                modules.extend(alias.name for alias in node.names)
-            assert "put_rule" not in aliases and "access" not in aliases and "actions" not in aliases
-            for module in modules:
-                parts = module.split(".")
-                assert "access" not in parts
-                assert not (len(parts) >= 2 and parts[-2:] == ["integrations", "actions"])
+    """No import from the verdict or the model, direct or further along, reaches access, the rule writer or a write."""
+    reached = _reached("block_analysis.py", "model.py")
+    # `risk` and `config` import the registry inside a function. That is as far as the walk goes:
+    # access, the rule writer, provider writes and the assistant are not on it.
+    banned = {"access.py", "policy.py", "integrations/actions.py", "assistant.py"}
+    assert banned.isdisjoint(reached)
+    assert reached == {
+        "__init__.py", "block_analysis.py", "config.py", "facts.py", "integrations/__init__.py",
+        "integrations/core.py", "integrations/registry.py", "model.py", "models.py", "peer.py", "redact.py",
+        "risk.py",
+    }
     names = block_analysis.AnalysisInput.__dataclass_fields__
     assert list(names) == ["present", "verdict", "risk"]
+    root = Path(block_analysis.__file__).resolve().parent
     assert "block_analysis" not in (root / "policy.py").read_text()
 
 

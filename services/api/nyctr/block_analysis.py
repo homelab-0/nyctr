@@ -4,10 +4,11 @@
 only an answer that matches the fixed shape. Text from outside is bounded and
 cleaned, and it is only ever a JSON string under the key `data`. A missing,
 failed, invalid or timed-out answer is stored as that, with no verdict and no
-risk, so it cannot be read as a low one. The model's raw reply is not stored.
+risk. `cannot_tell` is stored as its own state, with that verdict and no risk,
+so a rule cannot read one from it. The model's raw reply is not stored.
 
 `analysis_input` is the only bridge a later rule may use. It carries whether a
-valid answer is present, the verdict and the risk. Nothing else of a model's
+decided answer is present, the verdict and the risk. Nothing else of a model's
 answer leaves this module.
 """
 
@@ -25,21 +26,24 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.orm import Session
 
-from . import assistant, facts, model
+from . import facts, model
 from .config import Settings
 from .models import Analysis, utc, utcnow
+from .redact import clean as _clean
 
 PROMPT_VERSION = "1"
 MODEL_LIMIT = 20.0
 ANALYSIS_LIMIT = 45.0
 _TEXT = 240
+_REASONS = 8
 # `model.check` refuses a limit under five seconds, and a call that short is already out of time.
 _FLOOR = model.SECONDS[0]
 _FACT_ID = re.compile(r"^f\d{1,4}$")
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$")
-# A token of hex and colons. `assistant._clean` already removes IPv4, MAC and email. It does not
-# remove IPv6, so a token that is one is removed here. A time such as 00:00:00 is not an address.
+# A token of hex and colons. `redact.clean` removes IPv4, hardware addresses and email. It does
+# not remove IPv6, so a token that is one is removed here. A time such as 00:00:00 is not an address.
 _IPV6 = re.compile(r"(?<![0-9A-Za-z])([0-9A-Fa-f:]{2,})(?![0-9A-Za-z])")
+_DECIDED = frozenset({"justified", "not_justified"})
 _KINDS = frozenset({"block", "risk", "seen", "registration", "resolution", "certificate", "reputation"})
 _STATES = frozenset({"known", "unavailable", "not_asked"})
 _SOURCES = frozenset({"stored", "rules", "registry", "resolver", "nyctr"})
@@ -90,7 +94,7 @@ class _Answer(BaseModel):
 
 @dataclass(frozen=True)
 class AnalysisInput:
-    """What a later rule may read. `present` is true only when the model's part is `ok`."""
+    """What a later rule may read. `present` is true only for `justified` or `not_justified`."""
     present: bool
     verdict: str | None
     risk: str | None
@@ -123,8 +127,8 @@ def _strip_ipv6(text: str) -> str:
 
 
 def clean_text(value: object, limit: int = _TEXT) -> str:
-    """Bound one piece of outside text the way the assistant does, and remove IPv6 as well."""
-    return _strip_ipv6(assistant._clean(value, 8000))[:limit]
+    """Bound one piece of outside text and remove addresses, including IPv6."""
+    return _strip_ipv6(_clean(value, limit))
 
 
 def _ip(value: object) -> bool:
@@ -256,6 +260,22 @@ def _gather(bind, domain: str) -> tuple[str, list[facts.Fact]]:
         return name, facts.gather(own, name)
 
 
+def _prepare(bind, domain: str) -> tuple[str, list[facts.Fact], dict]:
+    """Gather, then build the object the model sees. Both run off the server's loop."""
+    name, found = _gather(bind, domain)
+    return name, found, _payload(name, found)
+
+
+def _pairs(pairs: list) -> dict:
+    """One JSON object. A repeated key is refused, so the last value cannot silently win."""
+    found = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError("repeated key")
+        found[key] = value
+    return found
+
+
 def _first_object(text: str) -> dict | None:
     """The first JSON object in the reply. A later object is ignored. Prose with no object is nothing."""
     if not isinstance(text, str):
@@ -264,7 +284,7 @@ def _first_object(text: str) -> dict | None:
     if start < 0:
         return None
     try:
-        value, _end = json.JSONDecoder().raw_decode(text, start)
+        value, _end = json.JSONDecoder(object_pairs_hook=_pairs).raw_decode(text, start)
     except (json.JSONDecodeError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
@@ -287,13 +307,18 @@ def _validate(text: str, sent: set[str]) -> tuple:
     for reason in answer.reasons:
         if reason.fact not in sent:
             continue
-        cleaned = clean_text(reason.text)
+        cleaned = clean_text(reason.text).strip()
         if not cleaned:
             continue
         reasons.append({"fact": reason.fact, "text": cleaned})
+        if len(reasons) == _REASONS:
+            break
     if not reasons:
         return _blank("invalid")
-    return "ok", answer.verdict, answer.risk, reasons, clean_text(answer.uncertainty) or None
+    uncertainty = clean_text(answer.uncertainty).strip() or None
+    if answer.verdict == "cannot_tell":
+        return "cannot_tell", "cannot_tell", None, reasons, uncertainty
+    return "ok", answer.verdict, answer.risk, reasons, uncertainty
 
 
 async def _judge(connection, settings, db, payload, sent, started) -> tuple:
@@ -324,12 +349,13 @@ async def _judge(connection, settings, db, payload, sent, started) -> tuple:
 async def analyse(db: Session, domain: str, block_id: str | None = None, *, settings: Settings) -> Analysis:
     """Gather, ask and store one verdict. The request's session is rolled back before the model is asked.
 
-    Gathering runs on its own session. The call does not hold this one open, so
-    another writer is not stuck behind it. `block_id` is stored and is not sent.
+    Gathering uses a session of its own. The object the model sees is built in
+    that same step, off this loop, and it does not use this session. The call
+    does not hold this one open, so another writer is not stuck behind it.
+    `block_id` is stored and is not sent.
     """
     started = _mono()
-    name, found = await asyncio.to_thread(_gather, db.get_bind(), domain)
-    payload = _payload(name, found)
+    name, found, payload = await asyncio.to_thread(_prepare, db.get_bind(), domain)
     sent = {item["id"] for item in payload["facts"]}
     score = _rule_score(found)
     db.rollback()
@@ -350,8 +376,8 @@ async def analyse(db: Session, domain: str, block_id: str | None = None, *, sett
 
 
 def analysis_input(analysis: Analysis) -> AnalysisInput:
-    """The three words a rule may see. Present only when the stored state is `ok`, and nothing else."""
-    if analysis.model_state == "ok":
+    """The three words a rule may see. Present only for a decided verdict, and never for `cannot_tell`."""
+    if analysis.model_state == "ok" and analysis.verdict in _DECIDED:
         return AnalysisInput(True, analysis.verdict, analysis.risk)
     return AnalysisInput(False, None, None)
 

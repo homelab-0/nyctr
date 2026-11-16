@@ -33,11 +33,11 @@ from .config import Settings
 from .deps import admin, get_db
 from .guests import guest_devices, guest_json
 from .models import AccessRequest, Finding, GuestPass, Insight, Integration, Lease, User, utc, utcnow
+from .redact import clean as _clean
 from .security import audit
 
 router = APIRouter(prefix="/api")
 _REF = re.compile(r"\[\[([a-z]+):([A-Za-z0-9_-]{1,12})\]\]")
-_ADDRESS = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b|[\w.+-]+@[\w-]+\.[\w.-]+", re.I)
 _SEVERITY = {"high": 0, "medium": 1, "low": 2, "informational": 3}
 _calls: dict[str, list[float]] = {}
 # A guest's state and what happened at a source, in the words an answer may use.
@@ -89,11 +89,6 @@ class AskInput(BaseModel):
 def provider_of(settings: Settings, connection: model.InForce) -> str:
     """Name the assistant provider for the connection in force."""
     return "model" if connection.connected else "sample" if settings.mode == "demo" else "off"
-
-
-def _clean(value: Any, limit: int = 240) -> str:
-    """Bound a text field and remove addresses and emails before it reaches a model."""
-    return _ADDRESS.sub("[removed]", str(value or ""))[:limit]
 
 
 def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:

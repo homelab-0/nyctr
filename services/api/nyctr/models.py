@@ -383,8 +383,10 @@ class Analysis(Base):
     """One stored judgement of a blocked name.
 
     `facts` is the object sent to the model. The model's raw reply is not stored.
-    `model_state` is ok, missing, failed, invalid or timed_out. Anything but ok
-    has no verdict and no risk, so a missing answer cannot be read as a low one.
+    `model_state` is ok, cannot_tell, missing, failed, invalid or timed_out.
+    `cannot_tell` keeps that verdict and stores no risk. A rule is told an answer
+    is present only when the state is ok and the verdict is justified or
+    not_justified. A missing or undecided answer cannot be read as a low one.
     """
     __tablename__ = "analyses"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)

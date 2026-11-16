@@ -134,16 +134,20 @@ refusal, never as the addresses themselves.
 The only answer that is kept is one JSON object: `verdict` (`justified`,
 `not_justified` or `cannot_tell`), `risk` (`low`, `medium`, `high` or
 `unknown`), `reasons` (each naming a fact id that was sent, and a short
-sentence) and `uncertainty`. Any other key is dropped. A reason that names a
-fact that was not sent is dropped, and the text is cleaned again. If no reason
-is left, or the reply is prose, empty, two objects of which the first does not
-match, or a word that is not one of those listed, the model's part is
-`invalid`. No model is `missing`. A call that does not succeed is `failed`. A
-call that runs out of time, or a judgement that runs past 45 seconds, is
-`timed_out`. The model call itself waits at most 20 seconds. Anything but a
-valid answer is stored with no verdict and no risk, so a missing or broken
-answer is never turned into a low one. `cannot_tell` is stored as that verdict.
-The model's raw reply is not stored.
+sentence) and `uncertainty`. Any other key is dropped. A repeated key is
+refused. A reason that names a fact that was not sent is dropped, and the
+text is cleaned again. At most eight reasons are kept, and each sentence is
+cut to 240 characters. If no reason is left, or the reply is prose, empty,
+two objects of which the first does not match, or a word that is not one of
+those listed, the model's part is `invalid`. No model is `missing`. A call
+that does not succeed is `failed`. A call that runs out of time, or a
+judgement that runs past 45 seconds, is `timed_out`. The model call itself
+waits at most 20 seconds. A missing, failed, invalid or timed-out answer is
+stored with no verdict and no risk, so a missing or broken answer is never
+turned into a low one. `cannot_tell` is stored as its own state. Its verdict
+is `cannot_tell` and the risk word that came with it is not stored. A later
+rule is told that answer is not present, including when an older row still
+holds a risk word beside it. The model's raw reply is not stored.
 
 The model holds no credentials and cannot edit a rule. The only thing a later
 rule can read from a stored verdict is whether a valid answer is present, the

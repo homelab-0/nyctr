@@ -83,15 +83,17 @@ network address is included. Where the name resolves is a count, or the words
 for a refusal, never the addresses. The only answer kept is one JSON object
 with a verdict (`justified`, `not_justified` or `cannot_tell`), a risk (`low`,
 `medium`, `high` or `unknown`), reasons that name a fact that was sent, and a
-short uncertainty. Any other key is dropped. A reason that names a fact that
-was not sent is dropped. Text is cleaned again. If nothing valid is left, or
-the answer is prose, empty or the wrong shape, that part is `invalid`. No
-model, a failed call and a timeout are stored as `missing`, `failed` and
-`timed_out`. Anything but a valid answer is stored with no verdict and no
-risk, so a missing or broken answer never becomes a low one. The
-raw reply is not stored. The model holds no credentials and cannot edit a
-rule. The only thing a later rule can read from a stored verdict is whether a
-valid answer is present, the verdict and the risk.
+short uncertainty. Any other key is dropped. A repeated key is refused. A
+reason that names a fact that was not sent is dropped. Text is cleaned again.
+At most eight reasons are kept. If nothing valid is left, or the answer is
+prose, empty or the wrong shape, that part is `invalid`. No model, a failed
+call and a timeout are stored as `missing`, `failed` and `timed_out`, with no
+verdict and no risk, so a missing or broken answer never becomes a low one.
+`cannot_tell` is its own state: the verdict is kept, the risk word is not
+stored, and a later rule is told the answer is not present. The raw reply is
+not stored. The model holds no credentials and cannot edit a rule. The only
+thing a later rule can read from a stored verdict is whether a valid answer
+is present, the verdict and the risk.
 
 Nyctr can change a provider in three narrow ways, all in
 `nyctr/integrations/actions.py`: add or remove one NextDNS allowlist entry,
