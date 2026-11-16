@@ -15,7 +15,7 @@ VARIABLE = "NYCTR_TEST_POSTGRES"
 
 
 def check(path: str) -> tuple[list[str], int]:
-    """Return the cases that skipped for want of PostgreSQL, and how many named for it passed."""
+    """Return the cases that skipped for want of PostgreSQL, and how many with postgresql in their name passed."""
     skipped, ran = [], 0
     for case in ET.parse(path).getroot().iter("testcase"):
         name = f"{case.get('classname')}::{case.get('name')}"
@@ -33,13 +33,16 @@ def main(argv: list[str]) -> int:
         print("usage: postgres_cases.py <junit.xml>", file=sys.stderr)
         return 2
     skipped, ran = check(argv[1])
-    lines = [f"PostgreSQL cases that passed: {ran}", f"Skipped for want of PostgreSQL: {len(skipped)}"]
+    lines = [f"Cases named for PostgreSQL that passed: {ran}", f"Skipped for want of PostgreSQL: {len(skipped)}"]
     lines += [f"- {name}" for name in skipped]
     print("\n".join(lines))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as out:
             out.write("### PostgreSQL 17 cases\n\n" + "\n".join(lines) + "\n")
+    if not ran:
+        print("No case named for PostgreSQL ran: the server did not reach the tests.", file=sys.stderr)
+        return 1
     if skipped:
         print(f"{VARIABLE} is set in this job, so no case may skip for want of it.", file=sys.stderr)
         return 1
