@@ -59,8 +59,9 @@ whole gathering has 8. At most 256 kB is read, and the read stops when the
 time or the size is reached. A compressed registry answer is refused and not
 read. Before any connection the host is resolved, and a private, loopback,
 link-local, site-local or other address that is not a public one is refused
-with nothing sent. The request carries the name and nothing else: no person,
-no device and no network address. A registration that was read, and the list
+with nothing sent. A registry sees the public address the connection comes
+from, even though the request itself carries the name only: no person, no
+device and no network address. A registration that was read, and the list
 of registries, are kept for a day. A failure is kept for ten minutes. A
 timeout is not kept, and neither is running out of time. The database is
 closed before any of these calls, and the answers are written afterwards.
