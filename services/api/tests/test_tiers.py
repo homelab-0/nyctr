@@ -25,7 +25,7 @@ from nyctr import access, layers, policy, risk
 from nyctr.config import Settings
 from nyctr.database import make_engine, migrate, session_factory
 from nyctr.main import create_app
-from nyctr.models import AccessRequest, Audit, DeviceGrant, Lease, Observation, Resource, Setting, User
+from nyctr.models import AccessRequest, Audit, DeviceGrant, Lease, Observation, Resource, Setting, User, utc
 from nyctr.policy import AccessRule, AdTier, AnalysisInput, Facts, ThreatTier, may_open
 from nyctr.security import hash_password
 
@@ -789,6 +789,42 @@ def test_a_rule_changed_while_the_add_is_unanswered_is_read_again(tmp_path, monk
                     Audit.action == "rule.access_checked", Audit.target_id == row["id"]))
                     if event.details.get("outcome") == "waits"]
                 assert len(refused) == 1 and refused[0].details["why"] == NOTES[change]
+                assert held(db) == []
+        finally:
+            app.state.engine.dispose()
+
+
+@BOTH
+def test_a_lower_limit_while_the_add_is_unanswered_shortens_the_lease(tmp_path, monkeypatch, database, request):
+    """The minutes stored are the last allowing decision's. Lowering the tier's limit while the add is
+    unanswered cannot leave a longer lease than that limit."""
+    source = Source(monkeypatch, hold=(2, "after"))
+    url = None if database == "sqlite" else postgres_database(request)
+    if database == "postgresql" and not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+
+    async def scenario(app, member, admin):
+        async with console(app, member) as sam, console(app, admin) as owner:
+            first = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
+            await asyncio.wait_for(source.reached.wait(), 300)
+            body = {"enabled": True, "per_day": 4, "daily_total": 10,
+                    "ad_tracker": {"mode": "on", "max_score": 25, "max_minutes": 15},
+                    "threat_feed": {"mode": "off", "max_minutes": 15}}
+            put = await asyncio.wait_for(owner.put("/api/rules/access", json=body), 60)
+            assert put.status_code == 200, put.text
+            source.go.set()
+            return (await first).json()
+
+    with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, _client, member, admin):
+        try:
+            row = asyncio.run(scenario(app, member, admin))
+            assert row["status"] == "auto_approved" and row["duration_minutes"] == 15
+            assert row["decision_note"] == "Opened for 15 minutes by the access rule."
+            with app.state.session_factory() as db:
+                lease = db.scalar(select(Lease).where(Lease.domain == DOMAIN, Lease.status == "active"))
+                assert utc(lease.expires_at) - utc(lease.created_at) == timedelta(minutes=15)
+                opened = db.scalar(select(Audit).where(Audit.action == "access.opened", Audit.target_id == lease.id))
+                assert opened.details["minutes"] == 15
                 assert held(db) == []
         finally:
             app.state.engine.dispose()

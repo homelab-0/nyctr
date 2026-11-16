@@ -604,6 +604,37 @@ def test_a_turn_that_does_not_come_is_said_as_that_and_not_as_a_failure_of_the_s
         assert made["status"] == "pending" and made["risk_score"] is not None
         assert made["decision_note"] == "Nyctr was still opening your earlier requests, so a person decides this one."
         assert source.calls == [] and rows(app) == [] and gates(app) == [] and claims(app) == []
+        with app.state.session_factory() as db:
+            events = list(db.scalars(select(Audit).where(Audit.action == "rule.access_checked",
+                                                         Audit.target_id == made["id"])))
+            assert len(events) == 1 and events[0].details["outcome"] == "waits"
+            assert events[0].details["why"] == made["decision_note"] and "minutes" not in events[0].details
+
+
+def test_a_request_already_being_decided_stays_waiting_and_the_rule_records_that(tmp_path, monkeypatch):
+    """The request's claim is already held, so the rule records that this one waits and opens nothing."""
+    with started(tmp_path, rule=True) as (app, _client, member, _admin):
+        source = Source(monkeypatch)
+
+        def unavailable(db, request_id):
+            db.rollback()
+            return None
+
+        monkeypatch.setattr(access, "hold_review", unavailable)
+
+        async def scenario():
+            async with console(app, member) as sam:
+                return (await sam.post("/api/requests", json=ask("one"))).json()
+
+        made = asyncio.run(scenario())
+        assert made["status"] == "pending"
+        assert made["decision_note"] == "This request is already being decided, so a person decides."
+        assert source.calls == [] and rows(app) == []
+        with app.state.session_factory() as db:
+            events = list(db.scalars(select(Audit).where(Audit.action == "rule.access_checked",
+                                                         Audit.target_id == made["id"])))
+            assert len(events) == 1 and events[0].details["outcome"] == "waits"
+            assert events[0].details["why"] == made["decision_note"] and "minutes" not in events[0].details
 
 
 @pytest.mark.parametrize("failure, sent", [("no connection", False), ("refused before sending", False),

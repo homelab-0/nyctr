@@ -811,15 +811,25 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             record(verdict, words)
         return verdict, words
 
+    def leave(verdict: policy.Decision, words: str) -> None:
+        """The checks passed and the request still waits. The record says waits, not that it opened."""
+        record(policy.Decision(False, False, verdict.tier, verdict.minutes, None, verdict.checks), words)
+
     verdict, why = ask(final=False)
     if why is None:
-        minutes, name, turn, waited = verdict.minutes, integration.name, None, 0.0
+        name, turn, waited = integration.name, None, 0.0
         db.commit()  # The assessment is stored now: the opening takes a claim, and may undo what is unsaved.
         # The rule's decision holds the request's claim like any other, so a person's decision on a request
         # that is already listed as waiting is never overwritten. If a person has it, the rule leaves it to them.
         gate = hold_review(db, row.id)
         db.refresh(row)
         if gate is None or row.status != "pending":
+            # The claim is already held, so this request waits. A status that is no longer pending was
+            # decided already: that decision stands, and this one adds no second record.
+            if gate is None:
+                why = "This request is already being decided, so a person decides."
+                leave(verdict, why)
+                row.decision_note = why
             return end_review(db, gate) if gate else None
         try:
             # One automatic opening at a time for each person, so the day's count is right when it is read.
@@ -830,46 +840,62 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             integration = db.get(Integration, row.integration_id)
             if turn is None:
                 why = "Nyctr was still opening your earlier requests, so a person decides this one."
+                leave(verdict, why)
             elif integration is None:
                 why = f"{name} was removed from Nyctr while this request waited, so a person decides."
-            elif (why := ask(final=True)[1]) is None:  # Asked again with the turn held: the counts are right now.
-                # The entry's claim commits, and rolls this session back when that claim is already held.
-                # The rule's record is stored first, so the rollback cannot take it, whatever then happens.
-                db.commit()
-                claim = await hold_entry(db, settings, integration, row.domain)
-                await open_lease(db, settings, integration=integration, domain=row.domain,
-                                 device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
-                                 minutes=minutes, decided_by="rule", risk_score=assessment.score, claim=claim)
-                # The rule's row is locked from here to the commit, so two openings are stored one after the
-                # other. The rule is read again under that lock: it may have been switched off, or a tier
-                # switched off, or a limit lowered, while the add was unanswered.
-                _lock_rule(db)
-                rule = _reread_rule(db)
-                late = policy.may_open(rule, facts_now(pending=1))
-                if not late.allow:  # Nothing is stored, and what was added stays on record to be removed.
-                    db.rollback()
-                    release_entry(db, claim, unstored=True)
-                    why = _left_to_a_person(late, rule, assessment, integration)
-                    record(late, why)
-                # Compare and swap, as in the review route: a copy that does not know the request's claim may
-                # have decided meanwhile. Then nothing is stored, and what was added stays on record to be removed.
-                elif db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
-                                                            AccessRequest.status == "pending")
-                                .values(status="auto_approved", decided_by="rule", duration_minutes=minutes,
-                                        decision_note=f"Opened for {minutes} minutes by the access rule.")
-                                ).rowcount != 1:
-                    db.rollback()
-                    return release_entry(db, claim, unstored=True)
-                elif _give_back(db, turn):  # With the commit that stores the lease, so the next one counts it.
-                    _give_back(db, gate)
-                    turn = gate = None
-                    return db.refresh(row)
-                else:
-                    # The turn was taken over while this stood still, so the day's count may have moved on
-                    # without it: nothing is stored, and what was added stays on record to be removed.
-                    db.rollback()
-                    turn = release_entry(db, claim, unstored=True)
-                    why = "Nyctr took too long to open this by itself, so a person decides."
+            else:
+                answered, why = ask(final=True)  # Asked again with the turn held: the counts are right now.
+                if why is None:
+                    # Minutes from this allowing decision, not the first look. The re-read under the lock
+                    # below can still shorten them.
+                    minutes = answered.minutes
+                    # The entry's claim commits, and rolls this session back when that claim is already held.
+                    # The rule's record is stored first, so the rollback cannot take it, whatever then happens.
+                    db.commit()
+                    claim = await hold_entry(db, settings, integration, row.domain)
+                    lease = await open_lease(db, settings, integration=integration, domain=row.domain,
+                                             device_name=row.device_name, requester_id=row.requester_id,
+                                             request_id=row.id, minutes=minutes, decided_by="rule",
+                                             risk_score=assessment.score, claim=claim)
+                    # The rule's row is locked from here to the commit, so two openings are stored one after the
+                    # other. The rule is read again under that lock: it may have been switched off, or a tier
+                    # switched off, or a limit lowered, while the add was unanswered.
+                    _lock_rule(db)
+                    rule = _reread_rule(db)
+                    late = policy.may_open(rule, facts_now(pending=1))
+                    if not late.allow:  # Nothing is stored, and what was added stays on record to be removed.
+                        db.rollback()
+                        release_entry(db, claim, unstored=True)
+                        why = _left_to_a_person(late, rule, assessment, integration)
+                        record(late, why)
+                    else:
+                        # Last allowing decision. A lower limit while the add was unanswered must not leave
+                        # a longer lease or request than that decision allows.
+                        minutes = late.minutes
+                        lease.expires_at = utc(lease.created_at) + timedelta(minutes=minutes)
+                        opened = db.scalar(select(Audit).where(Audit.action == "access.opened",
+                                                               Audit.target_id == lease.id))
+                        opened.details = {**opened.details, "minutes": minutes}
+                        # Compare and swap, as in the review route: a copy that does not know the request's
+                        # claim may have decided meanwhile. Then nothing is stored, and what was added stays
+                        # on record to be removed.
+                        if db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
+                                                                  AccessRequest.status == "pending")
+                                      .values(status="auto_approved", decided_by="rule", duration_minutes=minutes,
+                                              decision_note=f"Opened for {minutes} minutes by the access rule.")
+                                      ).rowcount != 1:
+                            db.rollback()
+                            return release_entry(db, claim, unstored=True)
+                        elif _give_back(db, turn):  # With the commit that stores the lease, so the next one counts it.
+                            _give_back(db, gate)
+                            turn = gate = None
+                            return db.refresh(row)
+                        else:
+                            # The turn was taken over while this stood still, so the day's count may have moved on
+                            # without it: nothing is stored, and what was added stays on record to be removed.
+                            db.rollback()
+                            turn = release_entry(db, claim, unstored=True)
+                            why = "Nyctr took too long to open this by itself, so a person decides."
         except SourceGone as error:
             error.record(db)
             why = f"{error} A person decides."
