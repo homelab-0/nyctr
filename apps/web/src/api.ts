@@ -59,7 +59,10 @@ export const put = <T>(path: string, value: unknown = {}) =>
  * A null path disables collection. Data is cleared when the path changes so a view
  * cannot mistake evidence from its previous scope for the newly selected scope.
  * `reload` re-reads the same path and keeps the current data on screen until the
- * fresh result arrives, so a list does not blank out after every action.
+ * fresh result arrives, so a list does not blank out after every action. It resolves
+ * when that read settles, so a caller can wait instead of starting another read that
+ * would abort this one. A repeat of the same path also keeps a previous failure on
+ * screen until the new answer arrives.
  */
 export function useApi<T>(path: string | null) {
   const [data, setData] = useState<T | null>(null);
@@ -67,16 +70,28 @@ export function useApi<T>(path: string | null) {
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
   const loaded = useRef<string | null>(null);
+  const attempt = useRef(0);
+  const epoch = useRef(0);
+  const settled = useRef(new Map<number, () => void>());
   /** Invalidates this read without changing its scope or bypassing API authorization. */
-  const reload = useCallback(() => setRevision((x) => x + 1), []);
+  const reload = useCallback(() => {
+    const id = ++attempt.current;
+    return new Promise<void>((resolve) => {
+      settled.current.set(id, resolve);
+      setRevision(id);
+    });
+  }, []);
   /** Owns the request lifetime; cleanup prevents late responses from updating the next view. */
   useEffect(() => {
     if (!path) {
       setLoading(false);
       setData(null);
+      setError(null);
       loaded.current = null;
       return;
     }
+    const id = revision;
+    const mine = ++epoch.current;
     const controller = new AbortController();
     const refresh = loaded.current === path;
     if (!refresh) {
@@ -85,21 +100,46 @@ export function useApi<T>(path: string | null) {
       loaded.current = null;
       setLoading(true);
       setData(null);
+      setError(null);
     }
-    setError(null);
+    const finish = () => {
+      // Two reloads before the next paint leave only the later revision running.
+      // Settle every earlier waiter too, or the caller waiting on the first one never continues.
+      for (const [waiter, resolve] of settled.current) {
+        if (waiter > id) continue;
+        settled.current.delete(waiter);
+        resolve();
+      }
+    };
+    const stale = () => controller.signal.aborted || epoch.current !== mine;
     api<T>(path, { signal: controller.signal })
       .then((value) => {
-        if (controller.signal.aborted) return;
+        if (stale()) return;
         loaded.current = path;
         setData(value);
+        setError(null);
       })
       .catch((err: Error) => {
-        if (!controller.signal.aborted) setError(err.message || 'Unable to reach Nyctr.');
+        if (!stale()) setError(err.message || 'Unable to reach Nyctr.');
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (stale()) return;
+        setLoading(false);
+        finish();
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // A newer reload owns its own waiter. This attempt is over, so release whoever waited on it.
+      if (attempt.current !== id) {
+        finish();
+        return;
+      }
+      // Unmount has no following effect. A strict remount of this same attempt increments `epoch`
+      // before the microtask, and that remount settles the waiter when its own read finishes.
+      queueMicrotask(() => {
+        if (epoch.current === mine) finish();
+      });
+    };
   }, [path, revision]);
   return { data, error, loading, reload };
 }
