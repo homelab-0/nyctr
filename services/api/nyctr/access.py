@@ -605,6 +605,8 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         lease.last_error = lease.last_error or (
             f"The source was removed, so Nyctr cannot reach it. Remove the exception for {lease.domain} there "
             "by hand.")
+        from . import notices
+        notices.stuck(db, settings, lease)
         return False
     claim = failure = removed = None
     # What ending did at the source, for the record: only an entry Nyctr added is ever removed.
@@ -664,6 +666,8 @@ async def end_lease(db: Session, settings: Settings, lease: Lease, reason: str, 
         lease.last_error = lease.last_error if unconfirmed else failure
         audit(db, actor, "access.close_failed", lease.id, domain=lease.domain,
               **({"record": True} if unconfirmed else {}), **({"asked": True} if claim and asked else {}))
+        from . import notices
+        notices.stuck(db, settings, lease)
         return False
     if not still_open(db, lease.id):
         db.refresh(lease)
@@ -826,6 +830,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             return
         record(policy.Decision(False, False, verdict.tier, verdict.minutes, None, verdict.checks), words)
         row.decision_note = words
+        from . import notices
+        notices.waiting(db, settings, row)
 
     verdict, why = ask(final=False)
     if why is None:
@@ -923,6 +929,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                 end_review(db, gate)
     if why is not None:
         row.decision_note = why
+        from . import notices
+        notices.waiting(db, settings, row)
 
 
 def suggestions(db: Session) -> list[dict]:

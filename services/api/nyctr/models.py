@@ -406,5 +406,29 @@ class Analysis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Notice(Base):
+    """One outbound notice, written in the same transaction as the thing it reports.
+
+    The background tick sends a row when it is due. `payload` is the JSON body.
+    `state` is due, sending, sent or gave_up.
+    """
+    __tablename__ = "notices"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject: Mapped[str] = mapped_column(String(128), default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    state: Mapped[str] = mapped_column(String(20), default="due")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_try_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        Index("ix_notices_due", "state", "next_try_at"),
+        UniqueConstraint("kind", "subject", name="uq_notices_kind_subject"),
+    )
+
+
 Index("ix_device_grant_validity", DeviceGrant.device_id, DeviceGrant.user_id, DeviceGrant.valid_from)
 Index("ix_own_lookups_name_at", OwnLookup.name, OwnLookup.at)

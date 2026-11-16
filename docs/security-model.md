@@ -34,6 +34,21 @@ that offers only session sign-in (Pi-hole) is sent one sign-in and one sign-out
 request for the collection's own session. There are no firewall mutations and no
 AI tool calls.
 
+Notices are a separate outbound POST, not a collection. When a member's request
+waits, or an opening cannot be removed, Nyctr writes a notice in the same
+transaction and a background tick sends it to the address an administrator set
+in Setup. The body holds the facts needed to decide and a link to the console.
+The link carries no token, and the body holds no secret, hardware address or
+network address. The address is HTTPS unless the operator listed that exact
+server in `NYCTR_NOTICE_HOSTS` (the same origin form as `NYCTR_MODEL_HOSTS`).
+A loopback, link-local, metadata or other non-public address is refused unless
+it is listed, and the address actually connected to is checked. No redirect is
+followed. The whole send takes at most 10 seconds and the database is not held
+while it is open. Setup and the activity record show the server, not the path.
+The signature is HMAC-SHA-256 over the time and the raw body, with
+a secret named `NYCTR_NOTICE_SECRET_*`. With no secret the notice is unsigned
+and Setup says so. See [notices](notices.md).
+
 An administrator can ask what Nyctr knows about a name (`GET /api/facts`).
 Fixed code gathers the answer. It reads the stored block and its reason, the
 rule-based score and the factors behind it, and what those stored blocks show
@@ -296,6 +311,7 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | A client claims another address in a forwarded header | Only a listed proxy is believed, and only about the entry it wrote itself; entries the client sent are never read |
 | Someone forges the collection nudge | It needs a shared secret, reads nothing from the request, only starts a read-only collection, and runs at most once every 30 seconds |
 | A stolen administrator session points the model somewhere else to collect its key | The endpoint must be on a server the operator allowed, by scheme, host and port; the key is named by a secret with the model's own pattern; an address holding a sign-in name or password is refused; no redirect is followed |
+| A notice is aimed at an internal address, or carries a key that could approve access | The address is HTTPS unless the operator listed that server. Loopback, link-local, metadata, multicast, translation prefixes and other non-public addresses are refused unless listed, and the address actually connected to is checked. No redirect is followed. The body has no secret, hardware address or network address, and the link carries no token. Setup and the activity record show the server, not a secret in the path |
 | A listed model host is reached in clear text, or on another of its ports | A bare name in the list is HTTPS on port 443 only; anything else must be written in full by the operator |
 | A saved model setting cannot be read after an upgrade or a rollback | The model is off and says so; the server's own endpoint and key, which an administrator replaced, are not used in its place |
 | A trace of a model call says who asked or which device it was about | Trace fields are fixed words, versions, a new random id and a digest of the subject's id keyed with 32 random bytes only this installation holds (never the model's key, never sent or shown), so the digest cannot be matched against guessed ids. The key is made at start-up and a call only reads it. A database error or an empty key sends no session and never an unkeyed digest. The `user` field is never sent |

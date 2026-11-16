@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
@@ -14,6 +14,8 @@ _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actio
 _V4_TABLES = ("fact_cache", "own_lookups")
 # Schema 6 adds the stored verdict on a blocked name.
 _V6_TABLES = ("analyses",)
+# Schema 7 adds the outbound notice outbox.
+_V7_TABLES = ("notices",)
 _V2_COLUMNS = {
     "observations": ("reason_codes", "source_device_id"),
     "access_requests": ("risk_score", "risk_category", "risk_factors", "decided_by", "decision_note",
@@ -72,6 +74,13 @@ def _upgrade_to_6(connection):
     connection.execute(SchemaVersion.__table__.insert().values(version=6))
 
 
+def _upgrade_to_7(connection):
+    """Add the notice outbox. Nothing that exists is altered, so every stored row stays as it was."""
+    if "notices" not in inspect(connection).get_table_names():
+        Base.metadata.create_all(connection, tables=[Base.metadata.tables["notices"]])
+    connection.execute(SchemaVersion.__table__.insert().values(version=7))
+
+
 def make_engine(database_url: str):
     """Create a pooled database engine with SQLite settings suitable for API tests.
 
@@ -125,6 +134,9 @@ def migrate(engine):
         if version == 5:
             _upgrade_to_6(connection)
             version = 6
+        if version == 6:
+            _upgrade_to_7(connection)
+            version = 7
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

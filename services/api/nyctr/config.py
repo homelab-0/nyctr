@@ -33,6 +33,8 @@ def _browser_origin(name: str, parsed) -> str:
 
 MODEL_HOSTS = ("NYCTR_MODEL_HOSTS takes servers separated by commas. A bare name allows HTTPS on port 443 only; "
                "write any other port, or plain HTTP, in full, as https://name:8443 or http://name:4000, with no path")
+NOTICE_HOSTS = ("NYCTR_NOTICE_HOSTS takes servers separated by commas. A bare name allows HTTPS on port 443 only; "
+                "write any other port, or plain HTTP, in full, as https://name:8443 or http://name:4000, with no path")
 
 
 # A server's name: labels of letters, digits, hyphens and underscores (a Compose service may hold one),
@@ -40,29 +42,29 @@ MODEL_HOSTS = ("NYCTR_MODEL_HOSTS takes servers separated by commas. A bare name
 _NAME = r"(?=.{1,253}$)[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?)*"
 
 
-def _model_origin(entry: str) -> tuple[str, str, int]:
-    """Read one NYCTR_MODEL_HOSTS entry as scheme, host and port. A bare name means HTTPS on port 443 only."""
+def _model_origin(entry: str, message: str = MODEL_HOSTS) -> tuple[str, str, int]:
+    """Read one host-list entry as scheme, host and port. A bare name means HTTPS on port 443 only."""
     text = entry.strip().lower()
     if "://" not in text:
         try:
             ipaddress.ip_address(text)
         except ValueError:
             if not re.fullmatch(_NAME, text):
-                raise ValueError(MODEL_HOSTS) from None
+                raise ValueError(message) from None
         return "https", text, 443
     try:
         parsed = urlsplit(text)
         port = parsed.port if parsed.port is not None else {"http": 80, "https": 443}.get(parsed.scheme)
     except ValueError:
-        raise ValueError(MODEL_HOSTS) from None
+        raise ValueError(message) from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname or "@" in parsed.netloc or not port \
             or parsed.path not in ("", "/") or parsed.query or parsed.fragment or not text.isprintable():
-        raise ValueError(MODEL_HOSTS)
+        raise ValueError(message)
     try:
         ipaddress.ip_address(parsed.hostname)
     except ValueError:  # a name written in full is held to the same form as a bare one: no wildcard, no trailing dot
         if not re.fullmatch(_NAME, parsed.hostname):
-            raise ValueError(MODEL_HOSTS) from None
+            raise ValueError(message) from None
     return parsed.scheme, parsed.hostname, port
 
 
@@ -118,6 +120,8 @@ class Settings(BaseSettings):
     # http://name:4000). The server in ai_base_url is always allowed, on its own scheme and port only.
     # Empty allows no other, so a key cannot be sent anywhere else.
     model_hosts: str = ""
+    # Servers a notice may be sent to besides public HTTPS. Same form as model_hosts.
+    notice_hosts: str = ""
     # Optional shared secret that lets a network console ask Nyctr to collect now (a webhook).
     nudge_token: str = ""
 
@@ -186,6 +190,7 @@ class Settings(BaseSettings):
                     or endpoint.password or endpoint.query or endpoint.fragment:
                 raise ValueError("Assistant base URL must be a plain HTTP(S) URL")
         _ = self.model_origins  # refuses an entry that is not a server, so a typing mistake stops the start
+        _ = self.notice_origins
         if self.mode == "demo" and self.oidc_issuer:
             raise ValueError("OIDC is disabled in demo mode; use a separate live database")
         return self
@@ -225,6 +230,11 @@ class Settings(BaseSettings):
     def model_origins(self) -> set[tuple[str, str, int]]:
         """Return the servers the operator allows a model endpoint on, each as scheme, host and port."""
         return {_model_origin(x) for x in self.model_hosts.split(",") if x.strip()}
+
+    @property
+    def notice_origins(self) -> set[tuple[str, str, int]]:
+        """Return the servers the operator allows a notice to, each as scheme, host and port."""
+        return {_model_origin(x, NOTICE_HOSTS) for x in self.notice_hosts.split(",") if x.strip()}
 
     @property
     def admin_groups(self) -> set[str]:

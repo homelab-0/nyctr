@@ -25,6 +25,7 @@ from . import (
     facts,
     guests,
     model,
+    notices,
     presence,
     query,
     removal,
@@ -317,7 +318,7 @@ def create_app(settings: Settings | None = None):
         return {"ok": True}
 
     app.include_router(oidc_router)
-    for feature in (access, guests, query, assistant, presence):
+    for feature in (access, guests, query, assistant, presence, notices):
         app.include_router(feature.router)
 
     @app.get("/api/model")
