@@ -1,5 +1,6 @@
 """Facts about a name: stored evidence, the registry and the resolver, each marked honestly."""
 
+import gzip
 import ipaddress
 import json
 import socket
@@ -22,9 +23,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from test_collection_store import POSTGRES, postgres_database
 
-from nyctr import facts
+from nyctr import facts, retention
 from nyctr.database import make_engine, migrate, session_factory
-from nyctr.models import Integration, Observation, OwnLookup, Setting
+from nyctr.models import FactCache, Integration, Observation, OwnLookup, Setting
 
 _real_read, _real_resolve = facts._read, facts._resolve
 PUBLIC = ipaddress.ip_address("1.1.1.1")
@@ -249,9 +250,8 @@ def test_an_outbound_failure_is_unavailable_and_not_a_default(tmp_path, monkeypa
     assert "1999" not in found["registration"].reason
 
 
-def test_a_timeout_is_unavailable_and_asked_again_after_ten_minutes(tmp_path, monkeypatch):
-    """A registry that does not answer is unavailable, and that failure is kept for ten minutes, not a day."""
-    assert facts.FAILURE_KEPT == timedelta(minutes=10)
+def test_a_timeout_is_unavailable_and_asked_again_at_once(tmp_path, monkeypatch):
+    """A registry that does not answer in time is unavailable, and the next gathering asks again."""
     net = Net()
     net.install(monkeypatch)
 
@@ -266,11 +266,28 @@ def test_a_timeout_is_unavailable_and_asked_again_after_ten_minutes(tmp_path, mo
     first = gather(engine)
     assert first["registration"].state == "unavailable" and "did not answer in time" in first["registration"].reason
     asked = len(net.reads)
+    again = gather(engine)
+    assert "did not answer in time" in again["registration"].reason
+    assert len(net.reads) > asked
+    with session_factory(engine)() as db:
+        assert db.get(FactCache, ("example.com", "registration")) is None
+
+
+def test_a_registry_error_is_unavailable_and_asked_again_after_ten_minutes(tmp_path, monkeypatch):
+    """A registry that answers with an error is unavailable, and that failure is kept for ten minutes."""
+    assert facts.FAILURE_KEPT == timedelta(minutes=10)
+    net = Net()
+    net.install(monkeypatch)
+    net.status, net.body = 503, b'{"error":"down"}'
+    engine = database(tmp_path)
+    first = gather(engine)
+    assert first["registration"].state == "unavailable" and "reported an error" in first["registration"].reason
+    asked = len(net.reads)
     net.wall_at += timedelta(minutes=9)
     assert gather(engine)["registration"].reason == first["registration"].reason
     assert len(net.reads) == asked
     net.wall_at += timedelta(minutes=1)
-    assert "did not answer in time" in gather(engine)["registration"].reason
+    assert "reported an error" in gather(engine)["registration"].reason
     assert len(net.reads) > asked
 
 
@@ -444,6 +461,18 @@ def test_every_name_that_was_resolved_or_asked_about_is_recorded(tmp_path, monke
     assert "fresh.example" not in sent and "Jamie" not in sent and "10.0.0" not in sent
 
 
+def test_the_upkeep_tick_drops_names_older_than_a_day(tmp_path):
+    """Names Nyctr asked about leave on the upkeep tick, with nobody gathering in between."""
+    engine = database(tmp_path)
+    with session_factory(engine)() as db:
+        db.add(OwnLookup(name="old.example", at=WHEN - facts.KEPT))
+        db.add(OwnLookup(name="fresh.example", at=WHEN - facts.KEPT + timedelta(seconds=1)))
+        db.commit()
+    retention.expire_lookups(session_factory(engine), WHEN)
+    with session_factory(engine)() as db:
+        assert {row.name for row in db.scalars(select(OwnLookup))} == {"fresh.example"}
+
+
 def test_a_request_carries_the_name_and_nothing_else(monkeypatch):
     """The connection goes to the address that was checked, and the headers name no person, device or network."""
     seen = []
@@ -488,6 +517,32 @@ def test_an_oversized_answer_is_stopped_while_it_is_read(monkeypatch):
     monkeypatch.setattr(facts, "_read", _real_read)
     with pytest.raises(facts._TooBig):
         facts._read("https://rdap.example/domain/example.com", PUBLIC, 5)
+
+
+def test_a_compressed_answer_is_refused_before_it_is_read(monkeypatch):
+    """A compressed answer is not decoded, so a small gzip body cannot grow past the cap."""
+    compressed = gzip.compress(b"x" * (facts.MAX_BYTES + 1))
+    assert len(compressed) < facts.MAX_BYTES
+    seen = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            seen.append("read")
+            yield compressed
+
+        async def aclose(self):
+            return None
+
+    class Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            seen.append(request.headers["accept-encoding"])
+            return httpx.Response(200, headers={"content-encoding": "gzip"}, stream=Body())
+
+    monkeypatch.setattr(facts, "_transport", Transport())
+    monkeypatch.setattr(facts, "_read", _real_read)
+    with pytest.raises(facts._GiveUp, match="compressed"):
+        facts._read("https://rdap.example/domain/example.com", PUBLIC, 5)
+    assert seen == ["identity"]
 
 
 def test_a_reader_timeout_is_a_timeout(monkeypatch):

@@ -6,18 +6,20 @@ unknown. The registry and the system resolver are the only places asked. The
 certificate would mean connecting to the host itself, and a third-party
 reputation service would be told what was looked up, so both are left unasked.
 
-Every outbound request is HTTPS, with no redirect, five seconds of clock time
-for the call and eight for the whole gathering, and at most 256 kB read. The
-read stops when the time is up or the size is past, whichever comes first. The
-registry host, and the host of the registry list, are resolved first; a private,
-loopback, link-local, site-local or other address that is not a public one is
-refused before any connection. A request carries the name and nothing else: no
-person, no device and no network.
+A registry request is HTTPS, with no redirect. The system resolver's DNS is
+not encrypted. A call has five seconds of clock time and the whole gathering
+has eight, and at most 256 kB is read. The read stops when the time is up or
+the size is past, whichever comes first. A compressed answer is refused and
+not read. The registry host, and the host of the registry list, are resolved
+first; a private, loopback, link-local, site-local or other address that is
+not a public one is refused before any connection. A request carries the name
+and nothing else: no person, no device and no network.
 
 A registration that was read, and the list of registries, are kept for a day.
-A failure is kept for ten minutes. Running out of time is not kept. Each name
-that was resolved or asked about is written down for a day, so a later change
-can ignore Nyctr's own questions. Nothing reads that list yet.
+A failure is kept for ten minutes. A timeout is not kept, and neither is
+running out of time. Each name that was resolved or asked about is written
+down for a day, so a later change can ignore Nyctr's own questions. The
+upkeep tick drops a name once that day is up. Nothing reads that list yet.
 
 The cache is read and the database is closed before any of those calls. The
 answers and the lookup list are written afterwards, in one short step. A call
@@ -326,7 +328,7 @@ def _budget(job: _Job, limit: float, fn, timeout_reason: str):
     try:
         return fn(min(limit, left))
     except TimeoutError:
-        raise _GiveUp(timeout_reason) from None
+        raise _GiveUp(timeout_reason, cache=False) from None
 
 
 def _literal(host: str):
@@ -401,7 +403,9 @@ def _read(url: str, address, timeout: float) -> tuple[int, bytes]:
     The connection is to that address, not to whatever the name resolves to a
     moment later. Redirects are returned as they are and never followed. The
     time limit is for the whole call: a registry that sends one byte at a time
-    does not get another five seconds for each byte.
+    does not get another five seconds for each byte. A compressed answer is
+    refused before it is read. The size is the raw bytes on the wire, so a
+    small compressed chunk cannot grow past the cap.
     """
     parsed = urlsplit(url)
     try:
@@ -432,8 +436,15 @@ async def _read_async(url: str, address, port: int, timeout: float) -> tuple[int
     async def once():
         async with httpx.AsyncClient(**options) as client:
             async with client.stream("GET", pinned, headers=headers, extensions={"sni_hostname": host}) as response:
+                encoding = response.headers.get("content-encoding", "").strip().lower()
+                if encoding not in ("", "identity"):
+                    raise _GiveUp("The registry sent a compressed response, so Nyctr did not read it.")
+                # aiter_bytes decodes Content-Encoding before this loop can count.
+                # The raw stream is the one the cap applies to. A stand-in that
+                # has already read an identity body holds those same bytes.
+                raw = response.aiter_bytes() if response.is_stream_consumed else response.aiter_raw()
                 chunks, size = [], 0
-                async for chunk in response.aiter_bytes():
+                async for chunk in raw:
                     if time.monotonic() >= deadline:
                         raise TimeoutError
                     size += len(chunk)
