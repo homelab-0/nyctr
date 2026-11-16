@@ -54,15 +54,21 @@ would tell that service what was looked up. The demonstration does not make
 either outside request.
 
 Limits on every one of these requests: HTTPS only; a redirect is not followed;
-5 seconds for one call and 8 seconds for the whole gathering; at most 256 kB
-is read. Before any connection the host is resolved, and a private, loopback,
-link-local or reserved address is refused with nothing sent. The request
-carries the name and nothing else: no person, no device and no network
-address. An answer is kept for a day, so asking again about the same name does
-not ask the registry again. Each name that was resolved or asked about is
-written down for a day (`own_lookups`) so a later change can ignore Nyctr's own
+5 seconds of clock time for one call and 8 seconds of clock time for the whole
+gathering; at most 256 kB is read, and the read stops when the time or the
+size is reached. Before any connection the host is resolved, and a private,
+loopback, link-local, site-local or other address that is not a public one is
+refused with nothing sent. The request carries the name and nothing else: no
+person, no device and no network address. A registration that was read, and
+the list of registries, are kept for a day. A failure is kept for ten minutes,
+so a registry that did not answer can be asked again. Running out of time is
+not kept. The database is closed before any of these calls, and the answers
+are written afterwards. Each name that was resolved or asked about is written
+down for a day (`own_lookups`) so a later change can ignore Nyctr's own
 questions. Nothing reads that list yet. A fact that could not be had is marked
-unavailable, with the reason, and is never filled in with a default.
+unavailable, with the reason, and is never filled in with a default. A name
+that would be changed into a different name is refused. When the registry's
+answer is for a parent of the name, the fact says so.
 
 Nyctr can change a provider in three narrow ways, all in
 `nyctr/integrations/actions.py`: add or remove one NextDNS allowlist entry,
@@ -169,7 +175,7 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | Stale block becomes an access grant | Reject stale requests. An approval is refused once the blocked lookup behind it has expired; refusing or noting a request needs no fresh evidence |
 | Provider redirects leak an API key | No redirected credential-bearing requests |
 | Configured endpoint targets internal metadata | Explicit console host allowlist, HTTPS validation, reserved-address restrictions |
-| A lookup of a blocked name is aimed at an internal address, or tells someone what was looked up | The registry list and the registry are HTTPS only, with no redirect, 5 seconds a call, 8 seconds for the whole gathering and 256 kB. A private, loopback, link-local or reserved address is refused before any connection. The request carries the name only. The certificate and third-party reputation are not asked. The demonstration does not make these requests |
+| A lookup of a blocked name is aimed at an internal address, or tells someone what was looked up | The registry list and the registry are HTTPS only, with no redirect, 5 seconds of clock time a call, 8 seconds of clock time for the whole gathering and 256 kB. A private, loopback, link-local, site-local or other address that is not public is refused before any connection. The request carries the name only. A failure is kept for ten minutes and an answer that was read is kept for a day. The database is not held while a call is open. The certificate and third-party reputation are not asked. The demonstration does not make these requests |
 | Provider returns misleading successful HTTP status | Parse provider-level errors; never treat missing/error data as safe |
 | Log text or domain is used as prompt instructions | Future AI treats source text as untrusted evidence and cannot execute |
 | Model invents confidence or permissions | Unknown risk remains unknown; external authorization owns decisions |

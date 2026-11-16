@@ -6,55 +6,66 @@ unknown. The registry and the system resolver are the only places asked. The
 certificate would mean connecting to the host itself, and a third-party
 reputation service would be told what was looked up, so both are left unasked.
 
-Every outbound request is HTTPS, with no redirect, five seconds for the call
-and eight for the whole gathering, and at most 256 kB read. The registry host,
-and the host of the registry list, are resolved first; a private, loopback,
-link-local or reserved address is refused before any connection. A request
-carries the name and nothing else: no person, no device and no network.
+Every outbound request is HTTPS, with no redirect, five seconds of clock time
+for the call and eight for the whole gathering, and at most 256 kB read. The
+read stops when the time is up or the size is past, whichever comes first. The
+registry host, and the host of the registry list, are resolved first; a private,
+loopback, link-local, site-local or other address that is not a public one is
+refused before any connection. A request carries the name and nothing else: no
+person, no device and no network.
 
-Answers are kept for a day. Each name that was resolved or asked about is
-written down for a day, so a later change can ignore Nyctr's own questions.
-Nothing reads that list yet.
+A registration that was read, and the list of registries, are kept for a day.
+A failure is kept for ten minutes. Running out of time is not kept. Each name
+that was resolved or asked about is written down for a day, so a later change
+can ignore Nyctr's own questions. Nothing reads that list yet.
 
-The gathering holds one settings row across each check and the write that
-follows it, and flushes at three points while that hold lasts: the registry
-list, the registration, and the lookup list. A second gathering waits at each.
+The cache is read and the database is closed before any of those calls. The
+answers and the lookup list are written afterwards, in one short step. A call
+does not hold the database.
 """
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import re
 import socket
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+import idna
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from . import risk
-from .models import FactCache, Observation, OwnLookup, Setting, Workspace, utc, utcnow
+from .models import FactCache, Observation, OwnLookup, Workspace, utc, utcnow
 
 BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
-LOCK_KEY = "fact_gather"
 CALL_TIMEOUT = 5.0
 GATHER_BUDGET = 8.0
 RESOLVE_TIMEOUT = 3.0
 MAX_BYTES = 256 * 1024
 KEPT = timedelta(hours=24)
+FAILURE_KEPT = timedelta(minutes=10)
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _DOMAIN = re.compile(rf"(?=^.{{1,253}}$)(?:{_LABEL}\.)+{_LABEL}")
+_WHEN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 _NO_ANSWER = frozenset(code for name in ("EAI_NONAME", "EAI_NODATA", "EAI_FAIL")
                        if (code := getattr(socket, name, None)) is not None)
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
+# Python reports fec0::/10 as a global address. It is the old site-local range.
+_SITE_LOCAL = ipaddress.IPv6Network("fec0::/10")
+_SEPARATORS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
 # Replaced in tests that answer the registry without a connection.
 _transport: httpx.BaseTransport | None = None
+# Tests point this at a stand-in's certificate. The default checks the public authorities.
+_verify: object = True
 
 _REFUSED = {
     "private": "The registry's address is on a private network, so Nyctr did not connect.",
@@ -117,10 +128,15 @@ def _mono() -> float:
 
 
 def _name(domain: str) -> str:
-    """The name Nyctr will ask about: lower case, punycode, and nothing but the name."""
+    """The name Nyctr will ask about, in IDNA 2008.
+
+    A mapping that would turn the name into a different one is refused. The old
+    IDNA 2003 rules do that to some names, and the registration would then be
+    for a name the person did not ask about.
+    """
     if not isinstance(domain, str):
         raise NotAName("Give the address as a name.")
-    text = domain.strip().lower().rstrip(".")
+    text = domain.strip().lower().rstrip(".").translate(_SEPARATORS)
     if not text or any(char.isspace() for char in text) or not text.isprintable():
         raise NotAName("That is not an address Nyctr can look up.")
     if "://" in text or any(mark in text for mark in "/\\@?#"):
@@ -132,8 +148,14 @@ def _name(domain: str) -> str:
     else:
         raise NotAName("Give a name, not a numeric address.")
     try:
-        ascii_name = text.encode("idna").decode("ascii")
-    except UnicodeError:
+        remapped = idna.uts46_remap(text, std3_rules=True, transitional=False)
+    except idna.IDNAError:
+        raise NotAName("That is not an address Nyctr can look up.") from None
+    if unicodedata.normalize("NFC", remapped) != unicodedata.normalize("NFC", text):
+        raise NotAName("That is not an address Nyctr can look up.")
+    try:
+        ascii_name = idna.encode(remapped, strict=True, std3_rules=True).decode("ascii")
+    except idna.IDNAError:
         raise NotAName("That is not an address Nyctr can look up.") from None
     if not _DOMAIN.fullmatch(ascii_name):
         raise NotAName("That is not an address Nyctr can look up.")
@@ -146,6 +168,18 @@ def _plain(value: object, limit: int) -> str | None:
         return None
     cleaned = " ".join("".join(char for char in value if char.isprintable()).split())
     return cleaned[:limit] or None
+
+
+def _when(value: object) -> str | None:
+    """An RFC 3339 date, or nothing when the text is not one. A missing date stays missing."""
+    text = _plain(value, 40)
+    if text is None or _WHEN.fullmatch(text) is None:
+        return None
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return text
 
 
 def _known(kind: str, source: str, value: object, at: datetime) -> Fact:
@@ -203,25 +237,12 @@ def _seen(rows: list[Observation], at: datetime) -> Fact:
     return _known("seen", "stored", {"first_seen": first, "devices": len(devices), "times": len(rows)}, at)
 
 
-def _lock(db: Session) -> None:
-    """Hold the row every gathering writes under, until this transaction ends.
-
-    The row is committed on its own the first time, so the hold exists before
-    the check that decides whether to ask the registry again. The update changes
-    nothing: it locks the row on PostgreSQL and takes SQLite's write lock.
-    """
-    if db.get(Setting, LOCK_KEY) is None:
-        db.add(Setting(key=LOCK_KEY, value={}))
-        try:
-            db.commit()
-        except IntegrityError:  # another gathering created it between the read and the write
-            db.rollback()
-    db.execute(update(Setting).where(Setting.key == LOCK_KEY).values(updated_at=Setting.updated_at)
-               .execution_options(synchronize_session=False))
-
-
 def _fresh(row: FactCache | None, wall: datetime) -> bool:
-    return row is not None and wall - utc(row.fetched_at) < KEPT
+    """A registration that was read lasts a day. A failure lasts ten minutes."""
+    if row is None:
+        return False
+    kept = FAILURE_KEPT if row.state == "unavailable" else KEPT
+    return wall - utc(row.fetched_at) < kept
 
 
 def _cached(db: Session, domain: str, kind: str, wall: datetime) -> FactCache | None:
@@ -230,14 +251,13 @@ def _cached(db: Session, domain: str, kind: str, wall: datetime) -> FactCache | 
 
 
 def _store(db: Session, domain: str, kind: str, fact: Fact, wall: datetime) -> None:
-    """Write one cache row and flush it, still holding the lock taken in `_lock`."""
+    """Write one cache row. The caller commits it, with no network call left open."""
     payload = {"value": fact.value, "reason": fact.reason}
     row = db.get(FactCache, (domain, kind))
     if row is None:
         db.add(FactCache(domain=domain, kind=kind, value=payload, state=fact.state, fetched_at=wall))
     else:
         row.value, row.state, row.fetched_at = payload, fact.state, wall
-    db.flush()
 
 
 def _from_cache(row: FactCache, kind: str, source: str) -> Fact:
@@ -246,8 +266,25 @@ def _from_cache(row: FactCache, kind: str, source: str) -> Fact:
 
 
 @dataclass
+class _Memo:
+    """Plain copies of the cache, taken so the session can close before any network call."""
+
+    services: dict[str, str] | None
+    registration: Fact | None
+
+
+def _memo(db: Session, name: str, wall: datetime) -> _Memo:
+    boot = _cached(db, "", "rdap_bootstrap", wall)
+    services = None
+    if boot is not None and isinstance((boot.value or {}).get("value"), dict):
+        services = dict(boot.value["value"])
+    row = _cached(db, name, "registration", wall)
+    registration = _from_cache(row, "registration", "registry") if row is not None else None
+    return _Memo(services, registration)
+
+
+@dataclass
 class _Job:
-    db: Session
     started: float
     wall: datetime
     lookups: list[str]
@@ -263,7 +300,12 @@ def _left(job: _Job) -> float:
 
 
 def _budget(job: _Job, limit: float, fn, timeout_reason: str):
-    """Run `fn` only while the gathering still has time, and give it no more than that."""
+    """Run `fn` only while the gathering still has time, and give it no more than that.
+
+    `fn` is given a number of seconds and has to finish inside it. That number
+    is the call's own limit or whatever the gathering has left, whichever is
+    smaller, so one slow answer cannot use the next call's time.
+    """
     left = _left(job)
     if left <= 0:
         raise _GiveUp("Nyctr ran out of time before it could ask about this name.", cache=False)
@@ -285,6 +327,10 @@ def _why(address) -> str | None:
     mapped = getattr(address, "ipv4_mapped", None)
     if mapped is not None:
         return _why(mapped) or "reserved"
+    if address.version == 6 and address in _SITE_LOCAL:
+        return "reserved"
+    if getattr(address, "is_site_local", False):
+        return "reserved"
     if address.is_loopback:
         return "loopback"
     if address.is_link_local:
@@ -299,16 +345,18 @@ def _why(address) -> str | None:
 def _resolve(host: str, timeout: float) -> list | None:
     """Addresses for `host`, or None when the resolver has no answer.
 
-    A literal address is not a lookup. Anything else is resolved in a thread:
+    A literal address is not a lookup. Anything else is asked with a trailing
+    dot, so a search list is not tried first, and the lookup runs in a thread:
     a resolver that never answers cannot be interrupted in place, and the
     thread is abandoned when `timeout` passes so the gathering can move on.
     """
     if (literal := _literal(host)) is not None:
         return [literal]
+    queried = host if host.endswith(".") else f"{host}."
 
     def work():
         try:
-            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            infos = socket.getaddrinfo(queried, None, type=socket.SOCK_STREAM)
         except socket.gaierror as error:
             if error.errno in _NO_ANSWER:
                 return None
@@ -334,29 +382,57 @@ def _resolve(host: str, timeout: float) -> list | None:
 
 
 def _read(url: str, address, timeout: float) -> tuple[int, bytes]:
-    """GET `url` at the address already checked, and stop past 256 kB.
+    """GET `url` at the address already checked, and stop at the clock or at 256 kB.
 
     The connection is to that address, not to whatever the name resolves to a
-    moment later. Redirects are returned as they are and never followed.
+    moment later. Redirects are returned as they are and never followed. The
+    time limit is for the whole call: a registry that sends one byte at a time
+    does not get another five seconds for each byte.
     """
     parsed = urlsplit(url)
-    host, port = parsed.hostname or "", parsed.port or 443
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        raise _GiveUp("The registry's address is not a secure one, so Nyctr did not connect.") from None
+    if timeout <= 0:
+        raise TimeoutError
+    try:
+        return asyncio.run(_read_async(url, address, port, timeout))
+    except TimeoutError:
+        raise TimeoutError from None
+
+
+async def _read_async(url: str, address, port: int, timeout: float) -> tuple[int, bytes]:
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
     literal = f"[{address}]" if address.version == 6 else str(address)
     pinned = urlunsplit(("https", f"{literal}:{port}", parsed.path, "", ""))
-    headers = {"Accept": "application/rdap+json", "Host": host if port == 443 else f"{host}:{port}"}
-    options: dict = {"follow_redirects": False, "trust_env": False, "timeout": httpx.Timeout(timeout), "verify": True}
+    headers = {"Accept": "application/rdap+json", "Accept-Encoding": "identity",
+               "Host": host if port == 443 else f"{host}:{port}"}
+    options: dict = {"follow_redirects": False, "trust_env": False, "timeout": httpx.Timeout(timeout),
+                     "verify": _verify}
     if _transport is not None:
         options["transport"] = _transport
-    try:
-        with httpx.Client(**options) as client:
-            with client.stream("GET", pinned, headers=headers, extensions={"sni_hostname": host}) as response:
+    deadline = time.monotonic() + timeout
+
+    async def once():
+        async with httpx.AsyncClient(**options) as client:
+            async with client.stream("GET", pinned, headers=headers, extensions={"sni_hostname": host}) as response:
                 chunks, size = [], 0
-                for chunk in response.iter_bytes():
+                async for chunk in response.aiter_bytes():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError
                     size += len(chunk)
                     if size > MAX_BYTES:
                         raise _TooBig()
                     chunks.append(chunk)
                 return response.status_code, b"".join(chunks)
+
+    try:
+        async with asyncio.timeout(timeout):
+            return await once()
+    except TimeoutError:
+        raise TimeoutError from None
     except httpx.TimeoutException:
         raise TimeoutError from None
     except httpx.HTTPError:
@@ -407,11 +483,18 @@ def _fetch(job: _Job, url: str, asked: str | None = None) -> tuple[int, bytes]:
 
 
 def _https_base(url: object) -> str | None:
+    """A registry address Nyctr will use: https, port 443, and nothing else in the URL."""
     if not isinstance(url, str) or url.startswith("http://"):
         return None
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
             or parsed.query or parsed.fragment):
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port not in (None, 443):
         return None
     return url
 
@@ -445,18 +528,6 @@ def _services(body: bytes) -> dict[str, str]:
             raise _GiveUp("The registry's address is not a secure one, so Nyctr did not connect.")
         raise _GiveUp("The list of domain registries could not be read.")
     return found
-
-
-def _bootstrap(job: _Job) -> dict[str, str]:
-    row = _cached(job.db, "", "rdap_bootstrap", job.wall)
-    if row is not None and isinstance((row.value or {}).get("value"), dict):
-        return row.value["value"]
-    status, body = _fetch(job, BOOTSTRAP_URL)
-    if status != 200:
-        raise _GiveUp("Nyctr could not read the list of domain registries.")
-    services = _services(body)
-    _store(job.db, "", "rdap_bootstrap", _known("rdap_bootstrap", "registry", services, job.wall), job.wall)
-    return services
 
 
 def _match(services: dict[str, str], name: str) -> str | None:
@@ -504,7 +575,7 @@ def _parse(body: bytes) -> dict:
     for event in events:
         if not isinstance(event, dict):
             continue
-        when = _plain(event.get("eventDate"), 40)
+        when = _when(event.get("eventDate"))
         if event.get("eventAction") == "registration":
             registered = registered or when
         elif event.get("eventAction") == "expiration":
@@ -538,8 +609,7 @@ def _candidates(name: str) -> list[str]:
     return found
 
 
-def _rdap(job: _Job, name: str) -> dict:
-    services = _bootstrap(job)
+def _rdap(job: _Job, name: str, services: dict[str, str]) -> dict:
     missed = "The registry has no record of this name."
     for candidate in _candidates(name):
         base = _match(services, candidate)
@@ -556,23 +626,10 @@ def _rdap(job: _Job, name: str) -> dict:
             raise _GiveUp("The registry did not return a registration.")
         value = _parse(body)
         value["name"] = candidate
+        if candidate != name:
+            value["for"] = "parent"
         return value
     raise _GiveUp(missed)
-
-
-def _registration(job: _Job, name: str) -> Fact:
-    if (row := _cached(job.db, name, "registration", job.wall)) is not None:
-        return _from_cache(row, "registration", "registry")
-    try:
-        value = _rdap(job, name)
-    except _GiveUp as error:
-        fact = _unavailable("registration", "registry", error.reason, job.wall)
-        if error.cache:
-            _store(job.db, name, "registration", fact, job.wall)
-        return fact
-    fact = _known("registration", "registry", value, job.wall)
-    _store(job.db, name, "registration", fact, job.wall)
-    return fact
 
 
 def _resolution(job: _Job, name: str) -> Fact:
@@ -592,43 +649,77 @@ def _resolution(job: _Job, name: str) -> Fact:
     return _known("resolution", "resolver", sorted({str(item) for item in found}), job.wall)
 
 
-def _save_lookups(job: _Job) -> None:
-    """Write the names this gathering resolved or asked about, and drop those older than a day."""
-    job.db.execute(delete(OwnLookup).where(OwnLookup.at <= job.wall - KEPT))
-    for name in job.lookups:
-        job.db.add(OwnLookup(name=name, at=job.wall))
-    job.db.flush()
+def _network(memo: _Memo, name: str, wall: datetime, started: float):
+    """Ask the registry and the resolver. This function never touches the database.
+
+    An unexpected error becomes an unavailable fact. Names already resolved or
+    asked about are still returned, so the caller can write them down.
+    """
+    job = _Job(started, wall, [])
+    services_to_store = None
+    remembered = None
+    try:
+        if memo.registration is not None:
+            registration = memo.registration
+        else:
+            services = memo.services
+            if services is None:
+                status, body = _fetch(job, BOOTSTRAP_URL)
+                if status != 200:
+                    raise _GiveUp("Nyctr could not read the list of domain registries.")
+                services = _services(body)
+                services_to_store = services
+            value = _rdap(job, name, services)
+            registration = _known("registration", "registry", value, wall)
+            remembered = registration
+    except _GiveUp as error:
+        registration = _unavailable("registration", "registry", error.reason, wall)
+        remembered = registration if error.cache else None
+    except Exception:
+        registration = _unavailable("registration", "registry", "The registry could not be reached.", wall)
+        remembered = registration
+    try:
+        resolution = _resolution(job, name)
+    except Exception:
+        resolution = _unavailable("resolution", "resolver", "The resolver could not answer.", wall)
+    return registration, resolution, list(job.lookups), services_to_store, remembered
 
 
-def _outside(db: Session, name: str, wall: datetime, started: float) -> tuple[Fact, Fact]:
-    """Registration and resolution, under the lock, then the names that were asked about."""
-    _lock(db)
-    job = _Job(db, started, wall, [])
-    registration = _registration(job, name)
-    resolution = _resolution(job, name)
-    _save_lookups(job)
+def _persist(db: Session, name: str, wall: datetime, lookups: list[str], services, remembered: Fact | None) -> None:
+    """Write the cache and the lookup list in one transaction, after the calls have finished."""
+    if services is not None:
+        _store(db, "", "rdap_bootstrap", _known("rdap_bootstrap", "registry", services, wall), wall)
+    if remembered is not None:
+        _store(db, name, "registration", remembered, wall)
+    db.execute(delete(OwnLookup).where(OwnLookup.at <= wall - KEPT))
+    for item in lookups:
+        db.add(OwnLookup(name=item, at=wall))
     db.commit()
-    return registration, resolution
 
 
 def gather(db: Session, domain: str) -> list[Fact]:
     """Gather the facts for one name. Commits the cache and the lookup list.
 
-    The caller's session is committed when a lookup is stored. A failure rolls
-    the unfinished write back; a fact that could not be had is in the list, not
-    raised, except a name Nyctr will not look up.
+    Stored facts are read first and the transaction is closed before any
+    registry or resolver call. A name Nyctr will not look up is raised. Any
+    other failure is a fact in the list.
     """
     name = _name(domain)
     wall, started = _wall(), _mono()
-    try:
-        rows = _observations(db, name)
-        stored = [_block(rows, wall), _score(name, rows, wall), _seen(rows, wall)]
-        if _demonstration(db):
-            outside = [_unavailable("registration", "registry", DEMONSTRATION, wall),
-                       _unavailable("resolution", "resolver", DEMONSTRATION, wall)]
-        else:
-            outside = list(_outside(db, name, wall, started))
-    except Exception:
-        db.rollback()
-        raise
+    rows = _observations(db, name)
+    stored = [_block(rows, wall), _score(name, rows, wall), _seen(rows, wall)]
+    demo = _demonstration(db)
+    memo = None if demo else _memo(db, name, wall)
+    db.rollback()
+    if demo:
+        outside = [_unavailable("registration", "registry", DEMONSTRATION, wall),
+                   _unavailable("resolution", "resolver", DEMONSTRATION, wall)]
+    else:
+        registration, resolution, lookups, services, remembered = _network(memo, name, wall, started)
+        try:
+            _persist(db, name, wall, lookups, services, remembered)
+        except Exception:
+            db.rollback()
+            raise
+        outside = [registration, resolution]
     return _number([*stored, *outside, _not_asked("certificate", wall), _not_asked("reputation", wall)])

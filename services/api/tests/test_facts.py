@@ -3,16 +3,23 @@
 import ipaddress
 import json
 import socket
+import ssl
+import tempfile
 import threading
-from contextlib import contextmanager
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 from conftest import LIVE_ADMIN, live_app, live_signin
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, select, text
 from test_collection_store import POSTGRES, postgres_database
 
 from nyctr import facts
@@ -30,16 +37,12 @@ RDAP = json.dumps({
     "entities": [{"roles": ["registrar"], "vcardArray": ["vcard", [["fn", {}, "text", "Example Registrar"]]]}],
 }).encode()
 REFUSED = [
-    ("private", "10.1.2.3"), ("private", "fd00::1"),
+    ("private", "10.1.2.3"), ("private", "fd00::1"), ("private", "100.64.0.1"),
     ("loopback", "127.0.0.1"), ("loopback", "::1"),
     ("link-local", "169.254.1.1"), ("link-local", "fe80::1"),
-    ("reserved", "240.0.0.1"), ("reserved", "100::1"),
+    ("reserved", "240.0.0.1"), ("reserved", "100::1"), ("reserved", "224.0.0.1"),
+    ("reserved", "fec0::1"), ("reserved", "fec0:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
 ]
-# How long the second writer is given to show it is still waiting. SQLite gives up on a lock after
-# five seconds, so that case stays well inside it. PostgreSQL waits, and its database is told to give up
-# after twenty, so a fault fails the run instead of hanging it.
-WAIT = {"sqlite": 0.5, "postgresql": 5.0}
-FINISH = 30.0
 
 
 def _boom(*_args, **_kwargs):
@@ -246,8 +249,9 @@ def test_an_outbound_failure_is_unavailable_and_not_a_default(tmp_path, monkeypa
     assert "1999" not in found["registration"].reason
 
 
-def test_a_timeout_is_unavailable_and_not_asked_again_the_same_day(tmp_path, monkeypatch):
-    """A registry that does not answer in time is unavailable, and the next gathering does not ask again."""
+def test_a_timeout_is_unavailable_and_asked_again_after_ten_minutes(tmp_path, monkeypatch):
+    """A registry that does not answer is unavailable, and that failure is kept for ten minutes, not a day."""
+    assert facts.FAILURE_KEPT == timedelta(minutes=10)
     net = Net()
     net.install(monkeypatch)
 
@@ -262,8 +266,12 @@ def test_a_timeout_is_unavailable_and_not_asked_again_the_same_day(tmp_path, mon
     first = gather(engine)
     assert first["registration"].state == "unavailable" and "did not answer in time" in first["registration"].reason
     asked = len(net.reads)
+    net.wall_at += timedelta(minutes=9)
     assert gather(engine)["registration"].reason == first["registration"].reason
     assert len(net.reads) == asked
+    net.wall_at += timedelta(minutes=1)
+    assert "did not answer in time" in gather(engine)["registration"].reason
+    assert len(net.reads) > asked
 
 
 def test_plain_http_is_not_connected(tmp_path, monkeypatch):
@@ -403,6 +411,7 @@ def test_the_longer_name_is_asked_when_the_shorter_one_is_missing(tmp_path, monk
     monkeypatch.setattr(facts, "_read", read)
     found = gather(database(tmp_path), "www.example.com")
     assert found["registration"].value["name"] == "www.example.com"
+    assert "for" not in found["registration"].value
     assert net.reads[-2:] == ["https://rdap.example/v1/domain/example.com",
                               "https://rdap.example/v1/domain/www.example.com"]
 
@@ -454,6 +463,7 @@ def test_a_request_carries_the_name_and_nothing_else(monkeypatch):
     values = " ".join(request.headers.values()).lower()
     assert "jamie" not in values and "laptop" not in values and "10.0.0" not in values
     assert "authorization" not in {key.lower() for key in request.headers}
+    assert request.headers["accept-encoding"] == "identity"
 
 
 def test_a_redirect_from_the_real_reader_is_one_response_and_not_followed(monkeypatch):
@@ -497,12 +507,14 @@ def test_the_resolver_runs_on_another_thread(monkeypatch):
 
     def fake(host, *_args, **_kwargs):
         seen["thread"] = threading.get_ident()
+        seen["host"] = host
         return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("1.1.1.1", 0))]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake)
     monkeypatch.setattr(facts, "_resolve", _real_resolve)
     assert facts._resolve("example.com", 1) == [PUBLIC]
     assert seen["thread"] != threading.get_ident()
+    assert seen["host"] == "example.com."
 
 
 def test_a_resolver_that_does_not_answer_is_abandoned(monkeypatch):
@@ -532,51 +544,324 @@ def test_a_name_the_resolver_does_not_know_is_no_answer(monkeypatch):
     assert facts._resolve("example.com", 1) is None
 
 
-# The second writer. Same shape as the tie tests: stop the first gathering at each flush, on both engines.
+def test_a_name_idna_2003_would_change_stays_the_name_it_is(tmp_path, monkeypatch):
+    """faß.de is its own registration. It is not looked up as fass.de."""
+    assert "faß.de".encode("idna").decode("ascii") == "fass.de"
+    assert facts._name("faß.de") == "xn--fa-hia.de"
+    assert facts._name("ς.com") == "xn--3xa.com"
+    assert facts._name("ς.com") != "ς.com".encode("idna").decode("ascii")
+    net = Net()
+    net.install(monkeypatch)
+    found = gather(database(tmp_path), "faß.de")
+    assert found["registration"].state == "unavailable"
+    sent = " ".join(item["url"] for item in net.reads)
+    assert "fass.de" not in sent
+    asked = [host for host, _timeout in net.resolves if host not in {"data.iana.org", "rdap.example"}]
+    assert asked == ["xn--fa-hia.de"]
+    assert facts._name("foo。com") == "foo.com"
+    assert facts._name("cafe\u0301.fr") == "xn--caf-dma.fr"
 
 
-@contextmanager
-def others_finish():
-    started = []
-    try:
-        yield started
-    finally:
-        for other in started:
-            other.join(FINISH)
-    assert not any(other.is_alive() for other in started), "a second writer never finished"
+def test_a_name_that_does_not_map_cleanly_is_refused():
+    """A name whose mapping is a different name is not looked up."""
+    for domain in ("ｆａｓｓ.de", "ﬁle.com"):
+        with pytest.raises(facts.NotAName):
+            facts._name(domain)
 
 
-@contextmanager
-def stopped_before_it_writes(second, wait, at):
-    """Stop the gathering at its `at`th flush, run `second`, and record whether that one was still waiting."""
-    seen = {"armed": at, "waiting": [], "raised": []}
+def test_a_date_that_is_not_a_date_is_left_out(tmp_path, monkeypatch):
+    """A registration date has to be a real date. Other text is dropped, and a missing date is not invented."""
+    net = Net()
+    net.install(monkeypatch)
+    net.body = json.dumps({
+        "events": [{"eventAction": "registration", "eventDate": "long ago"},
+                   {"eventAction": "expiration", "eventDate": "2030-01-01T00:00:00Z"}],
+        "status": ["active"],
+    }).encode()
+    engine = database(tmp_path)
+    found = gather(engine)
+    assert found["registration"].state == "known"
+    assert "registered" not in found["registration"].value
+    assert found["registration"].value["expires"] == "2030-01-01T00:00:00Z"
+    assert "long ago" not in json.dumps(found["registration"].value)
+    net.body = json.dumps({"events": [{"eventAction": "registration", "eventDate": "long ago"}]}).encode()
+    net.wall_at += facts.KEPT
+    again = gather(engine)
+    assert again["registration"].state == "unavailable"
+    assert "named no registration" in again["registration"].reason
+
+
+def test_a_registration_of_the_parent_says_which_name_it_describes(tmp_path, monkeypatch):
+    """When the registry answers for the parent, the fact says so, and it names that parent."""
+    net = Net()
+    net.install(monkeypatch)
+
+    def read(url, address, timeout):
+        net.reads.append(url)
+        if url.endswith("dns.json"):
+            return 200, BOOTSTRAP
+        if url.endswith("/domain/example.com"):
+            return 200, RDAP
+        raise AssertionError(url)
+
+    monkeypatch.setattr(facts, "_read", read)
+    found = gather(database(tmp_path), "www.example.com")
+    assert found["registration"].value["name"] == "example.com"
+    assert found["registration"].value["for"] == "parent"
+
+
+def test_a_bad_port_in_the_reader_is_a_plain_refusal(monkeypatch):
+    """The reader refuses a port it cannot use, and it does not raise."""
+    monkeypatch.setattr(facts, "_read", _real_read)
+    with pytest.raises(facts._GiveUp):
+        facts._read("https://rdap.example:99999/domain/example.com", PUBLIC, 1)
+    with pytest.raises(facts._GiveUp):
+        facts._read("https://rdap.example:abc/domain/example.com", PUBLIC, 1)
+
+
+def test_a_bad_port_is_unavailable_and_the_lookup_list_is_kept(tmp_path, monkeypatch):
+    """A registry address with a bad port is a plain unavailable fact, and the list lookup is kept."""
+    net = Net()
+    net.install(monkeypatch)
+    net.bootstrap = json.dumps({"services": [[
+        ["com"],
+        ["https://rdap.example:99999/v1/", "https://rdap.example:abc/v1/", "https://rdap.example:25/v1/"],
+    ]]}).encode()
+
+    def read(url, address, timeout):
+        net.reads.append({"url": url, "address": str(address), "timeout": timeout})
+        port = urlsplit(url).port  # the real reader asks for the port, and a bad one raises
+        if port not in (None, 443):
+            raise AssertionError(port)
+        if url.endswith("/rdap/dns.json"):
+            return 200, net.bootstrap
+        return 200, RDAP
+
+    monkeypatch.setattr(facts, "_read", read)
+    engine = database(tmp_path)
+    found = gather(engine)
+    assert found["registration"].state == "unavailable" and found["registration"].value is None
+    assert [item["url"] for item in net.reads] == [facts.BOOTSTRAP_URL]
+    with session_factory(engine)() as db:
+        names = {row.name for row in db.scalars(select(OwnLookup))}
+    assert "data.iana.org" in names
+    app = live_app(tmp_path, public_url="http://console.example.test", portal_url="http://portal.example.test")
+    with TestClient(app, base_url="http://console.example.test") as client:
+        live_signin(client, LIVE_ADMIN)
+        answer = client.get("/api/facts", params={"domain": "example.com"})
+    assert answer.status_code == 200
+    assert kinds(answer.json())["registration"]["state"] == "unavailable"
+
+
+def test_an_unexpected_error_is_unavailable_and_keeps_the_lookup_list(tmp_path, monkeypatch):
+    """A failure inside a call does not become a 500, and names already asked about stay written down."""
+    net = Net()
+    net.install(monkeypatch)
+
+    def read(url, address, timeout):
+        net.reads.append(url)
+        if url.endswith("dns.json"):
+            return 200, BOOTSTRAP
+        raise RuntimeError("Port out of range")
+
+    monkeypatch.setattr(facts, "_read", read)
+    engine = database(tmp_path)
+    found = gather(engine)
+    assert found["registration"].state == "unavailable"
+    assert "could not be reached" in found["registration"].reason
+    with session_factory(engine)() as db:
+        names = {row.name for row in db.scalars(select(OwnLookup))}
+    assert "data.iana.org" in names
+
+
+def test_a_call_is_given_only_the_time_still_left(tmp_path, monkeypatch):
+    """After six seconds have been used, the next call gets the two that remain, not another five."""
+    net = Net()
+    monkeypatch.setattr(facts, "_mono", lambda: net.clock)
+    monkeypatch.setattr(facts, "_wall", lambda: net.wall_at)
+    seen = []
+
+    def resolve(host, timeout):
+        seen.append(("resolve", timeout))
+        if host == "data.iana.org":
+            net.clock = 6
+        return [PUBLIC] if host in {"data.iana.org", "rdap.example"} else None
+
+    def read(url, address, timeout):
+        seen.append(("read", timeout))
+        return 200, BOOTSTRAP if url.endswith("dns.json") else RDAP
+
+    monkeypatch.setattr(facts, "_resolve", resolve)
+    monkeypatch.setattr(facts, "_read", read)
+    gather(database(tmp_path))
+    assert ("read", 2.0) in seen
+    assert all(timeout <= 2.0 for kind, timeout in seen if kind == "read")
+
+
+def test_a_numeric_host_is_not_given_a_search_domain(monkeypatch):
+    """A literal address is not a lookup, and it is not sent to the resolver with a trailing dot."""
+    called = []
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **_kwargs: called.append(args))
+    monkeypatch.setattr(facts, "_resolve", _real_resolve)
+    assert facts._resolve("1.1.1.1", 1) == [PUBLIC]
+    assert called == []
+
+
+def _stand_in_tls(hostname):
+    """A certificate for `hostname` and a client context that trusts only that certificate."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = datetime.now(UTC)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=2))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+            .sign(key, hashes.SHA256()))
+    directory = tempfile.TemporaryDirectory()
+    cert_path = Path(directory.name) / "cert.pem"
+    key_path = Path(directory.name) / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                           serialization.NoEncryption()))
+    server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server.load_cert_chain(cert_path, key_path)
+    client = ssl.create_default_context()
+    client.load_verify_locations(cadata=cert_path.read_text())
+    return server, client, directory
+
+
+def _serve_tls(server_ctx, write):
+    """Accept one TLS connection on loopback and hand the socket to `write`."""
+    raw = socket.socket()
+    raw.bind(("127.0.0.1", 0))
+    raw.listen(1)
+    got = []
 
     def run():
+        raw.settimeout(5)
         try:
-            second()
-        except Exception as error:  # noqa: BLE001 - the test reports it
-            seen["raised"].append(error)
-
-    def before_flush(session, *_rest):
-        if seen["armed"] and (session.dirty or session.new or session.deleted):
-            seen["armed"] -= 1
-        else:
+            conn, _addr = raw.accept()
+        except OSError:
             return
-        if not seen["armed"]:
-            other = threading.Thread(target=run, daemon=True)
-            seen["started"].append(other)
-            other.start()
-            other.join(wait)
-            seen["waiting"].append(other.is_alive())
+        try:
+            tls = server_ctx.wrap_socket(conn, server_side=True)
+        except ssl.SSLError:
+            conn.close()
+            return
+        tls.settimeout(2)
+        data = b""
+        try:
+            while b"\r\n\r\n" not in data:
+                piece = tls.recv(4096)
+                if not piece:
+                    break
+                data += piece
+        except OSError:
+            pass
+        got.append(data)
+        try:
+            write(tls)
+        except OSError:
+            pass
+        try:
+            tls.close()
+        except OSError:
+            pass
 
-    event.listen(Session, "before_flush", before_flush)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return raw, thread, got
+
+
+def test_a_slow_byte_is_cut_off_by_the_clock(monkeypatch):
+    """One byte at a time does not get a fresh timeout per byte. The call ends when its own time is up."""
+    server_ctx, client_ctx, directory = _stand_in_tls("rdap.example")
+    monkeypatch.setattr(facts, "_verify", client_ctx)
+    monkeypatch.setattr(facts, "_transport", None)
+    monkeypatch.setattr(facts, "_read", _real_read)
+
+    def write(tls):
+        payload = b"HTTP/1.1 200 OK\r\nContent-Length: 30\r\nConnection: close\r\n\r\n" + (b"x" * 30)
+        end = time.monotonic() + 4
+        for byte in payload:
+            if time.monotonic() > end:
+                break
+            tls.send(bytes([byte]))
+            time.sleep(0.1)
+
+    raw, thread, _got = _serve_tls(server_ctx, write)
+    started = time.monotonic()
     try:
-        with others_finish() as started:
-            seen["started"] = started
-            yield seen
+        with pytest.raises(TimeoutError):
+            facts._read(f"https://rdap.example:{raw.getsockname()[1]}/domain/example.com",
+                        ipaddress.ip_address("127.0.0.1"), 0.5)
+        assert time.monotonic() - started < 2
     finally:
-        event.remove(Session, "before_flush", before_flush)
-    assert started, "the writer was never stopped, so the second never ran"
+        raw.close()
+        thread.join(2)
+        directory.cleanup()
+
+
+def test_an_untrusted_certificate_is_refused(monkeypatch):
+    """The reader checks the certificate. A stand-in signed by no one Nyctr trusts is not read."""
+    server_ctx, _client_ctx, directory = _stand_in_tls("rdap.example")
+    monkeypatch.setattr(facts, "_transport", None)
+    monkeypatch.setattr(facts, "_verify", True)
+    monkeypatch.setattr(facts, "_read", _real_read)
+
+    def write(tls):
+        body = b"{}"
+        tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n" + body)
+
+    raw, thread, got = _serve_tls(server_ctx, write)
+    try:
+        with pytest.raises(facts._GiveUp):
+            facts._read(f"https://rdap.example:{raw.getsockname()[1]}/domain/example.com",
+                        ipaddress.ip_address("127.0.0.1"), 2)
+        assert not any(b"GET " in item for item in got)
+    finally:
+        raw.close()
+        thread.join(2)
+        directory.cleanup()
+
+
+def test_the_environments_proxy_settings_are_not_used(monkeypatch):
+    """A proxy named in the environment is not asked. The call goes to the address that was checked."""
+    seen = []
+    proxy = socket.socket()
+    proxy.bind(("127.0.0.1", 0))
+    proxy.listen(1)
+
+    def accept():
+        proxy.settimeout(3)
+        try:
+            conn, _addr = proxy.accept()
+        except OSError:
+            return
+        seen.append(True)
+        conn.close()
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, f"http://127.0.0.1:{proxy.getsockname()[1]}")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.setattr(facts, "_transport", None)
+    monkeypatch.setattr(facts, "_verify", True)
+    monkeypatch.setattr(facts, "_read", _real_read)
+    try:
+        with pytest.raises(facts._GiveUp):
+            facts._read(f"https://rdap.example:{closed_port}/domain/example.com",
+                        ipaddress.ip_address("127.0.0.1"), 2)
+    finally:
+        proxy.close()
+        thread.join(2)
+    assert seen == []
 
 
 def engine_for(kind, tmp_path, request):
@@ -596,32 +881,52 @@ def engine_for(kind, tmp_path, request):
 
 
 @pytest.mark.parametrize("kind", ["sqlite", "postgresql"])
-@pytest.mark.parametrize("step", [1, 2, 3])
-def test_a_second_gathering_waits_before_each_write(tmp_path, monkeypatch, request, kind, step):
-    """The registry list, the registration and the lookup list are each checked and then written under one hold.
+def test_a_slow_registry_does_not_lock_the_database(tmp_path, monkeypatch, request, kind):
+    """Another write commits while the registry is still answering. It is not told the database is locked."""
+    entered, release = threading.Event(), threading.Event()
+    errors, elapsed = [], []
 
-    A second gathering started at each of those writes is still waiting, and it does not ask the registry again.
-    """
-    net = Net()
-    net.install(monkeypatch)
+    def read(url, address, timeout):
+        entered.set()
+        release.wait(8)
+        if url.endswith("dns.json"):
+            return 200, BOOTSTRAP
+        return 200, RDAP
+
+    def resolve(host, timeout):
+        return [PUBLIC] if host in {"data.iana.org", "rdap.example"} else None
+
+    monkeypatch.setattr(facts, "_read", read)
+    monkeypatch.setattr(facts, "_resolve", resolve)
     engine = engine_for(kind, tmp_path, request)
     factory = session_factory(engine)
-    with factory() as db:
-        db.add(Setting(key=facts.LOCK_KEY, value={}))
-        db.commit()
-    answers = []
 
-    def second():
-        with factory() as db:
-            answers.append(facts.gather(db, "example.com"))
+    def writer():
+        if not entered.wait(5):
+            errors.append(TimeoutError("the registry was never called"))
+            release.set()
+            return
+        started = time.monotonic()
+        try:
+            with factory() as db:
+                db.add(Setting(key="beside", value={"ok": True}))
+                db.commit()
+        except Exception as error:  # noqa: BLE001 - the test reports the lock error
+            errors.append(error)
+        finally:
+            elapsed.append(time.monotonic() - started)
+            release.set()
 
+    other = threading.Thread(target=writer, daemon=True)
+    other.start()
     try:
         with factory() as db:
-            with stopped_before_it_writes(second, WAIT[kind], step) as seen:
-                first = facts.gather(db, "example.com")
-        assert seen["waiting"] == [True] and seen["raised"] == []
-        assert len(net.reads) == 2
-        assert {item.kind: item.state for item in first}["registration"] == "known"
-        assert {item.kind: item.state for item in answers[0]}["registration"] == "known"
+            found = facts.gather(db, "example.com")
+        assert errors == [] and elapsed and elapsed[0] < 3
+        assert {item.kind: item.state for item in found}["registration"] == "known"
+        with factory() as db:
+            assert db.get(Setting, "beside").value == {"ok": True}
     finally:
+        release.set()
+        other.join(15)
         engine.dispose()

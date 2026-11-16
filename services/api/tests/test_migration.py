@@ -39,7 +39,7 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
 
 @pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tmp_path, request, engine_kind):
-    """Schema 2, filled with the demonstration's rows, upgrades with every stored row unchanged."""
+    """Schema 2, which is the alpha.6 database, upgrades with every stored row unchanged."""
     place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/a6.db"}
     if not place:
         pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
@@ -71,8 +71,11 @@ def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tm
 
 
 @pytest.mark.parametrize("engine_kind", ["sqlite", "postgresql"])
-def test_an_alpha_6_database_gains_only_the_fact_tables_and_keeps_every_row(tmp_path, request, engine_kind):
-    """Schema 3, the alpha.6 database, gains the fact cache and the lookup list and nothing else."""
+def test_a_schema_three_database_gains_only_the_fact_tables_and_keeps_every_row(tmp_path, request, engine_kind):
+    """Schema 3 gains the fact cache and the lookup list and nothing else.
+
+    The alpha.6 release is schema 2. The test above is that upgrade.
+    """
     place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/a6.db"}
     if not place:
         pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
