@@ -150,3 +150,4 @@ def test_tidy_and_clean_helpers():
     text, used = assistant.tidy("See [[guest:g1]] and [[guest:g2]].", {"g1": {"kind": "guest", "id": "a", "label": "A"}})
     assert text == "See [[g1]] and." and [u["id"] for u in used] == ["a"]
     assert assistant._clean("at 192.168.1.4 aa:bb:cc:dd:ee:ff x@y.io") == "at [removed] [removed] [removed]"
+    assert assistant._clean("at 00-11-22-33-44-55 and 0011.2233.4455") == "at [removed] and [removed]"

@@ -21,6 +21,7 @@ from . import (
     __version__,
     access,
     assistant,
+    block_analysis,
     facts,
     guests,
     model,
@@ -72,6 +73,7 @@ from .links import derived_links
 from .middleware import RequestBodyLimit
 from .models import (
     AccessRequest,
+    Analysis,
     Audit,
     DeviceGrant,
     Finding,
@@ -162,6 +164,20 @@ class ReviewInput(InputModel):
     minutes: int | None = Field(default=None, ge=15, le=240)
 
 
+class AnalysisRequest(InputModel):
+    """A name to judge, and the stored block it belongs to when the caller has one."""
+    name: str = Field(min_length=1, max_length=4000)
+    block_id: str | None = Field(default=None, max_length=255)
+
+    @field_validator("block_id")
+    @classmethod
+    def no_null(cls, value: str | None) -> str | None:
+        """Refuse a null byte before a judgement is asked. One database rejects it in text."""
+        if value is not None and "\x00" in value:
+            raise ValueError("That block id is not valid.")
+        return value
+
+
 class AssignmentInput(InputModel):
     """Describe a device classification and bounded explicit set of member identities."""
     classification: Literal["personal", "shared", "infrastructure", "unassigned"]
@@ -200,6 +216,7 @@ def create_app(settings: Settings | None = None):
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)
+            model.ensure_trace_key(db)
             release_abandoned(db, restart_of=holder)
             db.commit()
         if settings.old_proxy_name_in_use:
@@ -757,6 +774,30 @@ def create_app(settings: Settings | None = None):
         except facts.NotAName as error:
             raise HTTPException(422, str(error)) from None
         return [item.as_dict() for item in found]
+
+    @app.post("/api/analyses", status_code=201)
+    async def create_analysis(body: AnalysisRequest, _user=Depends(admin), db: Session = Depends(get_db)):
+        """Ask for one verdict on a blocked name and store it. For an administrator, on the console address.
+
+        Members, the portal address and a caller with no session are refused. The
+        model's reply is kept only after it matches the fixed shape. The same
+        limit as the other model calls applies first.
+        """
+        assistant._throttle(_user.id)
+        try:
+            row = await block_analysis.analyse(db, body.name, body.block_id or None, settings=settings)
+        except facts.NotAName as error:
+            raise HTTPException(422, str(error)) from None
+        return block_analysis.view(row)
+
+    @app.get("/api/analyses/{id}")
+    def read_analysis(id: str, _user=Depends(admin), db: Session = Depends(get_db)):
+        """Return one stored verdict. An unknown id is the same answer a caller must not be able to tell apart."""
+        if "\x00" in id:
+            raise HTTPException(422, "That analysis id is not valid.")
+        if len(id) > 128 or (row := db.get(Analysis, id)) is None:
+            raise HTTPException(404, "That analysis is not here.")
+        return block_analysis.view(row)
 
     @app.get("/api/blocks")
     def blocks(band: Literal["high", "medium", "low", "unknown"] | None = None,

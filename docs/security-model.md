@@ -73,6 +73,29 @@ never filled in with a default. A name that would be changed into a different
 name is refused. When the registry's
 answer is for a parent of the name, the fact says so.
 
+An administrator can ask for a judgement on a blocked name (`POST /api/analyses`,
+read back with `GET /api/analyses/{id}`). Members, the portal address and a
+caller with no session are refused. The model sees a fixed prompt and one JSON
+object: the name, and the facts gathered about it, each with its id. The name,
+a list's name, a reason and the registrar are bounded and cleaned, and each is
+only a string under the key `data`. No person, device, hardware address or
+network address is included. Where the name resolves is a count, or the words
+for a refusal, never the addresses. The only answer kept is one JSON object
+with a verdict (`justified`, `not_justified` or `cannot_tell`), a risk (`low`,
+`medium`, `high` or `unknown`), reasons that name a fact that was sent, and a
+short uncertainty. Any other key is dropped. A repeated key is refused. A
+reason that names a fact that was not sent is dropped. Text is cleaned again,
+and a null byte and any other control character is removed.
+At most eight reasons are kept. If nothing valid is left, or the answer is
+prose, empty or the wrong shape, that part is `invalid`. No model, a failed
+call and a timeout are stored as `missing`, `failed` and `timed_out`, with no
+verdict and no risk, so a missing or broken answer never becomes a low one.
+`cannot_tell` is its own state: the verdict is kept, the risk word is not
+stored, and a later rule is told the answer is not present. The raw reply is
+not stored. The model holds no credentials and cannot edit a rule. The only
+thing a later rule can read from a stored verdict is whether a valid answer
+is present, the verdict and the risk.
+
 Nyctr can change a provider in three narrow ways, all in
 `nyctr/integrations/actions.py`: add or remove one NextDNS allowlist entry,
 create or delete one UniFi hotspot voucher, and authorise or unauthorise one UniFi
@@ -180,7 +203,7 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | Configured endpoint targets internal metadata | Explicit console host allowlist, HTTPS validation, reserved-address restrictions |
 | A lookup of a blocked name is aimed at an internal address, or tells someone what was looked up | The registry list and the registry are HTTPS only, with no redirect, 5 seconds of clock time a call, 8 seconds of clock time for the whole gathering and 256 kB. The system resolver's DNS is not encrypted. A private, loopback, link-local, site-local or other address that is not public is refused before any connection. The request carries the name only. A compressed registry answer is refused. A failure is kept for ten minutes. A timeout is not kept. An answer that was read is kept for a day. The database is not held while a call is open. The certificate and third-party reputation are not asked. The demonstration does not make these requests |
 | Provider returns misleading successful HTTP status | Parse provider-level errors; never treat missing/error data as safe |
-| Log text or domain is used as prompt instructions | Future AI treats source text as untrusted evidence and cannot execute |
+| Log text or domain is used as prompt instructions | A verdict sees facts only. Outside text is bounded under the key data, and instructions in it are not followed. Anything outside the fixed answer is thrown away. The model holds no credentials and edits no rule |
 | Model invents confidence or permissions | Unknown risk remains unknown; external authorization owns decisions |
 | Temporary exception survives restart | Leases are database rows; a background task and every lease read close what has expired, and a failed removal stays open, visible and retried |
 | Expiry removes a rule Nyctr did not create | A pre-existing allowlist entry is recorded as not owned and never removed; overlapping leases keep the entry until the last one ends |
@@ -191,9 +214,9 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | A stolen administrator session points the model somewhere else to collect its key | The endpoint must be on a server the operator allowed, by scheme, host and port; the key is named by a secret with the model's own pattern; an address holding a sign-in name or password is refused; no redirect is followed |
 | A listed model host is reached in clear text, or on another of its ports | A bare name in the list is HTTPS on port 443 only; anything else must be written in full by the operator |
 | A saved model setting cannot be read after an upgrade or a rollback | The model is off and says so; the server's own endpoint and key, which an administrator replaced, are not used in its place |
-| A trace of a model call says who asked or which device it was about | Trace fields are fixed words, versions, a new random id and a digest of the subject's id keyed with 32 random bytes only this installation holds (never the model's key, never sent or shown), so the digest cannot be matched against guessed ids; the `user` field is never sent |
+| A trace of a model call says who asked or which device it was about | Trace fields are fixed words, versions, a new random id and a digest of the subject's id keyed with 32 random bytes only this installation holds (never the model's key, never sent or shown), so the digest cannot be matched against guessed ids. The key is made at start-up and a call only reads it. A database error or an empty key sends no session and never an unkeyed digest. The `user` field is never sent |
 | SQL statement logging is on, and its log is read by someone who also reads the traces | That log then holds the trace key, like every other stored value, and a reader with the key could test guessed ids against a session. Statement logging is off by default and cannot be turned on from the console; leave it off, or treat its output as a secret |
-| Model is told to act by text in a log or request | The model has no tools or credentials; evidence is passed as data in a bounded pack with addresses, emails, codes and identifiers removed |
+| Model is told to act by text in a log or request | The model has no tools or credentials and cannot edit a rule; evidence is passed as data in a bounded pack with addresses, emails, codes and identifiers removed |
 | Model cites something it was not shown | Citations are resolved against the pack on the server and dropped when they do not match |
 | Graph query exhausts the server | Administrator-only, query-only, with length, depth and returned-object limits |
 

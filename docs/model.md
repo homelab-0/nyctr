@@ -95,7 +95,7 @@ not traced unless `NYCTR_AI_TRACE` is set to `standard`, `proxy` or `proxy_body`
 | Field | Header | Value |
 | --- | --- | --- |
 | Trace id | `langfuse_trace_id` | The trace id in `traceparent`. |
-| What the call is for | `langfuse_trace_name` | `nyctr.question`, `nyctr.explanation` or `nyctr.test`. `nyctr.analysis` is reserved. |
+| What the call is for | `langfuse_trace_name` | `nyctr.question`, `nyctr.explanation`, `nyctr.test`, or `nyctr.analysis` for a verdict on a blocked name. |
 | What it is about | `langfuse_session_id` | `finding:` and 16 hex characters of a keyed digest of the finding's id, so calls about one finding group together. Absent when a call is about nothing in particular. |
 | The rest | `langfuse_trace_metadata` | JSON: `nyctr_version`, `prompt_version`, `purpose`, `subject_kind`, `mode`. |
 | Version | `langfuse_trace_release` | The Nyctr version. |
@@ -106,13 +106,57 @@ device is in a trace: no name, email, device name, hardware or network address,
 and never the key. An id is sent as a keyed digest (HMAC-SHA256) because ids
 of findings are built from device ids, and a plain digest could be matched
 against guessed ids by anyone who knows how an id begins. The key is 32 random
-bytes this installation makes the first time it sends a session and keeps in
-its own database. It is not the model's key, it is in no request, answer or
-audit record and in no log line Nyctr writes, and two installations give the
-same finding different sessions. SQL statement logging, which is off unless
+bytes this installation makes at start-up and keeps in its own database. A
+call only reads that key. A database error while reading it, or a key that is
+missing or empty, does not fail the call: that call is sent with no session,
+and never with a digest that was not keyed. It is not the model's key, it is
+in no request, answer or audit record and in no log line Nyctr writes, and
+two installations give the same finding different sessions. SQL statement
+logging, which is off unless
 whoever runs the server turns it on, writes stored values as they are saved,
 this key included. Replacing it only splits old and new traces into separate
 groups.
+
+## A verdict on a blocked name
+
+An administrator can ask for a judgement on a blocked name (`POST /api/analyses`)
+and read it back (`GET /api/analyses/{id}`). Members, the portal address and a
+caller with no session are refused. A block id or an analysis id that contains
+a null byte is refused with 422, and the model is not asked. One administrator
+can ask 30 times in 10 minutes. The next ask is refused before a lookup or the
+model call. There is no console page for it.
+
+The model sees a fixed system prompt and one JSON object: the name, and the
+facts Nyctr gathered, each with its id. The name, a list's name, a reason and
+the registrar are bounded and cleaned, and each is only a string under the key
+`data`. The prompt tells the model that text is data and not instructions. The
+object carries no person, no device, no hardware address and no network
+address. Where a name resolves is sent as a count, or as the fixed words for a
+refusal, never as the addresses themselves.
+
+The only answer that is kept is one JSON object: `verdict` (`justified`,
+`not_justified` or `cannot_tell`), `risk` (`low`, `medium`, `high` or
+`unknown`), `reasons` (each naming a fact id that was sent, and a short
+sentence) and `uncertainty`. Any other key is dropped. A repeated key is
+refused. A reason that names a fact that was not sent is dropped, and the
+text is cleaned again. A null byte and any other control character is removed.
+At most eight reasons are kept, and each sentence is cut to 240 characters. If no reason is left, or the reply is prose, empty,
+two objects of which the first does not match, or a word that is not one of
+those listed, the model's part is `invalid`. No model is `missing`. A call
+that does not succeed is `failed`. A call that runs out of time, or a
+judgement that runs past 45 seconds, is `timed_out`. The model call itself
+waits at most 20 seconds. A missing, failed, invalid or timed-out answer is
+stored with no verdict and no risk, so a missing or broken answer is never
+turned into a low one. `cannot_tell` is stored as its own state. Its verdict
+is `cannot_tell` and the risk word that came with it is not stored. A later
+rule is told that answer is not present, including when an older row still
+holds a risk word beside it. The model's raw reply is not stored.
+
+The model holds no credentials and cannot edit a rule. The only thing a later
+rule can read from a stored verdict is whether a valid answer is present, the
+verdict and the risk. A risk score alone never opens access, and nothing the
+model returns can change a rule or cut a device off.
+
 The request's `user` field is never sent. The proxy still sees
 the request itself, which holds the redacted evidence pack and the
 administrator's question, so run it where that may be kept.

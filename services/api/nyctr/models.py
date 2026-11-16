@@ -379,5 +379,32 @@ class OwnLookup(Base):
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class Analysis(Base):
+    """One stored judgement of a blocked name.
+
+    `facts` is the object sent to the model. The model's raw reply is not stored.
+    `model_state` is ok, cannot_tell, missing, failed, invalid or timed_out.
+    `cannot_tell` keeps that verdict and stores no risk. A rule is told an answer
+    is present only when the state is ok and the verdict is justified or
+    not_justified. A missing or undecided answer cannot be read as a low one.
+    """
+    __tablename__ = "analyses"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
+    block_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    domain: Mapped[str] = mapped_column(String(253))
+    facts: Mapped[dict[str, Any]] = mapped_column(JSON)
+    rule_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_name: Mapped[str] = mapped_column(String(200), default="")
+    verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    reasons: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    uncertainty: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_state: Mapped[str] = mapped_column(String(20))
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(16))
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 Index("ix_device_grant_validity", DeviceGrant.device_id, DeviceGrant.user_id, DeviceGrant.valid_from)
 Index("ix_own_lookups_name_at", OwnLookup.name, OwnLookup.at)

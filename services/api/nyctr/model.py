@@ -27,11 +27,14 @@ Every call to the model goes through `call`. It adds the trace fields as
 request headers, because an endpoint ignores a header it does not know. Nothing
 about a person or a device goes in them: the purpose is one of a fixed set, and
 what the call is about is named by a keyed digest of its id, never by the id.
-The key is this installation's own, made on first use and kept in the settings
-table: without it a digest could be matched against guessed ids. It is not the
-model's key, which every endpoint receives, and it is never sent or shown. It
-is made in a database session of its own, so asking the model never saves or
-discards work the caller has not saved.
+The key is this installation's own, made at start-up and kept in the settings
+table. A call only reads it. Without a key a digest could be matched against
+guessed ids, so a call that cannot read one sends no session at all: a
+database error, an empty key or a key that is not 32 bytes never fails the
+call and never sends an unkeyed digest. It is not the model's key, which every
+endpoint receives, and it is never sent or shown. It is read in a database
+session of its own, so asking the model never saves or discards work the
+caller has not saved.
 """
 
 from __future__ import annotations
@@ -40,22 +43,23 @@ import asyncio
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, StrictInt
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import __version__
 from .config import Settings
-from .models import Setting
-from .policy import put_rule
+from .models import Setting, utcnow
 
 KEY = "model_connection"
 SECRET_REF = re.compile(r"NYCTR_MODEL_SECRET_[A-Z0-9_]{1,100}")
@@ -77,6 +81,9 @@ SHAPE = ("Send only the endpoint, the model, the name of the secret, the trace s
          "each in the form the Model card sends.")
 # Tests put a stand-in endpoint here. None is the network.
 transport: httpx.AsyncBaseTransport | None = None
+# The trace id of the call just made, for the caller to store. None when tracing is off or the call
+# stopped before a trace was built. Every call clears it first, so an earlier id cannot leak into this one.
+current_trace: ContextVar[str | None] = ContextVar("nyctr_current_trace", default=None)
 
 
 class Refused(ValueError):
@@ -246,7 +253,15 @@ def save(db: Session, settings: Settings, body: Connection, actor: str) -> tuple
     body.endpoint = body.endpoint.rstrip("/")
     check(body, settings)
     old = asdict(in_force(db, settings))
-    put_rule(db, KEY, body, actor)
+    # Written here, and not by the rule writer, so this module does not import it. A model's
+    # answer must have no path to the code that stores a rule.
+    row = db.get(Setting, KEY)
+    if row is None:
+        row = Setting(key=KEY)
+        db.add(row)
+    row.value = body.model_dump()
+    row.updated_at = utcnow()
+    row.updated_by = actor
     return old, body.model_dump()
 
 
@@ -282,7 +297,7 @@ def _stored_key(row: Setting | None) -> bytes:
 
 
 def trace_key(db: Session) -> bytes:
-    """Return this installation's key for trace sessions, making it on first use.
+    """Return this installation's key for trace sessions, making one when there is none.
 
     32 random bytes kept in the settings table under their own name. It is not
     the model's key and it goes in no request, answer or audit record, and in
@@ -309,6 +324,31 @@ def trace_key(db: Session) -> bytes:
         except IntegrityError:  # another copy made it between the read and the write: use that one
             own.rollback()
         return _stored_key(own.get(Setting, TRACE_KEY))
+
+
+def read_trace_key(db: Session) -> bytes:
+    """Read the trace key. A database error, a missing key or a key that is not one returns nothing.
+
+    A call only reads. Making or replacing the key is start-up's job (`ensure_trace_key`), so a
+    pool timeout or an empty key cannot fail the call. Nothing is logged: the message is fixed
+    and the key is not in it, because this function does not log at all.
+    """
+    try:
+        with Session(db.get_bind()) as own:
+            return _stored_key(own.get(Setting, TRACE_KEY))
+    except SQLAlchemyError:
+        return b""
+
+
+def ensure_trace_key(db: Session) -> None:
+    """Make the trace key if this installation has none. A database error does not stop start-up.
+
+    The warning is a fixed sentence. It does not include the key or the database's own message.
+    """
+    try:
+        trace_key(db)
+    except SQLAlchemyError:
+        logging.getLogger("nyctr").warning("The trace key could not be made at start-up. Calls still go out.")
 
 
 def trace(purpose: str, subject: tuple[str, str] | None, style: str, mode: str, prompt_version: str,
@@ -348,14 +388,16 @@ async def call(purpose: str, subject: tuple[str, str] | None, connection: InForc
                db: Session | None = None) -> str:
     """Ask the model once and return its text. The only place a request to the model is built.
 
-    A call about a subject needs `db`, to read this installation's trace key.
-    The caller's session is only passed on: nothing here commits it or rolls it back.
+    A call about a subject needs `db`, to read this installation's trace key. The key
+    is not made here. The caller's session is only passed on: nothing here commits it
+    or rolls it back. `current_trace` is set to this call's trace id, or to none.
 
     Raises Refused, before anything is sent, when the connection may not be
     used. Raises ModelError when no usable answer came back: `refused` (with
     the status, a redirect included, which is never followed), `not_reachable`,
     `wrong_shape` or `too_slow`. Neither repeats the endpoint's text or the key.
     """
+    current_trace.set(None)
     if not connection.connected:
         raise Refused(connection.unusable or "No model is connected.")
     if connection.source == "console":
@@ -363,17 +405,16 @@ async def call(purpose: str, subject: tuple[str, str] | None, connection: InForc
     key = _key(connection, settings)
     if key and ("\r" in key or "\n" in key):
         raise Refused("The model's key holds a line break, so it cannot be sent.")
-    # Only a style that sends a session reads the key, so an untraced installation never makes one.
-    session_key = b""
+    # Only a style that sends a session reads the key. A missing or unreadable key drops the
+    # subject before the digest is built, so the call goes out and no unkeyed digest is sent.
+    session_key, traced = b"", subject
     if subject is not None and connection.trace in ("proxy", "proxy_body") and db is not None:
-        try:
-            session_key = trace_key(db)
-        except OperationalError:
-            # The database would not take the key just now. SQLite allows one writer, and a caller
-            # that has written and not yet saved is that writer. The call matters more than how its
-            # trace is grouped, so this one goes out with no session; the next makes the key.
-            subject = None
-    headers, about = trace(purpose, subject, connection.trace, settings.mode, prompt_version, session_key)
+        session_key = read_trace_key(db)
+        if len(session_key) != 32:
+            traced = None
+    headers, about = trace(purpose, traced, connection.trace, settings.mode, prompt_version, session_key)
+    parent = headers.get("traceparent")
+    current_trace.set(parent.split("-")[1] if parent else None)
     if key:
         headers["Authorization"] = f"Bearer {key}"
     body = {"model": connection.model, "temperature": 0.2, "max_tokens": max_tokens,
