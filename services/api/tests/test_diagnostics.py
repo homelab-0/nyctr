@@ -387,6 +387,7 @@ def test_existing_collection_lease_rejects_probe_without_provider_io(saved, monk
         integration = db.get(Integration, integration_id)
         integration.status = "syncing"
         integration.sync_started_at = utcnow()
+        integration.sync_holder, integration.sync_heartbeat = "live", integration.sync_started_at
         db.commit()
     response = client.post(f"/api/integrations/{integration_id}/diagnostics", headers=headers)
     assert response.status_code == 409 and calls == []

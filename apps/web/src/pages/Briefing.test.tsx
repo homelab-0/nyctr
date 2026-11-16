@@ -196,6 +196,28 @@ describe('briefing sources', () => {
     expect(rows.get('silent')!.querySelector('.dot')!.className).toBe('dot red');
   });
 
+  it('says a collection was cut short by a restart, and not that it is still running or that it failed', async () => {
+    const rows = await open([source('cut', 'interrupted')], scheduleFixture(), [
+      {
+        kind: 'source',
+        id: 'cut',
+        severity: 'medium',
+        at: null,
+        title: 'The last collection from cut source was cut short by a restart',
+        detail: 'The last collection was cut short by a restart.',
+      },
+    ]);
+    const cut = rows.get('cut')!;
+    expect(cut.textContent).toContain('The last collection was cut short by a restart.');
+    expect(cut.textContent).not.toContain('Collected');
+    expect(cut.textContent).not.toContain('Last collection failed');
+    expect(cut.querySelector('.dot')!.className).toBe('dot yellow');
+    expect(
+      screen.getByText('The last collection from cut source was cut short by a restart'),
+    ).toBeTruthy();
+    expect(screen.getAllByText('The last collection was cut short by a restart.')).toHaveLength(2);
+  });
+
   it('says when each source is next collected, failed ones included', async () => {
     const rows = await open([source('fine', 'connected'), source('failed', 'error')]);
     await screen.findAllByText('Next collection in 12 min');

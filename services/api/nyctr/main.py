@@ -6,14 +6,13 @@ import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
@@ -36,10 +35,18 @@ from .collection import (  # noqa: F401
     after_collection,
     analyse,
     apply_snapshot,
+    beat,
+    begin_holder,
+    claim_values,
+    clear_lease,
     collect_integration,
+    holder_id,
     last_gaps,
+    lease_free_sql,
     off_loop,
     parsed_date,
+    release_abandoned,
+    settle_abandoned,
     show_log,
 )
 from .config import Settings
@@ -180,19 +187,31 @@ def create_app(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(app):
-        """Migrate and bootstrap before serving, then release the engine when the app stops."""
+        """Migrate and bootstrap before serving, then release the engine when the app stops.
+
+        This start holds no collection yet. A lease whose holder is gone is recorded as cut short
+        before anything is served, including when the upkeep worker is off.
+        """
         show_log()
+        begin_holder(engine)
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)
+            release_abandoned(db)
+            db.commit()
         if settings.old_proxy_name_in_use:
             logging.getLogger("nyctr").warning(
                 "The list of proxies is read from FORWARDED_ALLOW_IPS. That name will stop working in a later "
                 "release: set NYCTR_TRUSTED_PROXIES to the same list and remove the old name.")
+        pulse = asyncio.create_task(beat(factory))
         upkeep = asyncio.create_task(worker.run(app)) if settings.worker_enabled else None
         yield
+        pulse.cancel()
         if upkeep:
             upkeep.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pulse
+        if upkeep:
             with contextlib.suppress(asyncio.CancelledError):
                 await upkeep
         engine.dispose()
@@ -475,15 +494,17 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, "Not saved. Check the settings and try again.") from None
         # Take the row's write lock first, with the collection lease's guard, then read it again:
         # nothing can change it until this request commits, and no running read is changed under.
+        now = utcnow()
         locked = db.execute(update(Integration).where(
-            Integration.id == integration_id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
-        ).values(name=Integration.name).execution_options(synchronize_session=False))
+            Integration.id == integration_id, lease_free_sql(now),
+        ).values(name=Integration.name).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             raise HTTPException(409, "This source is being collected or tested right now. "
                                      "Try again when that has finished.")
         db.refresh(row)
+        if row.status == "syncing":
+            settle_abandoned(db, row, now)
         try:
             before = validate_config(row.provider, row.config)
         except (IntegrationError, ValueError):
@@ -500,7 +521,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(409, MOVED_SOURCE)
         row.name, row.config, row.secret_ref = body.name, config, body.secret_ref
         if moves:
-            row.status, row.last_error, row.sync_started_at = "configured", None, None
+            row.status, row.last_error = "configured", None
+            clear_lease(row)
         audit(db, user.id, "integration.updated", integration_id, provider=row.provider, fields=fields, retest=moves)
         db.commit()
         return integration_json(row)
@@ -531,10 +553,10 @@ def create_app(settings: Settings | None = None):
         row = db.get(Integration, integration_id)
         if not row:
             raise HTTPException(404, "Integration not found")
+        now = utcnow()
         locked = db.execute(update(Integration).where(
-            Integration.id == integration_id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < utcnow() - timedelta(minutes=5))
-        ).values(name=Integration.name).execution_options(synchronize_session=False))
+            Integration.id == integration_id, lease_free_sql(now),
+        ).values(name=Integration.name).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             if db.get(Integration, integration_id) is None:
@@ -542,6 +564,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(409, "This source is being collected or tested right now. "
                                      "Try again when that has finished.")
         db.refresh(row)
+        if row.status == "syncing":
+            settle_abandoned(db, row, now)
         if body.name.strip() != row.name:
             db.rollback()
             raise HTTPException(422, "Not removed. Type the source's name exactly as it is shown to remove it.")
@@ -580,10 +604,10 @@ def create_app(settings: Settings | None = None):
             previous_status = _settled_status(db, integration)
             previous_started_at = None
         claimed_at = utcnow()
+        holder = holder_id(factory)
         locked = db.execute(update(Integration).where(
-            Integration.id == integration_id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < claimed_at - timedelta(minutes=5))
-        ).values(status="syncing", sync_started_at=claimed_at).execution_options(synchronize_session="fetch"))
+            Integration.id == integration_id, lease_free_sql(claimed_at),
+        ).values(**claim_values(holder, claimed_at)).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             raise HTTPException(409, "A collection or diagnostic is already running")
@@ -610,8 +634,9 @@ def create_app(settings: Settings | None = None):
             with factory() as release_db:
                 release_db.execute(update(Integration).where(
                     Integration.id == integration_id, Integration.status == "syncing",
-                    Integration.sync_started_at == claimed_at,
-                ).values(status=previous_status, sync_started_at=previous_started_at))
+                    Integration.sync_started_at == claimed_at, Integration.sync_holder == holder,
+                ).values(status=previous_status, sync_started_at=previous_started_at,
+                         sync_holder=None, sync_heartbeat=None))
                 release_db.commit()
 
     @app.post("/api/integrations/{integration_id}/sync")

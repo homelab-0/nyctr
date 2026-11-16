@@ -97,6 +97,9 @@ class Integration(Base):
     status: Mapped[str] = mapped_column(String(32), default="configured")
     last_sync: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Which start of Nyctr holds the collection, and when it last showed it was still in that start.
+    sync_holder: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sync_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     secret_ref: Mapped[str] = mapped_column(String(160), default="")

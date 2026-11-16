@@ -925,6 +925,28 @@ describe('a source that could not read everything', () => {
   });
 });
 
+describe('a collection cut short by a restart', () => {
+  it('says that in plain words, still offers Collect, and does not say the source is collecting or that collection failed', async () => {
+    await openIntegrations({
+      source: {
+        ...connection,
+        status: 'interrupted',
+        last_error: null,
+        last_sync: '2026-01-01T12:00:00Z',
+      },
+    });
+    const card = screen.getByRole('heading', { name: connection.name }).closest('section')!;
+    expect(within(card).getByText('Cut short by a restart')).toBeTruthy();
+    expect(within(card).getByText('The last collection was cut short by a restart.')).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Collect snapshot' })).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Remove' })).toBeTruthy();
+    expect(within(card).queryByText('Syncing')).toBeNull();
+    expect(within(card).queryByText('Collecting…')).toBeNull();
+    expect(within(card).queryByText(/The last collection failed/)).toBeNull();
+    expect(within(card).queryByText('Interrupted')).toBeNull();
+  });
+});
+
 /** Covers the edit form: what it shows, what it sends, how a refusal reads, and where focus lands. */
 describe('editing a saved source', () => {
   it("opens the form filled in, keeps the kind and a collected source's address fixed, and saves a number", async () => {

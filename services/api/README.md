@@ -182,11 +182,12 @@ missing resources are marked missing rather than silently reassigned or deleted.
 Event replays never extend their original inbox expiry.
 
 Schema initialization is explicit and versioned in `nyctr/database.py` and the
-`schema_versions` table. The current schema is version 3. A new, empty, dedicated
-database is created at version 3 and an older one is upgraded in place, one
+`schema_versions` table. The current schema is version 5. A new, empty, dedicated
+database is created at version 5 and an older one is upgraded in place, one
 version at a time; unknown schemas and unsupported versions fail closed. The
-upgrade from version 1 is tested on SQLite only; the one from version 2, which
-only adds the table of sign-in ties, on SQLite and PostgreSQL 17. PostgreSQL advisory locks
+upgrade from version 1 is tested on SQLite only. The ones from versions 2, 3 and 4,
+which add the table of sign-in ties, the fact tables and then the collection
+holder's id and heartbeat, are tested on SQLite and PostgreSQL 17. PostgreSQL advisory locks
 serialize initial migration and bootstrap. Future model changes require a new
 explicit migration; changing the models alone does not upgrade a database.
 

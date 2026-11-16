@@ -449,3 +449,25 @@ describe('Activity rows about a sign-in tie', () => {
     expect(screen.getAllByText('Ended a tie between a person and a device')).toHaveLength(1);
   });
 });
+
+describe('Activity when a collection was cut short by a restart', () => {
+  it('says Nyctr restarted, once, and does not show the action name', async () => {
+    mockApi({
+      'GET /audit': [
+        event('a', 'integration.collection_interrupted', {
+          name: 'Office DNS',
+          why: 'The last collection was cut short by a restart.',
+        }),
+      ],
+      'GET /users': [],
+      'GET /integrations': [],
+    });
+    render(<Activity />);
+    const row = (
+      await screen.findByText('Stopped collecting from Office DNS because Nyctr restarted')
+    ).closest('tr')!;
+    expect(row.textContent).toContain('The last collection was cut short by a restart.');
+    expect(document.body.textContent).not.toContain('integration.collection_interrupted');
+    expect(screen.getAllByText(/cut short by a restart/i)).toHaveLength(1);
+  });
+});

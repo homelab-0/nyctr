@@ -257,15 +257,17 @@ export default function Briefing({
                     <span className="d">
                       {schedule.data?.source === 'demo'
                         ? ''
-                        : failing(source)
-                          ? source.last_error || 'Last collection failed'
-                          : !source.last_sync
-                            ? 'Not collected yet'
-                            : source.status === 'partial'
-                              ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
-                              : source.gaps?.length
-                                ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
-                                : `Collected ${ago(source.last_sync, now)}`}
+                        : source.status === 'interrupted'
+                          ? 'The last collection was cut short by a restart.'
+                          : failing(source)
+                            ? source.last_error || 'Last collection failed'
+                            : !source.last_sync
+                              ? 'Not collected yet'
+                              : source.status === 'partial'
+                                ? `Collected ${ago(source.last_sync, now)}. Only the most recent blocked lookups were read.`
+                                : source.gaps?.length
+                                  ? `Collected ${ago(source.last_sync, now)}. ${source.gaps.length === 1 ? 'One thing' : `${source.gaps.length} things`} could not be read.`
+                                  : `Collected ${ago(source.last_sync, now)}`}
                     </span>
                     {schedule.data && (
                       <span className="d">
@@ -274,7 +276,17 @@ export default function Briefing({
                     )}
                   </span>
                   <i
-                    className={`dot ${failing(source) ? 'red' : source.status === 'partial' || source.gaps?.length ? 'yellow' : source.last_sync ? 'green' : ''}`}
+                    className={`dot ${
+                      source.status === 'interrupted'
+                        ? 'yellow'
+                        : failing(source)
+                          ? 'red'
+                          : source.status === 'partial' || source.gaps?.length
+                            ? 'yellow'
+                            : source.last_sync
+                              ? 'green'
+                              : ''
+                    }`}
                     title={
                       source.status === 'partial'
                         ? 'Partly collected'

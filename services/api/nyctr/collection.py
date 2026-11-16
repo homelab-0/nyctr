@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -39,6 +40,13 @@ BACKSTOP_SECONDS = 210
 # How far before the end of the last stored read a resumed read starts: the five minutes a source's
 # clock may differ from ours (the same allowance a future timestamp gets) and five for its log to settle.
 RESUME_OVERLAP = timedelta(minutes=10)
+# A holder writes this often. A heartbeat older than the bound means that holder is gone, so the
+# lease is free at the next start instead of being honoured for five minutes. Five minutes remains
+# the longest a lease is kept even when the heartbeat is fresh.
+HEARTBEAT_EVERY = 5
+HEARTBEAT_BOUND = timedelta(seconds=15)
+LEASE_MINUTES = 5
+CUT_SHORT = "The last collection was cut short by a restart."
 # How many identifiers one lookup statement asks about.
 LOOKUP_BATCH = 500
 log = logging.getLogger("nyctr.collection")
@@ -170,7 +178,7 @@ def apply_snapshot(db, integration, snapshot, settings, gaps=()):
     integration.status = "connected" if snapshot.partial_rows is None else "partial"
     integration.last_sync = now
     integration.last_error = None
-    integration.sync_started_at = None
+    clear_lease(integration)
     integration.capabilities = snapshot.capabilities
     return new_items, new_lookups
 
@@ -382,11 +390,137 @@ def _report(event: str, name: str, **facts) -> None:
              " ".join(f"{key}={value}" for key, value in facts.items()))
 
 
-def _still_holds(db, integration_id: str, started) -> bool:
-    """Lock the source row and say whether the lease taken at `started` is still this caller's."""
+def begin_holder(engine) -> str:
+    """Give this start of Nyctr a holder id no earlier start can still be using."""
+    engine.nyctr_holder = uuid.uuid4().hex
+    return engine.nyctr_holder
+
+
+def holder_id(source) -> str:
+    """The holder id of the start `source` belongs to.
+
+    `source` is the session factory, its engine, or a connection checked out from that engine.
+    A collection is sometimes given a function in place of the session factory, so the id is read
+    from the engine and not from that function.
+    """
+    bind = getattr(source, "kw", None)
+    if isinstance(bind, dict) and "bind" in bind:
+        source = bind["bind"]
+    engine = getattr(source, "engine", source)
+    return getattr(engine, "nyctr_holder", None) or begin_holder(engine)
+
+
+def clear_lease(row) -> None:
+    """Drop the lease stamps. The caller chooses the status those stamps were holding."""
+    row.sync_started_at = row.sync_holder = row.sync_heartbeat = None
+
+
+def abandoned_sql(now):
+    """A syncing row whose holder cannot be shown alive, or whose lease is already five minutes old."""
+    stale = now - HEARTBEAT_BOUND
+    aged = now - timedelta(minutes=LEASE_MINUTES)
+    return or_(
+        Integration.sync_holder.is_(None),
+        Integration.sync_heartbeat.is_(None),
+        Integration.sync_heartbeat < stale,
+        Integration.sync_started_at.is_(None),
+        Integration.sync_started_at < aged,
+    )
+
+
+def lease_free_sql(now):
+    """A source that is not being collected, or whose collection can no longer be shown to be running."""
+    return or_(Integration.status != "syncing", abandoned_sql(now))
+
+
+def row_held(row, now) -> bool:
+    """Whether this loaded row is a live lease at `now`. Matches `abandoned_sql`, including equal times."""
+    if row.status != "syncing" or not row.sync_holder or row.sync_heartbeat is None or row.sync_started_at is None:
+        return False
+    heartbeat, started = utc(row.sync_heartbeat), utc(row.sync_started_at)
+    return heartbeat >= utc(now) - HEARTBEAT_BOUND and started >= utc(now) - timedelta(minutes=LEASE_MINUTES)
+
+
+def claim_values(holder, when):
+    """The stamps a claim writes: this holder, and a heartbeat as new as the claim."""
+    return {"status": "syncing", "sync_started_at": when, "sync_holder": holder, "sync_heartbeat": when}
+
+
+def settle_abandoned(db, row, now=None) -> bool:
+    """Record one cut-short collection and leave the source not collecting. False when the lease is live."""
+    now = now or utcnow()
+    if row.status != "syncing" or row_held(row, now):
+        return False
+    row.status = "interrupted"
+    row.last_error = None
+    clear_lease(row)
+    db.flush()
+    audit(db, None, "integration.collection_interrupted", row.id, name=row.name, why=CUT_SHORT)
+    db.flush()
+    return True
+
+
+def release_abandoned(db, now=None, only=None) -> list[str]:
+    """Free every syncing lease whose holder is gone, in id order, and record each once.
+
+    The caller commits. A second caller waits on the same row and then finds it already settled,
+    so the cut-short collection is recorded once. `only` limits that to one source, which a
+    collection does in its own transaction before it claims. Two copies still cannot collect one
+    source at once: a live holder's heartbeat is newer than the bound, so it does not match here,
+    and the claim that follows is one conditional update of the row.
+    """
+    now = now or utcnow()
+    where = [Integration.status == "syncing", abandoned_sql(now)]
+    if only is not None:
+        where.append(Integration.id == only)
+    ids = list(db.scalars(select(Integration.id).where(*where).order_by(Integration.id)))
+    freed = []
+    for integration_id in ids:
+        locked = db.execute(update(Integration).where(
+            Integration.id == integration_id, Integration.status == "syncing", abandoned_sql(now),
+        ).values(name=Integration.name).execution_options(synchronize_session="fetch"))
+        if locked.rowcount != 1:
+            continue
+        row = db.get(Integration, integration_id)
+        db.refresh(row)
+        if settle_abandoned(db, row, now):
+            freed.append(integration_id)
+    return freed
+
+
+def _beat_once(factory, holder) -> None:
+    """Stamp every lease this start holds. A row held by anyone else is left alone."""
+    with factory() as db:
+        db.execute(update(Integration).where(
+            Integration.status == "syncing", Integration.sync_holder == holder,
+        ).values(sync_heartbeat=utcnow()).execution_options(synchronize_session=False))
+        db.commit()
+
+
+async def beat(factory) -> None:
+    """Write this start's heartbeat until cancelled.
+
+    The first write waits one interval, so a start that stops at once does not touch a lease.
+    One failed write is logged and the loop continues.
+    """
+    holder = holder_id(factory)
+    while True:
+        await asyncio.sleep(HEARTBEAT_EVERY)
+        try:
+            await off_loop(lambda: _beat_once(factory, holder))
+        except Exception as error:  # noqa: BLE001 - one failed beat must not end the task
+            log.warning("Collection heartbeat failed: %s", type(error).__name__)
+
+
+def _still_holds(db, integration_id: str, started, holder) -> bool:
+    """Lock the source row and say whether the lease taken at `started` by `holder` is still this caller's.
+
+    Refreshing the heartbeat keeps a long store from looking abandoned while this row is locked.
+    """
     return db.execute(update(Integration).where(
-        Integration.id == integration_id, Integration.status == "syncing", Integration.sync_started_at == started
-    ).values(name=Integration.name).execution_options(synchronize_session=False)).rowcount == 1
+        Integration.id == integration_id, Integration.status == "syncing",
+        Integration.sync_started_at == started, Integration.sync_holder == holder,
+    ).values(sync_heartbeat=utcnow()).execution_options(synchronize_session=False)).rowcount == 1
 
 
 async def collect_integration(factory, settings, integration_id: str, actor: str | None, *,
@@ -416,25 +550,39 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
         api_key = os.environ.get(integration.secret_ref)
         if not api_key:
             return None, "secret"
-        started = utcnow()
+        # The name that supplied the secret, and the status to put back if this read fails. An edit can
+        # land during the lookup above. The rollback below ends this snapshot, so a later load already
+        # includes that edit; comparing against the later load would keep the secret resolved here.
+        read_ref = integration.secret_ref
         previous = integration.status
+        started = utcnow()
+        holder = holder_id(db.get_bind())
+        # The read above holds a transaction. End it before freeing a dead holder, or that write waits
+        # on this read and this read waits on that write. The record commits on its own, so a busy
+        # result or a later rollback cannot erase it. Same session, so a caller counting sessions
+        # still sees one for this read and one for the store.
+        db.rollback()
+        release_abandoned(db, started, only=integration_id)
+        db.commit()
+        integration = db.get(Integration, integration_id)
+        if integration is None:
+            return None, "missing"
         locked = db.execute(update(Integration).where(
-            Integration.id == integration.id,
-            or_(Integration.status != "syncing", Integration.sync_started_at < started - timedelta(minutes=5))
-        ).values(status="syncing", sync_started_at=started).execution_options(synchronize_session="fetch"))
+            Integration.id == integration.id, lease_free_sql(started),
+        ).values(**claim_values(holder, started)).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             return None, "busy" if db.get(Integration, integration_id) else "missing"
         db.commit()
         # An edit may have been saved after the read above and before the lease. None can be while
         # the lease is held, so read the source again and use only the settings saved now.
-        read_ref = integration.secret_ref
         db.refresh(integration)
         if integration.secret_ref != read_ref:
             api_key = os.environ.get(integration.secret_ref)
             if not api_key:
                 # A new secret name always leaves the source "configured"; give the lease back as that.
-                integration.status, integration.sync_started_at = "configured", None
+                integration.status = "configured"
+                clear_lease(integration)
                 db.commit()
                 return None, "secret"
         # Nobody else stores for this source while the lease is held, so its last record is final.
@@ -473,7 +621,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                     # Lock the source row before any other row, and store only while this lease is still ours.
                     # A lease older than five minutes can be taken over, and an edit can then move the source;
                     # either clears or replaces the stamp, so a read that outlived its lease stores nothing.
-                    if not _still_holds(own, integration_id, started):
+                    if not _still_holds(own, integration_id, started, holder):
                         return None
                     source = own.get(Integration, integration_id)
                     doubt, sure_from = retention.standing(own, source, snapshot, evidence.gaps)
@@ -510,7 +658,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
             raise
         except Exception as exc:
             db.rollback()
-            if not _still_holds(db, integration_id, started):
+            if not _still_holds(db, integration_id, started, holder):
                 db.rollback()
                 _report("ended", name, outcome="replaced", **spent(evidence))
                 return None, "replaced"
@@ -522,7 +670,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 retry_at = hold(db, failure) if hold else None
             except Exception:  # noqa: BLE001 - e.g. a copy claimed the next run meanwhile; that run covers it
                 db.rollback()
-                if not _still_holds(db, integration_id, started):
+                if not _still_holds(db, integration_id, started, holder):
                     db.rollback()
                     _report("ended", name, outcome="replaced", **spent(evidence))
                     return None, "replaced"
@@ -530,8 +678,9 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 drop_retry(db, integration_id)
                 integration = db.get(Integration, integration_id)
                 integration.last_error, retry_at = failure.message, None
-            integration.status = previous if retry_at and previous != "syncing" else "error"
-            integration.sync_started_at = None
+            keep = retry_at and previous not in {"syncing", "interrupted"}
+            integration.status = previous if keep else "error"
+            clear_lease(integration)
             # `why` is the sentence the source's card shows: Nyctr's own words, never the source's answer.
             details = {"why": integration.last_error, **({} if attempt is None else {"attempt": attempt})}
             if retry_at:

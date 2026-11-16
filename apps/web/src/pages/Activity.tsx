@@ -52,6 +52,8 @@ const ABOUT_A_SOURCE: Record<string, (name: string) => string> = {
   'integration.created': (name) => `Added the source ${name}`,
   'integration.collected': (name) => `Collected from ${name}`,
   'integration.collection_failed': (name) => `Could not collect from ${name}`,
+  'integration.collection_interrupted': (name) =>
+    `Stopped collecting from ${name} because Nyctr restarted`,
   'integration.diagnosed': (name) => `Tested ${name}`,
   'integration.removed': (name) => `Removed the source ${name}`,
   'inventory.dropped': (name) => `Dropped what has left ${name}`,

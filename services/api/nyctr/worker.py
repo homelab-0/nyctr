@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 
 from . import presence, retention, schedule
 from .access import OPEN, BeingEnded, clear_stale_reviews, end_lease
-from .collection import analyse, collect_integration, off_loop
+from .collection import analyse, collect_integration, off_loop, release_abandoned
 from .guests import enforce
 from .models import Integration, Lease, utcnow
 from .security import audit
@@ -208,6 +208,13 @@ class Upkeep:
         A run or retry that comes due during a pass is not claimed until the pass
         ends, so it stays due in the database for the next tick, or for another copy.
         """
+        with self.factory() as db:
+            # A holder that died since the last tick is recorded here too, so a copy that stayed up
+            # does not leave another copy's card saying the source is still being collected.
+            # The heartbeat is the wall clock, so this check is too: a schedule clock moved ahead
+            # must not make a collection that is still running look abandoned.
+            release_abandoned(db)
+            db.commit()
         if self.collecting is None or self.collecting.done():
             self.collecting = asyncio.create_task(self._collect())
         with self.factory() as db:

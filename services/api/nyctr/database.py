@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
@@ -49,6 +49,18 @@ def _upgrade_to_4(connection):
     if missing:
         Base.metadata.create_all(connection, tables=missing)
     connection.execute(SchemaVersion.__table__.insert().values(version=4))
+
+
+def _upgrade_to_5(connection):
+    """Add the collection holder's id and heartbeat. Existing rows gain empty columns and stay as they were."""
+    present = {column["name"] for column in inspect(connection).get_columns("integrations")}
+    dialect = connection.dialect
+    for name in ("sync_holder", "sync_heartbeat"):
+        if name not in present:
+            column = Base.metadata.tables["integrations"].columns[name]
+            kind = column.type.compile(dialect=dialect)
+            connection.execute(text(f"ALTER TABLE integrations ADD COLUMN {name} {kind}"))
+    connection.execute(SchemaVersion.__table__.insert().values(version=5))
 
 
 def make_engine(database_url: str):
@@ -98,6 +110,9 @@ def migrate(engine):
         if version == 3:
             _upgrade_to_4(connection)
             version = 4
+        if version == 4:
+            _upgrade_to_5(connection)
+            version = 5
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

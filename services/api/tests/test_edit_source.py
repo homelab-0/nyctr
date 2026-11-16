@@ -220,10 +220,14 @@ def test_demo_sources_cannot_be_edited(client, admin_headers):
 
 
 def hold_lease(client, id_, started):
-    """Mark the source as being read since `started`, as a collection or a diagnostic does."""
+    """Mark the source as being read since `started`, with a fresh heartbeat.
+
+    The heartbeat is new, so the only reason the lease is free is that `started` is past five minutes.
+    """
     with client.app.state.session_factory() as db:
         row = db.get(Integration, id_)
         row.status, row.sync_started_at = "syncing", started
+        row.sync_holder, row.sync_heartbeat = "live", utcnow()
         db.commit()
 
 
@@ -336,7 +340,8 @@ def test_a_read_that_outlived_its_lease_stores_nothing_after_the_source_moved(so
                                                                                             None, None)
     assert row["config"]["base_url"] == "https://second.example.net/api"
     assert client.get("/api/resources").json() == []
-    assert not [entry for entry in audit_trail(client) if entry[0].startswith("integration.collect")]
+    assert [entry[0] for entry in audit_trail(client) if entry[0].startswith("integration.collect")] == [
+        "integration.collection_interrupted"]
 
 
 @new_source

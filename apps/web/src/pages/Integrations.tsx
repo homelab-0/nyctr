@@ -573,7 +573,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">
                   <SourceTag provider={integration.provider} big />
-                  {integration.status === 'connected' && integration.gaps?.length ? (
+                  {integration.status === 'interrupted' ? (
+                    <Badge tone="amber">Cut short by a restart</Badge>
+                  ) : integration.status === 'connected' && integration.gaps?.length ? (
                     <Badge tone="amber">Connected, with gaps</Badge>
                   ) : (
                     <Status value={integration.status} />
@@ -618,6 +620,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <span>Next collection</span>
                     <strong>{nextCollection(schedule.data, now)}</strong>
                   </div>
+                )}
+                {integration.status === 'interrupted' && (
+                  <Notice tone="amber">The last collection was cut short by a restart.</Notice>
                 )}
                 {integration.status === 'partial' && (
                   <Notice tone="amber">

@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from . import model, presence
 from .access import checking_until, suggestions
 from .analysis import cut_title
-from .collection import last_gaps
+from .collection import CUT_SHORT, last_gaps
 from .config import Settings
 from .deps import admin, get_db
 from .guests import guest_devices, guest_json
@@ -135,6 +135,12 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
         items.append({"kind": "finding", "id": finding.id, "severity": finding.severity, "at": None,
                       "title": finding.title, "detail": finding.summary[:200]})
     for integration in db.scalars(select(Integration)):
+        if integration.status == "interrupted":
+            items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
+                          "action": "card",
+                          "title": f"The last collection from {integration.name} was cut short by a restart",
+                          "detail": CUT_SHORT})
+            continue
         if integration.status == "error":
             items.append({"kind": "source", "id": integration.id, "severity": "medium", "at": None,
                           "title": f"{integration.name} is not collecting",
