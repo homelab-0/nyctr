@@ -6,12 +6,14 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
 # Schema 4 adds the fact cache and the list of names Nyctr itself looked up.
 _V4_TABLES = ("fact_cache", "own_lookups")
+# Schema 6 adds the stored verdict on a blocked name.
+_V6_TABLES = ("analyses",)
 _V2_COLUMNS = {
     "observations": ("reason_codes", "source_device_id"),
     "access_requests": ("risk_score", "risk_category", "risk_factors", "decided_by", "decision_note",
@@ -61,6 +63,13 @@ def _upgrade_to_5(connection):
             kind = column.type.compile(dialect=dialect)
             connection.execute(text(f"ALTER TABLE integrations ADD COLUMN {name} {kind}"))
     connection.execute(SchemaVersion.__table__.insert().values(version=5))
+
+
+def _upgrade_to_6(connection):
+    """Add the table of stored verdicts. Nothing that exists is altered, so every stored row stays as it was."""
+    if "analyses" not in inspect(connection).get_table_names():
+        Base.metadata.create_all(connection, tables=[Base.metadata.tables["analyses"]])
+    connection.execute(SchemaVersion.__table__.insert().values(version=6))
 
 
 def make_engine(database_url: str):
@@ -113,6 +122,9 @@ def migrate(engine):
         if version == 4:
             _upgrade_to_5(connection)
             version = 5
+        if version == 5:
+            _upgrade_to_6(connection)
+            version = 6
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

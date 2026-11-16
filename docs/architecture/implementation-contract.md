@@ -240,3 +240,6 @@ whose holder is a different one, and whose heartbeat is older than 60 seconds,
 records it as cut short by a restart. A missed beat is recorded as no sign of
 life, and a collection cancelled before it stored is recorded as stopped. None
 of these leave the source marked as collecting.
+
+Schema version 6 adds one table, `analyses`, a stored verdict on a blocked name.
+Nothing that exists is altered.

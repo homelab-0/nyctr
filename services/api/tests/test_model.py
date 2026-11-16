@@ -16,8 +16,11 @@ import httpx
 import pytest
 from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin, seed_live_member, signin
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as DatabaseTimeout
 from sqlalchemy.orm import Session
+from test_collection_store import POSTGRES, postgres_database
 
 from nyctr import model
 from nyctr.config import Settings
@@ -65,6 +68,19 @@ def endpoint(monkeypatch):
 def console(tmp_path, **overrides):
     """A live installation whose operator allows two servers for the model, each on HTTPS and port 443 only."""
     return live_app(tmp_path, **{"model_hosts": "llm.example, proxy.internal.example", **overrides})
+
+
+ENGINES = ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)]
+
+
+def installation(tmp_path, request, engine_kind):
+    """A live installation on SQLite, or on a PostgreSQL database of this test's own."""
+    if engine_kind == "sqlite":
+        return console(tmp_path)
+    found = postgres_database(request)
+    if not found:
+        pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    return console(tmp_path, **found)
 
 
 def server_set(settings):
@@ -527,7 +543,9 @@ def test_an_install_with_only_the_servers_settings_sends_what_it_always_sent(tmp
     assert request.headers["content-type"] == "application/json"
     assert set(request.headers) <= PLAIN  # no trace header: none was sent before this change
     with app.state.session_factory() as db:
-        assert db.get(Setting, model.TRACE_KEY) is None  # and no key is made for a session nobody sends
+        stored = db.get(Setting, model.TRACE_KEY)  # made at start-up, even when this call sends no session
+        assert stored is not None and len(bytes.fromhex(stored.value["key"])) == 32
+        assert stored.value["key"] not in request.content.decode() and stored.value["key"] not in str(request.headers)
     body = json.loads(request.content)
     assert set(body) == {"model", "temperature", "max_tokens", "messages"}
     assert (body["model"], body["temperature"], body["max_tokens"]) == ("local/reasoner", 0.2, 700)
@@ -724,7 +742,8 @@ def test_the_trace_session_is_keyed_by_this_installation_alone(tmp_path, endpoin
         with TestClient(app) as client:
             headers = live_signin(client)
             with app.state.session_factory() as db:
-                assert folder != "two" or db.get(Setting, model.TRACE_KEY) is None  # made on first use, not before
+                stored = db.get(Setting, model.TRACE_KEY)  # made at start-up, before any call
+                assert stored is not None and len(bytes.fromhex(stored.value["key"])) == 32
                 db.merge(Finding(id=DEVICE_FINDING, title="A device was cut off", severity="high", summary="s",
                                  evidence=["Observed: 3 lookups"]))
                 db.commit()
@@ -777,38 +796,108 @@ def test_making_the_trace_key_neither_saves_nor_loses_work_the_caller_has_not_sa
             assert model.trace_key(after) == replaced != key
 
 
-def test_a_database_that_cannot_take_the_key_just_now_costs_the_session_not_the_call(tmp_path, endpoint):
-    """SQLite allows one writer. A caller that has written and not saved still gets its answer, ungrouped once."""
+def _ask_about_the_finding(db, settings):
+    """One traced call about the finding, through the only function that builds a request."""
+    return asyncio.run(model.call("nyctr.explanation", ("finding", DEVICE_FINDING), server_set(settings),
+                                  settings, system="s", user="u", db=db))
+
+
+@pytest.mark.parametrize("error", [
+    OperationalError("select", {}, Exception("database is locked")),
+    DatabaseTimeout("pool", {}, Exception("pool timeout")),
+])
+def test_a_database_error_while_reading_the_trace_key_costs_the_session_not_the_call(
+        tmp_path, endpoint, monkeypatch, error):
+    """A pool timeout, or any other database error while reading the key, still sends the call.
+
+    The call does not make a key, does not save or discard the caller's unsaved work, and
+    sends no session. An unkeyed digest is never sent, and the digest is not taken with an empty key.
+    """
     app = console(tmp_path)
     settings = Settings(mode="live", ai_base_url="https://llm.example/v1", ai_model="m", ai_trace="proxy")
+    made, digests, armed = [], [], {"on": False}
+    real_new, real_get = hmac.new, Session.get
 
-    def ask(db):
-        return asyncio.run(model.call("nyctr.explanation", ("finding", DEVICE_FINDING), server_set(settings),
-                                      settings, system="s", user="u", db=db))
+    def refuse_making(_db):
+        made.append(True)
+        raise AssertionError("a call must not make the trace key")
+
+    def spy(key, msg=b"", digestmod=None):
+        digests.append(key)
+        return real_new(key, msg, digestmod)
+
+    def get(self, entity, ident, **kwargs):
+        key = ident[0] if isinstance(ident, tuple) else ident
+        if key == model.TRACE_KEY and armed["on"]:
+            armed["on"] = False
+            raise error
+        return real_get(self, entity, ident, **kwargs)
 
     with TestClient(app):
-        # The same database, giving up on a lock at once instead of after SQLite's five seconds.
-        impatient = create_engine(str(app.state.engine.url), connect_args={"timeout": 0.01})
-        with Session(impatient) as caller:
-            caller.add(Setting(key="callers_unsaved_work", value={}))
-            caller.flush()  # written, not saved: this session is now the one writer
-            assert ask(caller) == "ready"
+        factory = app.state.session_factory
+        with factory() as before:
+            kept = before.get(Setting, model.TRACE_KEY).value
+        monkeypatch.setattr(model, "trace_key", refuse_making)
+        monkeypatch.setattr(hmac, "new", spy)
+        monkeypatch.setattr(Session, "get", get)
+        armed["on"] = True
+        with factory() as caller:
+            caller.add(Setting(key="callers_unsaved_work", value={"n": 1}))
+            assert _ask_about_the_finding(caller, settings) == "ready"
             sent = endpoint.requests[-1].headers
             assert sent["langfuse_trace_name"] == "nyctr.explanation" and "langfuse_session_id" not in sent
-            assert caller.get(Setting, "callers_unsaved_work") is not None  # its work is still there, unsaved
+            assert UNKEYED not in str(sent) and b"" not in digests and made == []
+            assert caller.get(Setting, "callers_unsaved_work") is not None
             caller.rollback()
-        with Session(impatient) as caller:
-            assert caller.get(Setting, model.TRACE_KEY) is None and caller.get(Setting, "callers_unsaved_work") is None
-            assert ask(caller) == "ready"  # nothing written this time: the key is made and the session sent
-            assert re.fullmatch("finding:[0-9a-f]{16}", endpoint.requests[-1].headers["langfuse_session_id"])
-        impatient.dispose()
+        with factory() as after:
+            assert after.get(Setting, model.TRACE_KEY).value == kept  # the empty or real key is not rewritten
+            assert after.get(Setting, "callers_unsaved_work") is None
 
 
-def test_two_copies_making_the_trace_key_at_the_same_moment_end_on_one_key(tmp_path, monkeypatch):
-    """The first copy reads "no key"; the second makes one before the first writes; the first uses the second's."""
+def test_an_empty_trace_key_is_not_rewritten_and_sends_no_session(tmp_path, endpoint, monkeypatch):
+    """A stored key that is empty sends the call with no session, and the call does not replace it."""
     app = console(tmp_path)
+    settings = Settings(mode="live", ai_base_url="https://llm.example/v1", ai_model="m", ai_trace="proxy")
+    made, digests = [], []
+    real_new = hmac.new
+
+    def refuse_making(_db):
+        made.append(True)
+        raise AssertionError("a call must not make the trace key")
+
+    def spy(key, msg=b"", digestmod=None):
+        digests.append(key)
+        return real_new(key, msg, digestmod)
+
+    with TestClient(app):
+        factory = app.state.session_factory
+        monkeypatch.setattr(model, "trace_key", refuse_making)
+        monkeypatch.setattr(hmac, "new", spy)
+        with factory() as db:
+            db.get(Setting, model.TRACE_KEY).value = {"key": ""}
+            db.commit()
+        with factory() as caller:
+            caller.add(Setting(key="callers_unsaved_work", value={"n": 1}))
+            assert _ask_about_the_finding(caller, settings) == "ready"
+            sent = endpoint.requests[-1].headers
+            assert "langfuse_session_id" not in sent and UNKEYED not in str(sent)
+            assert b"" not in digests and made == []
+            caller.rollback()
+        with factory() as after:
+            assert after.get(Setting, model.TRACE_KEY).value == {"key": ""}
+            assert after.get(Setting, "callers_unsaved_work") is None
+
+
+@pytest.mark.parametrize("engine_kind", ENGINES)
+def test_two_copies_making_the_trace_key_at_the_same_moment_end_on_one_key(
+        tmp_path, request, monkeypatch, engine_kind):
+    """The first copy reads "no key"; the second makes one before the first writes; the first uses the second's."""
+    app = installation(tmp_path, request, engine_kind)
     with TestClient(app):
         factory, real, second = app.state.session_factory, model.secrets.token_hex, []
+        with factory() as db:
+            db.delete(db.get(Setting, model.TRACE_KEY))  # start-up already made one; this is the race to make it
+            db.commit()
 
         def between_read_and_write(size):
             if not second:  # the first copy is about to write its own key: the second copy gets in first
@@ -826,9 +915,10 @@ def test_two_copies_making_the_trace_key_at_the_same_moment_end_on_one_key(tmp_p
             assert row.value == {"key": got.hex()}
 
 
-def test_a_stored_trace_key_that_is_not_a_key_is_replaced_and_the_new_one_kept(tmp_path):
+@pytest.mark.parametrize("engine_kind", ENGINES)
+def test_a_stored_trace_key_that_is_not_a_key_is_replaced_and_the_new_one_kept(tmp_path, request, engine_kind):
     """A damaged row never stops a call or sends a session under a weak key: a new key takes its place."""
-    app = console(tmp_path)
+    app = installation(tmp_path, request, engine_kind)
     with TestClient(app):
         factory = app.state.session_factory
         with factory() as db:
@@ -845,6 +935,57 @@ def test_a_stored_trace_key_that_is_not_a_key_is_replaced_and_the_new_one_kept(t
             with factory() as db:
                 assert db.get(Setting, model.TRACE_KEY).value == {"key": fresh.hex()}
             last = fresh
+
+
+@pytest.mark.parametrize("engine_kind", ENGINES)
+def test_two_copies_replacing_a_damaged_trace_key_end_on_a_real_key(tmp_path, request, monkeypatch, engine_kind):
+    """The first copy reads a damaged key; the second replaces it before the first writes; a real key remains."""
+    app = installation(tmp_path, request, engine_kind)
+    with TestClient(app):
+        factory, real, second = app.state.session_factory, model.secrets.token_hex, []
+        with factory() as db:
+            db.get(Setting, model.TRACE_KEY).value = {"key": "damaged"}
+            db.commit()
+
+        def between_read_and_write(size):
+            if not second:
+                second.append(b"")
+                with factory() as other:
+                    second.append(model.trace_key(other))
+            return real(size)
+
+        monkeypatch.setattr(model.secrets, "token_hex", between_read_and_write)
+        with factory() as first:
+            got = model.trace_key(first)
+        assert len(got) == 32 and len(second[1]) == 32
+        with factory() as db:
+            stored = bytes.fromhex(db.get(Setting, model.TRACE_KEY).value["key"])
+        assert len(stored) == 32 and stored in {got, second[1]}
+
+
+def test_start_up_makes_the_trace_key_and_a_call_only_reads_it(tmp_path):
+    """The key exists before any call. Reading it again does not replace it."""
+    app = console(tmp_path)
+    with TestClient(app):
+        with app.state.session_factory() as db:
+            key = model.read_trace_key(db)
+            assert len(key) == 32 and model.read_trace_key(db) == key
+
+
+def test_a_database_error_at_start_up_does_not_stop_the_app(tmp_path, monkeypatch, caplog):
+    """Start-up that cannot make the key still serves. The warning names neither the key nor the database error."""
+    def boom(_db):
+        raise OperationalError("SECRET-DB-MESSAGE", {}, Exception("SECRET-DB-MESSAGE"))
+
+    monkeypatch.setattr(model, "trace_key", boom)
+    caplog.set_level(logging.WARNING, logger="nyctr")
+    app = console(tmp_path)
+    with TestClient(app) as client:
+        assert client.get("/api/health").status_code == 200
+        with app.state.session_factory() as db:
+            assert model.read_trace_key(db) == b""
+    assert "The trace key could not be made at start-up. Calls still go out." in caplog.text
+    assert "SECRET-DB-MESSAGE" not in caplog.text
 
 
 def test_the_proxys_header_names_sit_in_one_table_and_purposes_are_a_fixed_set():
@@ -927,9 +1068,9 @@ def test_only_the_model_module_builds_a_request_to_the_model():
     # import the model or read its key; the assertions below keep that so.
     assert senders == {"model.py", "oidc.py", "integrations/core.py", "integrations/actions.py", "facts.py"}
     assert readers == {"model.py", "config.py"}  # config.py declares the server's own settings and checks them
-    assert callers == {"assistant.py", "main.py"}  # the assistant's two uses, and the console's test
+    assert callers == {"assistant.py", "main.py", "block_analysis.py"}  # the assistant, the console's test, a verdict
     # No other module can be handed the model's address, or call it under another name, without importing it.
-    assert importers == {"assistant.py", "main.py"}
+    assert importers == {"assistant.py", "main.py", "block_analysis.py"}
     # The proxy's own header names are five entries of one table. No other code, in the API or the
     # console, names the proxy or what records its traces, so nothing can branch on which one is there.
     web = root.parents[2] / "apps" / "web" / "src"
