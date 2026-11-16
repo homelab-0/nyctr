@@ -84,7 +84,8 @@ for a refusal, never the addresses. The only answer kept is one JSON object
 with a verdict (`justified`, `not_justified` or `cannot_tell`), a risk (`low`,
 `medium`, `high` or `unknown`), reasons that name a fact that was sent, and a
 short uncertainty. Any other key is dropped. A repeated key is refused. A
-reason that names a fact that was not sent is dropped. Text is cleaned again.
+reason that names a fact that was not sent is dropped. Text is cleaned again,
+and a null byte and any other control character is removed.
 At most eight reasons are kept. If nothing valid is left, or the answer is
 prose, empty or the wrong shape, that part is `invalid`. No model, a failed
 call and a timeout are stored as `missing`, `failed` and `timed_out`, with no

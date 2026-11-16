@@ -121,7 +121,10 @@ groups.
 
 An administrator can ask for a judgement on a blocked name (`POST /api/analyses`)
 and read it back (`GET /api/analyses/{id}`). Members, the portal address and a
-caller with no session are refused. There is no console page for it.
+caller with no session are refused. A block id or an analysis id that contains
+a null byte is refused with 422, and the model is not asked. One administrator
+can ask 30 times in 10 minutes. The next ask is refused before a lookup or the
+model call. There is no console page for it.
 
 The model sees a fixed system prompt and one JSON object: the name, and the
 facts Nyctr gathered, each with its id. The name, a list's name, a reason and
@@ -136,8 +139,8 @@ The only answer that is kept is one JSON object: `verdict` (`justified`,
 `unknown`), `reasons` (each naming a fact id that was sent, and a short
 sentence) and `uncertainty`. Any other key is dropped. A repeated key is
 refused. A reason that names a fact that was not sent is dropped, and the
-text is cleaned again. At most eight reasons are kept, and each sentence is
-cut to 240 characters. If no reason is left, or the reply is prose, empty,
+text is cleaned again. A null byte and any other control character is removed.
+At most eight reasons are kept, and each sentence is cut to 240 characters. If no reason is left, or the reply is prose, empty,
 two objects of which the first does not match, or a word that is not one of
 those listed, the model's part is `invalid`. No model is `missing`. A call
 that does not succeed is `failed`. A call that runs out of time, or a

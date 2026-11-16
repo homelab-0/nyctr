@@ -19,6 +19,7 @@ import ipaddress
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
@@ -127,8 +128,13 @@ def _strip_ipv6(text: str) -> str:
 
 
 def clean_text(value: object, limit: int = _TEXT) -> str:
-    """Bound one piece of outside text and remove addresses, including IPv6."""
-    return _strip_ipv6(_clean(value, limit))
+    """Bound one piece of outside text, remove addresses, and drop control characters.
+
+    NUL and the other control characters are removed after the length cut. A
+    stored sentence cannot carry one, and PostgreSQL refuses a NUL in text.
+    """
+    text = _strip_ipv6(_clean(value, limit))
+    return "".join(char for char in text if unicodedata.category(char) != "Cc")
 
 
 def _ip(value: object) -> bool:
