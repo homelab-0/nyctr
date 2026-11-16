@@ -90,3 +90,10 @@ def seed_live_member(app, *, reason="HaGeZi Multi PRO++", codes=("blocklist:hage
                            expires_at=now + timedelta(hours=20), evidence_kind="observed",
                            attribution="assigned", risk_score=None, risk_explanation=""))
         db.commit()
+
+
+def pytest_collection_modifyitems(items):
+    """Write `postgres` into each marked case's JUnit record, so CI can count and check exactly those."""
+    for item in items:
+        if item.get_closest_marker("postgres"):
+            item.user_properties.append(("postgres", "1"))

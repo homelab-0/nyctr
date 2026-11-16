@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 25
     services:
       postgres:
-        image: postgres:17-bookworm
+        image: postgres:17-bookworm@sha256:40865bc877a289da75963d97d72b59633f639fc5af7a4e856bfa3714cae5b536
         env:
           POSTGRES_PASSWORD: ci-fabricated-only
         ports:
@@ -47,8 +47,8 @@ jobs:
           PYTHONPATH: services/api
           # The cases that need a PostgreSQL server make and drop a database of their own on this one.
           NYCTR_TEST_POSTGRES: postgresql+psycopg://postgres:ci-fabricated-only@127.0.0.1:5432/
-      - name: Fail if a case skipped for want of PostgreSQL, and count the ones that ran
-        run: python scripts/postgres_cases.py test-results/api.xml
+      - name: Fail if a PostgreSQL case did not pass, and count the ones that did
+        run: python scripts/postgres_cases.py test-results/api.xml --minimum 35
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()
         with:

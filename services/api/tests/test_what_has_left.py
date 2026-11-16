@@ -678,6 +678,7 @@ def test_an_item_whose_mark_was_taken_off_after_the_run_read_what_may_go_is_kept
     assert world.drop() == 0 and "unifi:client:back" in world.stored()
 
 
+@pytest.mark.postgres
 def test_a_device_being_filed_while_a_batch_reads_it_is_kept_on_postgresql(world_on_postgresql, monkeypatch):
     """The batch locks its items before it decides. Without that, a device an administrator is filing
     at that moment is judged by what it was, and deleted once the filing is saved."""

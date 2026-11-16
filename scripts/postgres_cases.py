@@ -1,50 +1,55 @@
-"""Fail when a test skipped for want of a PostgreSQL server, and say how many PostgreSQL cases ran.
+"""Check the cases marked `postgres` in an API run made with NYCTR_TEST_POSTGRES set.
 
-Read the JUnit file of an API run made with NYCTR_TEST_POSTGRES set. A case that skips because
-SQLite has one writer, or for any other reason, is left alone; only a skip whose message names
-NYCTR_TEST_POSTGRES counts as a PostgreSQL case that did not run.
+Every test that needs a PostgreSQL server carries the `postgres` marker, and the test configuration
+writes it into the JUnit file. This fails when any marked case did not pass (skipped for any reason,
+failed or errored), or when fewer than the expected minimum of them ran at all, and it puts the
+exact count of marked cases that passed in the job summary.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import xml.etree.ElementTree as ET
 
-VARIABLE = "NYCTR_TEST_POSTGRES"
-
 
 def check(path: str) -> tuple[list[str], int]:
-    """Return the cases that skipped for want of PostgreSQL, and how many with postgresql in their name passed."""
-    skipped, ran = [], 0
+    """Return the marked cases that did not pass, and how many marked cases passed."""
+    not_passed, passed = [], 0
     for case in ET.parse(path).getroot().iter("testcase"):
+        if not any(p.get("name") == "postgres" for p in case.iter("property")):
+            continue
         name = f"{case.get('classname')}::{case.get('name')}"
-        skip = case.find("skipped")
-        if skip is not None:
-            if VARIABLE in (skip.get("message") or ""):
-                skipped.append(name)
-        elif case.find("failure") is None and case.find("error") is None and "postgresql" in name:
-            ran += 1
-    return skipped, ran
+        if case.find("skipped") is not None:
+            not_passed.append(f"{name} (skipped)")
+        elif case.find("failure") is not None or case.find("error") is not None:
+            not_passed.append(f"{name} (did not pass)")
+        else:
+            passed += 1
+    return not_passed, passed
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: postgres_cases.py <junit.xml>", file=sys.stderr)
-        return 2
-    skipped, ran = check(argv[1])
-    lines = [f"Cases named for PostgreSQL that passed: {ran}", f"Skipped for want of PostgreSQL: {len(skipped)}"]
-    lines += [f"- {name}" for name in skipped]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("junit")
+    parser.add_argument("--minimum", type=int, required=True, help="fewest marked cases that must have passed")
+    arguments = parser.parse_args(argv[1:])
+    not_passed, passed = check(arguments.junit)
+    lines = [f"Cases marked postgres that passed: {passed} (at least {arguments.minimum} expected)",
+             f"Marked cases that did not pass: {len(not_passed)}"]
+    lines += [f"- {name}" for name in not_passed]
     print("\n".join(lines))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as out:
             out.write("### PostgreSQL 17 cases\n\n" + "\n".join(lines) + "\n")
-    if not ran:
-        print("No case named for PostgreSQL ran: the server did not reach the tests.", file=sys.stderr)
+    if not_passed:
+        print("A case marked postgres may not skip: the server is part of this job.", file=sys.stderr)
         return 1
-    if skipped:
-        print(f"{VARIABLE} is set in this job, so no case may skip for want of it.", file=sys.stderr)
+    if passed < arguments.minimum:
+        print("Fewer marked cases ran than expected: a test lost its marker or the server did not reach it. "
+              "Raise the minimum only when cases were added.", file=sys.stderr)
         return 1
     return 0
 

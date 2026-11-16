@@ -28,6 +28,7 @@ include = ["nyctr*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["postgres: needs a PostgreSQL server named in NYCTR_TEST_POSTGRES; CI fails if one skips"]
 
 [tool.ruff]
 target-version = "py312"
