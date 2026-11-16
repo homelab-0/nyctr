@@ -23,7 +23,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import peer, presence, risk, schedule
+from . import peer, policy, presence, risk, schedule
 from .collection import SECRET_REF
 from .config import Settings
 from .deps import admin, columns, device_assigned, device_permitted, get_db, identity, observation_permitted
@@ -484,6 +484,11 @@ def clear_stale_reviews(db: Session) -> None:
     db.commit()
 
 
+async def _pause(seconds: float) -> None:
+    """Wait before trying again for a claim another opening holds."""
+    await asyncio.sleep(seconds)
+
+
 async def hold_entry(db: Session, settings: Settings, integration: Integration | None, domain: str) -> Claim | None:
     """Take the claim an opening needs, waiting a short while for whoever holds it. None if nothing is sent.
 
@@ -517,7 +522,7 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
             if waited >= OPENING_WAITS:
                 raise EntryBusy(f"Nyctr is already changing {domain} at {name}. Nothing was opened. Try again in a "
                                 "moment.", category="configuration")
-            await asyncio.sleep(0.25)
+            await _pause(0.25)
             waited += 0.25
         # With the claim held, a record still there is no opening in flight: it is left over. Settle it first.
         if db.get(Integration, entry.integration_id) is None:  # A wait reads the source again: it may be gone.
@@ -699,20 +704,66 @@ async def reconcile(db: Session, settings: Settings) -> int:
     return closed
 
 
-def _auto_opens_today(db: Session, user_id: str) -> int:
-    """Count leases the rule opened for this person in the last 24 hours."""
+def _auto_opens_today(db: Session, user_id: str | None = None) -> int:
+    """Count leases the rule opened in the last 24 hours: for this person, or for everyone."""
+    whose = (Lease.requester_id == user_id,) if user_id else ()
     return db.scalar(select(func.count()).select_from(Lease).where(
-        Lease.requester_id == user_id, Lease.decided_by == "rule",
-        Lease.created_at > utcnow() - timedelta(hours=24))) or 0
+        *whose, Lease.decided_by == "rule", Lease.created_at > utcnow() - timedelta(hours=24))) or 0
+
+
+def _lock_rule(db: Session) -> None:
+    """Lock the rule's row until this transaction commits, so two openings are stored one after the other."""
+    db.execute(update(Setting).where(Setting.key == "access_rule").values(updated_by=Setting.updated_by)
+               .execution_options(synchronize_session=False))
+
+
+def _reread_rule(db: Session) -> AccessRule:
+    """The rule as stored now. This session's earlier copy is dropped, so a change made since is visible."""
+    held = db.get(Setting, "access_rule")
+    if held is not None:
+        db.expire(held)
+    return get_rule(db, "access_rule")
+
+
+def _left_to_a_person(verdict: policy.Decision, rule: AccessRule, assessment: risk.Assessment,
+                      integration: Integration | None) -> str:
+    """Say in plain words why the rule did not open a request: the first check that failed."""
+    name, check, tier = integration.name if integration else "", verdict.failed, verdict.tier
+    if verdict.would:
+        return (f"The access rule would have opened this for {verdict.minutes} minutes. It is set to record only, "
+                "so a person decides.")
+    if check == "tier" or (check == "mode" and tier != "ad_tracker"):
+        if assessment.score is None:
+            return "Nyctr could not score this address, so a person decides."
+        if tier == "unknown" and assessment.category == risk.PRIVACY:
+            return "Nyctr cannot tell what kind of list blocked this, so a person decides."
+        return "This was blocked for safety or by an administrator's rule, so a person decides."
+    if check == "conditions" and tier == "ad_tracker":
+        return f"The score is above the automatic limit of {rule.ad_tracker.max_score}, so a person decides."
+    return {
+        "rule_on": "Automatic access is switched off, so a person decides.",
+        "mode": "Automatic access is switched off for advertising and tracker lists, so a person decides.",
+        "can_open": f"Nyctr cannot open addresses at {name}, so a person decides." if integration
+                    else "This block did not come from a connected source, so a person decides.",
+        "changes_on": f"Nyctr is not allowed to change {name}, so a person decides.",
+        "match": "Nyctr cannot be sure which device this block belongs to, so a person decides.",
+        "conditions": "This address does not meet the rule's conditions for this kind of block, so a person decides.",
+        "declined": "An administrator said no to this address before, so a person decides.",
+        "analysis": "The analysis of this address does not support opening it, so a person decides.",
+        "per_day": f"You have reached today's limit of {rule.per_day} automatic openings, so a person decides.",
+        "daily_total": f"Nyctr has reached today's limit of {rule.daily_total} automatic openings for everyone, "
+                       "so a person decides.",
+    }[check]
 
 
 async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation) -> None:
     """Assess a new request, store the assessment, and open access only if the written rule allows.
 
-    Fails closed: an unknown score, a security or content-rule block, a domain
-    an administrator denied before, a source whose integration cannot open
-    addresses or a disabled write path all leave the request waiting for a
-    person, with the reason recorded.
+    Whether it may is `policy.may_open`'s answer to the facts gathered here; this function does the
+    opening. Fails closed: a kind of block that is never automatic, an unknown score, a domain an
+    administrator denied before, a source whose integration cannot open addresses or a disabled
+    write path all leave the request waiting for a person, with the reason on the request and every
+    check and its result in the request's audit record (`rule.access_checked`).
     """
     from .integrations import IntegrationError
 
@@ -721,35 +772,74 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     row.integration_id = observation.integration_id
     rule: AccessRule = get_rule(db, "access_rule")
     integration = db.get(Integration, observation.integration_id)
-    why = None
-    if not rule.enabled:
-        why = "Automatic access is switched off, so a person decides."
-    elif assessment.score is None:
-        why = "Nyctr could not score this address, so a person decides."
-    elif assessment.category != risk.PRIVACY:
-        why = "This was blocked for safety or by an administrator's rule, so a person decides."
-    elif assessment.score > rule.max_score:
-        why = f"The score is above the automatic limit of {rule.max_score}, so a person decides."
-    elif not integration:
-        why = "This block did not come from a connected source, so a person decides."
-    elif not _opener(integration):
-        why = f"Nyctr cannot open addresses at {integration.name}, so a person decides."
-    elif settings.write_mode(integration.provider) == "disabled":
-        why = f"Nyctr is not allowed to change {integration.name}, so a person decides."
-    elif db.scalar(select(AccessRequest.id).where(AccessRequest.domain == observation.domain,
-                                                  AccessRequest.status == "denied").limit(1)):
-        why = "An administrator said no to this address before, so a person decides."
-    limit = f"You have reached today's limit of {rule.per_day} automatic openings, so a person decides."
-    if why is None and _auto_opens_today(db, row.requester_id) >= rule.per_day:
-        why = limit
+    # An assignment or an administrator's link is what `assigned` records; anything else is not a match.
+    match = "assignment" if observation.attribution == "assigned" else "none"
+
+    def record(verdict: policy.Decision, words: str | None) -> None:
+        """Keep what the rule said about this request: its tier and limits, and every check with its result."""
+        limits = getattr(rule, verdict.tier).model_dump() if verdict.tier in policy.AUTOMATIC else {}
+        audit(db, None, "rule.access_checked", row.id, domain=row.domain, tier=verdict.tier,
+              outcome="may_open" if verdict.allow else "would_open" if verdict.would else "waits",
+              checks=[list(check) for check in verdict.checks],
+              limits={"per_day": rule.per_day, "daily_total": rule.daily_total, **limits},
+              **({"minutes": verdict.minutes} if verdict.allow or verdict.would else {}),
+              **({"why": words} if words else {}))
+
+    def facts_now(pending: int = 0) -> policy.Facts:
+        """The facts as they stand now. `pending` is this opening's own lease, already in the session."""
+        return policy.Facts(
+            policies=assessment.policies, can_open=_opener(integration) is not None,
+            changes_on=bool(integration) and settings.write_mode(integration.provider) != "disabled", match=match,
+            score=assessment.score, name_shape=len(assessment.factors) > 1, registered_days=None,
+            declined=bool(db.scalar(select(AccessRequest.id).where(
+                AccessRequest.domain == row.domain, AccessRequest.status == "denied").limit(1))),
+            opened_today=max(0, _auto_opens_today(db, row.requester_id) - pending),
+            opened_today_all=max(0, _auto_opens_today(db) - pending), asked_minutes=row.duration_minutes)
+
+    def ask(final: bool) -> tuple[policy.Decision, str | None]:
+        """Put the facts as they stand now to the rule and word a refusal. A yes is recorded once, when final.
+
+        The final ask reads the rule again. It may have been switched off, or its limits lowered, while this
+        opening waited for the person's turn.
+        """
+        nonlocal rule
+        if final:
+            rule = _reread_rule(db)
+        verdict = policy.may_open(rule, facts_now())
+        words = None if verdict.allow else _left_to_a_person(verdict, rule, assessment, integration)
+        if words or final:
+            record(verdict, words)
+        return verdict, words
+
+    def leave(verdict: policy.Decision, words: str) -> None:
+        """The checks passed and the request still waits. The record says waits, not that it opened.
+
+        The note is written only while the request is still pending. If that write changes nothing, a
+        decision has landed since the request was read, and this one records nothing over it.
+        """
+        changed = db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
+                                                         AccessRequest.status == "pending")
+                             .values(decision_note=words)
+                             .execution_options(synchronize_session=False)).rowcount == 1
+        if not changed:  # The answer reads the row again: a decision since the last read keeps its note.
+            db.expire(row)
+            return
+        record(policy.Decision(False, False, verdict.tier, verdict.minutes, None, verdict.checks), words)
+        row.decision_note = words
+
+    verdict, why = ask(final=False)
     if why is None:
-        minutes, name, turn, waited = min(row.duration_minutes, rule.max_minutes), integration.name, None, 0.0
+        name, turn, waited = integration.name, None, 0.0
         db.commit()  # The assessment is stored now: the opening takes a claim, and may undo what is unsaved.
         # The rule's decision holds the request's claim like any other, so a person's decision on a request
         # that is already listed as waiting is never overwritten. If a person has it, the rule leaves it to them.
         gate = hold_review(db, row.id)
         db.refresh(row)
         if gate is None or row.status != "pending":
+            # No claim, or the request was decided while this waited for one. The note below matches
+            # pending, so a decision that landed after the refresh keeps its own note and no waits record.
+            if gate is None:
+                leave(verdict, "This request is already being decided, so a person decides.")
             return end_review(db, gate) if gate else None
         try:
             # One automatic opening at a time for each person, so the day's count is right when it is read.
@@ -760,31 +850,63 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             integration = db.get(Integration, row.integration_id)
             if turn is None:
                 why = "Nyctr was still opening your earlier requests, so a person decides this one."
+                leave(verdict, why)
             elif integration is None:
-                why = f"{name} was removed from Nyctr while this request waited, so a person decides."
-            elif _auto_opens_today(db, row.requester_id) >= rule.per_day:
-                why = limit
+                leave(verdict, f"{name} was removed from Nyctr while this request waited, so a person decides.")
+                why = None  # leave wrote the note while the request was pending. It commits with the claim.
             else:
-                claim = await hold_entry(db, settings, integration, row.domain)
-                await open_lease(db, settings, integration=integration, domain=row.domain,
-                                 device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
-                                 minutes=minutes, decided_by="rule", risk_score=assessment.score, claim=claim)
-                # Compare and swap, as in the review route: a copy that does not know the request's claim may
-                # have decided meanwhile. Then nothing is stored, and what was added stays on record to be removed.
-                if db.execute(update(AccessRequest).where(AccessRequest.id == row.id, AccessRequest.status == "pending")
-                              .values(status="auto_approved", decided_by="rule", duration_minutes=minutes,
-                                      decision_note=f"Opened for {minutes} minutes by the access rule.")).rowcount != 1:
-                    db.rollback()
-                    return release_entry(db, claim, unstored=True)
-                if _give_back(db, turn):  # With the commit that stores the lease, so the next one counts it.
-                    _give_back(db, gate)
-                    turn = gate = None
-                    return db.refresh(row)
-                # The turn was taken over while this stood still, so the day's count may have moved on without
-                # it: nothing is stored, and what was added stays on record to be removed.
-                db.rollback()
-                turn = release_entry(db, claim, unstored=True)
-                why = "Nyctr took too long to open this by itself, so a person decides."
+                answered, why = ask(final=True)  # Asked again with the turn held: the counts are right now.
+                if why is None:
+                    # Minutes from this allowing decision, not the first look. The re-read under the lock
+                    # below can still shorten them.
+                    minutes = answered.minutes
+                    # The entry's claim commits, and rolls this session back when that claim is already held.
+                    # The rule's record is stored first, so the rollback cannot take it, whatever then happens.
+                    db.commit()
+                    claim = await hold_entry(db, settings, integration, row.domain)
+                    lease = await open_lease(db, settings, integration=integration, domain=row.domain,
+                                             device_name=row.device_name, requester_id=row.requester_id,
+                                             request_id=row.id, minutes=minutes, decided_by="rule",
+                                             risk_score=assessment.score, claim=claim)
+                    # The rule's row is locked from here to the commit, so two openings are stored one after the
+                    # other. The rule is read again under that lock: it may have been switched off, or a tier
+                    # switched off, or a limit lowered, while the add was unanswered.
+                    _lock_rule(db)
+                    rule = _reread_rule(db)
+                    late = policy.may_open(rule, facts_now(pending=1))
+                    if not late.allow:  # Nothing is stored, and what was added stays on record to be removed.
+                        db.rollback()
+                        release_entry(db, claim, unstored=True)
+                        why = _left_to_a_person(late, rule, assessment, integration)
+                        record(late, why)
+                    else:
+                        # Last allowing decision. A lower limit while the add was unanswered must not leave
+                        # a longer lease or request than that decision allows.
+                        minutes = late.minutes
+                        lease.expires_at = utc(lease.created_at) + timedelta(minutes=minutes)
+                        opened = db.scalar(select(Audit).where(Audit.action == "access.opened",
+                                                               Audit.target_id == lease.id))
+                        opened.details = {**opened.details, "minutes": minutes}
+                        # Compare and swap, as in the review route: a copy that does not know the request's
+                        # claim may have decided meanwhile. Then nothing is stored, and what was added stays
+                        # on record to be removed.
+                        if db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
+                                                                  AccessRequest.status == "pending")
+                                      .values(status="auto_approved", decided_by="rule", duration_minutes=minutes,
+                                              decision_note=f"Opened for {minutes} minutes by the access rule.")
+                                      ).rowcount != 1:
+                            db.rollback()
+                            return release_entry(db, claim, unstored=True)
+                        elif _give_back(db, turn):  # With the commit that stores the lease, so the next one counts it.
+                            _give_back(db, gate)
+                            turn = gate = None
+                            return db.refresh(row)
+                        else:
+                            # The turn was taken over while this stood still, so the day's count may have moved on
+                            # without it: nothing is stored, and what was added stays on record to be removed.
+                            db.rollback()
+                            turn = release_entry(db, claim, unstored=True)
+                            why = "Nyctr took too long to open this by itself, so a person decides."
         except SourceGone as error:
             error.record(db)
             why = f"{error} A person decides."
@@ -799,7 +921,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             release_entry(db, turn)
             if gate:
                 end_review(db, gate)
-    row.decision_note = why
+    if why is not None:
+        row.decision_note = why
 
 
 def suggestions(db: Session) -> list[dict]:
@@ -1015,7 +1138,11 @@ def put_collection_schedule(body: schedule.Schedule, request: Request, user=Depe
 
 @router.put("/rules/access")
 def put_access_rule(body: AccessRule, user=Depends(admin), db: Session = Depends(get_db)):
-    """Replace the access rule. Only an administrator can widen what Nyctr does on its own."""
+    """Replace the access rule. Only an administrator can widen what Nyctr does on its own.
+
+    The body is the rule in tiers. A mode for a tier that can never be automatic, any mode but off
+    for the threat-feed tier, or a limit outside its bounds does not validate, and nothing is stored.
+    """
     put_rule(db, "access_rule", body, user.id)
     audit(db, user.id, "rule.access_changed", "access_rule", **body.model_dump())
     db.commit()

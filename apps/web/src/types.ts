@@ -286,11 +286,16 @@ export interface Suggestion {
 }
 export type WriteMode = 'simulated' | 'enabled' | 'disabled';
 export type FeatureMode = WriteMode | 'none';
+/** `shadow` opens nothing: the request waits for a person and its record says the rule would have opened it. */
+export type TierMode = 'off' | 'shadow' | 'on';
+/** The access rule by kind of block. Only these two kinds can ever be automatic. */
 export interface AccessRule {
   enabled: boolean;
-  max_score: number;
-  max_minutes: number;
   per_day: number;
+  daily_total: number;
+  ad_tracker: { mode: TierMode; max_score: number; max_minutes: number };
+  /** Kept and shown, and off until Nyctr can analyse an address. */
+  threat_feed: { mode: 'off'; max_minutes: number; min_registered_days: number };
 }
 export interface GuestRule {
   enabled: boolean;

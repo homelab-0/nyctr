@@ -590,8 +590,9 @@ def test_the_verdict_cannot_reach_the_rule_writer():
     assert banned.isdisjoint(reached)
     assert reached == {
         "__init__.py", "block_analysis.py", "config.py", "facts.py", "integrations/__init__.py",
-        "integrations/core.py", "integrations/registry.py", "model.py", "models.py", "peer.py", "redact.py",
-        "risk.py",
+        "integrations/core.py", "integrations/registry.py",
+        # layers.py holds descriptors only (layer, kind, origin) and imports nothing of Nyctr.
+        "layers.py", "model.py", "models.py", "peer.py", "redact.py", "risk.py",
     }
     names = block_analysis.AnalysisInput.__dataclass_fields__
     assert list(names) == ["present", "verdict", "risk"]

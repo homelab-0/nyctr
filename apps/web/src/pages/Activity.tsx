@@ -22,6 +22,7 @@ const WORDS: Record<string, string> = {
   'access.denied': 'Said no to a request',
   'access.reviewed': 'Reviewed a request',
   'rule.access_changed': 'Changed the access rule',
+  'rule.access_checked': 'The access rule looked at a request',
   'rule.guest_changed': 'Changed the guest cut-off rule',
   'guest.pass_issued': 'Issued a guest pass',
   'guest.pass_ended': 'Ended a guest pass',

@@ -71,10 +71,10 @@ def claims(app):
 
 
 @contextlib.contextmanager
-def started(tmp_path, rule=False):
+def started(tmp_path, rule=False, **overrides):
     """A live copy with two fresh blocks of one address; yields it with the member's and the administrator's
     cookies and header. The plain client is left signed in as the administrator."""
-    app = live_app(tmp_path, provider_writes="nextdns")
+    app = live_app(tmp_path, provider_writes="nextdns", **overrides)
     with TestClient(app) as client:
         seed_live_member(app)
         with app.state.session_factory() as db:

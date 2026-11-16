@@ -16,9 +16,10 @@ from nyctr.models import Audit, Integration, Lease, Observation, utcnow
 GALLERY = {"block_id": "block-gallery", "reason": "Need to open a picture gallery", "duration_minutes": 240}
 
 
-def put_rule(client, headers, **values):
-    """Write the access rule as the administrator."""
-    body = {"enabled": True, "max_score": 25, "max_minutes": 60, "per_day": 4, **values}
+def put_rule(client, headers, max_score=25, max_minutes=60, **values):
+    """Write the access rule as the administrator: advertising and tracker lists on, nothing else."""
+    body = {"enabled": True, "per_day": 4, **values,
+            "ad_tracker": {"mode": "on", "max_score": max_score, "max_minutes": max_minutes, **values.get("ad_tracker", {})}}
     assert client.put("/api/rules/access", headers=headers, json=body).status_code == 200
 
 

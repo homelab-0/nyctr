@@ -24,7 +24,7 @@ from .models import (
     Workspace,
     utcnow,
 )
-from .policy import AccessRule, GuestRule, put_rule
+from .policy import AccessRule, AdTier, GuestRule, put_rule
 from .security import hash_password
 
 
@@ -242,7 +242,7 @@ def _seed_access_and_guests(db, now):
 
     Everything here is marked simulated: demo mode never contacts a provider.
     """
-    put_rule(db, "access_rule", AccessRule(enabled=True, max_score=25, max_minutes=60, per_day=4), "user-admin")
+    put_rule(db, "access_rule", AccessRule(enabled=True, per_day=4, ad_tracker=AdTier(mode="on")), "user-admin")
     put_rule(db, "guest_rule", GuestRule(enabled=True, hits=3, minutes=5), "user-admin")
     db.add(AccessRequest(
         id="request-stream", block_id="block-stream", domain="watch.streamhub.example", device_name="Front desk tablet",

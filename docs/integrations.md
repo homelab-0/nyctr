@@ -354,7 +354,26 @@ Even a provider device label is not enough to assign a real user without a trust
 mapping. Member self-service requires that separate attribution layer.
 
 Blocked lookups keep the provider's reason identifiers, which the risk score
-reads. An administrator can link a NextDNS device label to an inventory device
+reads. The integration also states what kind of thing each reason is, and the
+[access rule's tiers](security-model.md#the-access-rule-in-tiers) follow from
+that:
+
+| Reason at NextDNS | Stated as | Tier |
+| --- | --- | --- |
+| A subscribed blocklist, disguised trackers | A third party's advertising or tracker list | Advertising and tracker lists |
+| Native tracking protection | NextDNS's own tracker list | Advertising and tracker lists |
+| Threat intelligence feeds, safe browsing | A third party's threat feed | Threat feeds |
+| AI threat detection (`ai-threat-detection`, "AI-Driven Threat Detection", "AI Driven Threat Intelligence"), cryptojacking protection | NextDNS's own threat feed | Threat feeds |
+| Newly registered, dynamic DNS and parked addresses | A class of address someone chose to block | Categories: never automatic |
+| Parental control, a blocked service, safe search, bypass methods | A category someone chose to block | Categories: never automatic |
+| The deny list | An administrator's deny entry | Deny entries: never automatic |
+| Rebinding, look-alike names, typosquatting, generated names, the CSAM list, anything else | Not stated | Unknown: never automatic |
+
+NextDNS's own AI threat detection is matched only on those three names, with a
+word boundary. Any other reason that merely contains "threat" is not stated,
+and stays unknown.
+
+An administrator can link a NextDNS device label to an inventory device
 under Setup; the link applies only to lookups observed after it is made, so it
 never backdates what a member can see.
 
@@ -396,8 +415,9 @@ What this integration deliberately does not do:
   capability, so the access rule never acts on a Pi-hole block and an approved
   request is recorded as not applied for you to carry out in Pi-hole.
 - It does not score a block from a subscribed list. Pi-hole does not say whether
-  a list is about adverts or threats, so those blocks stay unknown. Blocks from
-  the deny list or a deny pattern are scored as an administrator's rule.
+  a list is about adverts or threats, so those blocks stay unknown, in score
+  and in kind. Blocks from the deny list or a deny pattern are scored as an
+  administrator's rule and stated as deny entries.
 - It does not treat a client name as identity. Names come from Pi-hole's own
   network table; a block stays unassigned until an administrator links the label
   to a device under Setup.

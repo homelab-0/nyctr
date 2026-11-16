@@ -25,12 +25,42 @@ import type {
   PresenceRow,
   Resource,
   Rules,
+  TierMode,
   WriteMode,
 } from '../types';
 
 type Tab = 'rule' | 'people' | 'system';
 
-/** The access rule as a sentence an administrator edits, with the bands it can and cannot reach. */
+/** Kinds of block the rule never opens, each with why, in the order the card lists them. */
+const ALWAYS_YOU: [string, string][] = [
+  [
+    'Kinds of site you chose to block',
+    'A content category or safe search, or a newly registered, dynamic or parked address, is switched on at the source. That was a choice, so it stays yours.',
+  ],
+  ['Addresses on a deny list', 'Someone put this address on a deny list on purpose.'],
+  [
+    'Firewall rules',
+    'A firewall rule or a blocked region stands in the way. Nyctr never opens the firewall by itself.',
+  ],
+  ['Intrusion prevention', 'The network recognised an attack pattern in the traffic.'],
+  [
+    'Anything Nyctr does not recognise',
+    'When Nyctr cannot tell what blocked an address, it does not guess.',
+  ],
+];
+const MODES: { id: TierMode; name: string }[] = [
+  { id: 'off', name: 'Off' },
+  { id: 'shadow', name: 'Record only' },
+  { id: 'on', name: 'On' },
+];
+const MODE_MEANS: Record<TierMode, string> = {
+  off: 'Off: these requests wait for you.',
+  shadow:
+    'Record only: Nyctr opens nothing. Each request waits for you, with a note saying the rule would have opened it.',
+  on: 'On: Nyctr opens these by itself, within the limits written here.',
+};
+
+/** The access rule by kind of block: what may open by itself, within which limits, and what never does. */
 function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   const [rule, setRule] = useState<AccessRule>(rules.access);
   const [error, setError] = useState<string | null>(null);
@@ -49,49 +79,20 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   };
   const writes = rules.writes.access;
   const openers = rules.sources.filter((source) => source.changes.length > 0);
+  const ads = rule.ad_tracker;
+  const threats = rule.threat_feed;
+  /** A threat-feed block is never open longer than an advertising one, so its limit follows down. */
+  const saveAds = (change: Partial<AccessRule['ad_tracker']>) => {
+    const next = { ...ads, ...change };
+    const max_minutes = Math.min(threats.max_minutes, next.max_minutes);
+    return void save({ ...rule, ad_tracker: next, threat_feed: { ...threats, max_minutes } });
+  };
   return (
     <Panel
       title="Access rule"
       hint="When Nyctr may open a blocked address without waiting for you."
     >
       <div className="stack">
-        <p className="rule">
-          Open a request on its own when the score is
-          <Stepper
-            label="highest score"
-            min={0}
-            max={60}
-            step={5}
-            value={rule.max_score}
-            onChange={(max_score) => void save({ ...rule, max_score })}
-          />
-          or lower and a privacy list blocked it, for up to
-          <Stepper
-            label="minutes"
-            min={15}
-            max={240}
-            step={15}
-            value={rule.max_minutes}
-            onChange={(max_minutes) => void save({ ...rule, max_minutes })}
-          />
-          minutes, at most
-          <Stepper
-            label="openings per day"
-            min={1}
-            max={20}
-            value={rule.per_day}
-            onChange={(per_day) => void save({ ...rule, per_day })}
-          />
-          times a day per person.
-        </p>
-        <div className="bandbar" aria-hidden="true">
-          <i className="auto" style={{ width: `${rule.max_score}%` }} />
-          <i className="person" style={{ width: `${100 - rule.max_score}%` }} />
-        </div>
-        <div className="bar aside">
-          <span>0 to {rule.max_score}: Nyctr may open it</span>
-          <span>{rule.max_score + 1} to 100, or no score: a person decides</span>
-        </div>
         <div className="bar">
           <Switch
             label="Automatic access"
@@ -99,9 +100,101 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             onChange={(enabled) => void save({ ...rule, enabled })}
           />
           <span className="aside">
-            Security blocks, content rules, addresses you said no to before and anything Nyctr
-            cannot score always wait for a person.
+            With this off, every request waits for you, whatever is set below.
           </span>
+        </div>
+        <p className="rule">
+          Open at most
+          <Stepper
+            label="openings per day"
+            min={1}
+            max={20}
+            value={rule.per_day}
+            onChange={(per_day) => void save({ ...rule, per_day })}
+          />
+          requests a day for each person, and
+          <Stepper
+            label="openings per day for everyone"
+            min={1}
+            max={100}
+            value={rule.daily_total}
+            onChange={(daily_total) => void save({ ...rule, daily_total })}
+          />
+          a day for everyone together.
+        </p>
+        <h3>Can open by themselves</h3>
+        <section className="tier" aria-label="Advertising and tracker lists">
+          <div className="bar">
+            <b>Advertising and tracker lists</b>
+            <Seg
+              label="Advertising and tracker lists"
+              value={ads.mode}
+              options={MODES}
+              onChange={(mode) => saveAds({ mode })}
+            />
+          </div>
+          <p className="rule">
+            When a list of advert or tracker addresses is all that blocks it and the score is
+            <Stepper
+              label="highest score"
+              min={0}
+              max={60}
+              step={5}
+              value={ads.max_score}
+              onChange={(max_score) => saveAds({ max_score })}
+            />
+            or lower, open it for up to
+            <Stepper
+              label="minutes"
+              min={15}
+              max={240}
+              step={15}
+              value={ads.max_minutes}
+              onChange={(max_minutes) => saveAds({ max_minutes })}
+            />
+            minutes.
+          </p>
+          <div className="bandbar" aria-hidden="true">
+            <i className="auto" style={{ width: `${ads.max_score}%` }} />
+            <i className="person" style={{ width: `${100 - ads.max_score}%` }} />
+          </div>
+          <div className="bar aside">
+            <span>0 to {ads.max_score}: Nyctr may open it</span>
+            <span>{ads.max_score + 1} to 100, or no score: a person decides</span>
+          </div>
+          <p className="aside">
+            {MODE_MEANS[ads.mode]} An address you said no to before always waits for you.
+          </p>
+        </section>
+        <section className="tier" aria-label="Threat feeds">
+          <div className="bar">
+            <b>Threat feeds</b>
+            <span className="tag">Needs the risk analysis</span>
+          </div>
+          <p className="aside">
+            A feed of addresses reported as dangerous blocked it. This stays off for now: Nyctr will
+            open one of these only after it has analysed the address, and the risk analysis comes in
+            a later release. These are the conditions it will then also have to meet:
+          </p>
+          <ul className="aside">
+            <li>the name does not look machine-made or disguised</li>
+            <li>the address was registered at least {threats.min_registered_days} days ago</li>
+            <li>nobody said no to it before</li>
+            <li>it is opened for {threats.max_minutes} minutes at most</li>
+          </ul>
+        </section>
+        <h3>Always come to you</h3>
+        <div className="rows boxed">
+          {ALWAYS_YOU.map(([kind, why]) => (
+            <div className="row" key={kind}>
+              <i className="dot" />
+              <span>
+                <span className="t">{kind}</span>
+                <span className="d">{why}</span>
+              </span>
+              <span className="meta">Never automatic</span>
+            </div>
+          ))}
         </div>
         <InlineError message={error} />
         {writes === 'none' && (

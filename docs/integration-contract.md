@@ -25,7 +25,7 @@ Each module exposes `PROVIDER`, a `registry.Provider`:
 | `collect(integration_id, config, secret)` | Return a `Snapshot`. Read only |
 | `reads` | What collection reads, as `(id, label)`. Diagnostics report each one as verified, unavailable or unknown |
 | `provides` | The capabilities below |
-| `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell |
+| `classify(text)` | Optional. Explain one block reason: `(category, base score, sentence)`, or a score of `None` to say the source cannot tell. Add `(kind, origin)` to say what refused the address; see below |
 | `limitations`, `gaps`, `gap_notes` | What the source cannot support or cannot tell Nyctr, in plain words, shown with every connection test. `gaps` also travel in the catalog as `limits`, and the Briefing lists them under "Keep in mind" for each connected source. A source whose blocked lookups arrive without a device declares that under the gap id `upstream_identity`; Blocks quotes it when every stored lookup from the source is unattributed. `gap_notes` are also shown on the source's card after a collection that recorded their code. A note says what is missing and what follows from it, not why the read was not made: the core adds that sentence (refused, or an error at the source) from what happened |
 | `detail_gaps` | Optional. The codes among `gap_notes` that miss a detail, a setting or a side read and leave every list of items whole, apart from the kinds the same read names in `Snapshot.unread`. After a collection that recorded any other gap, Nyctr marks nothing of the source as missing, because the gap may be why an item was not listed. Leave a code out when in doubt. `tests/test_whole_lists.py` provokes every code at the adapter and fails when a declaration does not match what was read: add a case there with each new code |
 | `not_collected` | Optional. What a source of this kind never collects, each a few plain words ("DNS lookups that were allowed"). It travels in the catalog, and the Briefing lists it under "Not collected" for each connected source. A caution about evidence that is collected belongs in `gaps` |
@@ -127,6 +127,15 @@ provider's own reason text and `reason_codes`, `device_id` left `None`, and
 `classify` must be a pure function of its text: the core remembers its answer for each
 distinct set of reasons for as long as the process runs, and the registry does not change
 in a running process.
+
+`classify` may return two more values, `(category, base score, sentence, kind, origin)`:
+what refused the address and who wrote it, in the words of `nyctr/layers.py`. `kind` is
+`list` (a list of advertising or tracking addresses), `feed` (a feed of addresses reported
+as threats), `category`, `deny_entry`, `policy`, `region` or `signature`. `origin` is
+`administrator`, `vendor` or `third_party`. State them as facts about the source and only
+where the source itself says so: a list whose purpose it does not state has no kind. Leave
+either as `None` and the core keeps it as unknown, which a person decides. Never state
+whether a block is deliberate or may be opened: the core works that out from the two facts.
 
 ## What the adapter states and what Nyctr works out
 

@@ -25,30 +25,52 @@ READS = (
 )
 
 # NextDNS block reasons, matched against reason identifiers and names in order:
-# (pattern, category, base score, plain explanation). The core adds name-shape factors.
-_REASONS: tuple[tuple[re.Pattern[str], str, int, str], ...] = tuple(
-    (re.compile(pattern, re.I), category, score, text) for pattern, category, score, text in (
-        (r"threat|safe.?browsing|malware|phish|cryptojack|rebind|homograph|typosquat|\bdga\b|csam",
-         "security", 92, "A security feed lists this address as a threat"),
-        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently"),
-        (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites"),
-        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it"),
-        (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name"),
+# (pattern, category, base score, plain explanation, kind, origin). The core adds name-shape factors.
+# Kind and origin are facts about what refused the address (see `nyctr/layers.py`):
+# - a subscribed advertising or tracker list is a third party's list, and native tracking is NextDNS's own;
+# - NextDNS's own AI threat detection, named by its identifier or by the two names it gives that
+#   protection, is matched first: one of those names contains "threat intelligence", which on its own
+#   is a third party's feed, as are safe browsing and a name with malware or phish. Cryptojacking
+#   protection is the vendor's own feed too. A word boundary keeps the AI names from catching some
+#   other reason that only says "threat", which stays unstated;
+# - newly registered, dynamic DNS and parked addresses are each a class of address NextDNS draws up and an
+#   administrator chose to block, like a content category;
+# - a check NextDNS computes on the name itself (rebinding, look-alike names, typosquatting, generated
+#   names) is neither a list nor a feed, and the CSAM list is not a threat feed: no kind is stated for
+#   them, which the core keeps as unknown.
+_FEED, _CHECK, _CLASS = "A security feed lists this address as a threat", (None, "vendor"), ("category", "vendor")
+_REASONS: tuple[tuple[re.Pattern[str], str, int, str, str | None, str | None], ...] = tuple(
+    (re.compile(pattern, re.I), category, score, text, kind, origin)
+    for pattern, category, score, text, (kind, origin) in (
+        (r"\bai-threat-detection\b|\bai-driven threat detection\b|\bai driven threat intelligence\b",
+         "security", 92, _FEED, ("feed", "vendor")),
+        (r"cryptojack", "security", 92, _FEED, ("feed", "vendor")),
+        (r"threat.?intelligence|safe.?browsing|malware|phish", "security", 92, _FEED, ("feed", "third_party")),
+        (r"threat|rebind|homograph|typosquat|\bdga\b", "security", 92, _FEED, _CHECK),
+        (r"csam", "security", 92, _FEED, (None, "third_party")),
+        (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently", _CLASS),
+        (r"\bddns\b|dynamic.dns", "security", 58, "It uses a dynamic address service, common for short-lived sites",
+         _CLASS),
+        (r"parked|parking", "security", 52, "The address is parked and has no real site behind it", _CLASS),
+        (r"denylist|deny.list", "policy", 65, "An administrator blocked this address by name",
+         ("deny_entry", "administrator")),
         (r"parental|category|service:|safe.?search|bypass", "policy", 60,
-         "A content rule set by an administrator blocks this kind of site"),
-        (r"disguised", "privacy_list", 24, "It is a tracker hidden behind another site's name"),
-        (r"^native|native.tracking", "privacy_list", 14, "It is device telemetry blocked by a tracking list"),
+         "A content rule set by an administrator blocks this kind of site", ("category", "vendor")),
+        (r"disguised", "privacy_list", 24, "It is a tracker hidden behind another site's name",
+         ("list", "third_party")),
+        (r"^native|native.tracking", "privacy_list", 14, "It is device telemetry blocked by a tracking list",
+         ("list", "vendor")),
         (r"^blocklist:|blocklist|privacy list|ad.?block|tracker|tracking", "privacy_list", 16,
-         "A privacy and ad-blocking list covers it, not a security feed"),
+         "A privacy and ad-blocking list covers it, not a security feed", ("list", "third_party")),
     )
 )
 
 
-def classify(text: str) -> tuple[str, int, str] | None:
+def classify(text: str) -> tuple[str, int, str, str | None, str | None] | None:
     """Explain one NextDNS block reason. Unrecognised reasons return None and stay unknown."""
-    for pattern, category, score, label in _REASONS:
+    for pattern, category, score, label, kind, origin in _REASONS:
         if pattern.search(text):
-            return category, score, label
+            return category, score, label, kind, origin
     return None
 
 

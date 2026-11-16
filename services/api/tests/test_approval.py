@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
 from test_crossing import DOMAIN, Source, ask, claims, console, started
+from test_tiers import BOTH, postgres_database
 from test_unconfirmed import Failing, rows, trail
 from test_upkeep import Sources, opened, upkeep
 
@@ -153,6 +154,12 @@ def test_a_source_removed_while_an_opening_waits_is_refused_as_removed_and_leave
                 status, why = note(app, made)
                 assert status == "pending" and (
                     "was removed from Nyctr while" in why if by_rule else why == access.NOT_OPENED)
+                if by_rule == "turn":  # Removed while the rule waited for the person's turn: that exit records waits.
+                    with app.state.session_factory() as db:
+                        events = list(db.scalars(select(Audit).where(
+                            Audit.action == "rule.access_checked", Audit.target_id == made)))
+                        assert len(events) == 1 and events[0].details["outcome"] == "waits"
+                        assert events[0].details["why"] == why and "minutes" not in events[0].details
 
         asyncio.run(scenario())
         assert source.calls == [] and claims(app) == [] and gates(app) == [] and rows(app) == []
@@ -604,6 +611,91 @@ def test_a_turn_that_does_not_come_is_said_as_that_and_not_as_a_failure_of_the_s
         assert made["status"] == "pending" and made["risk_score"] is not None
         assert made["decision_note"] == "Nyctr was still opening your earlier requests, so a person decides this one."
         assert source.calls == [] and rows(app) == [] and gates(app) == [] and claims(app) == []
+        with app.state.session_factory() as db:
+            events = list(db.scalars(select(Audit).where(Audit.action == "rule.access_checked",
+                                                         Audit.target_id == made["id"])))
+            assert len(events) == 1 and events[0].details["outcome"] == "waits"
+            assert events[0].details["why"] == made["decision_note"] and "minutes" not in events[0].details
+
+
+def test_a_request_already_being_decided_stays_waiting_and_the_rule_records_that(tmp_path, monkeypatch):
+    """The request's claim is already held, so the rule records that this one waits and opens nothing."""
+    with started(tmp_path, rule=True) as (app, _client, member, _admin):
+        source = Source(monkeypatch)
+
+        def unavailable(db, request_id):
+            db.rollback()
+            return None
+
+        monkeypatch.setattr(access, "hold_review", unavailable)
+
+        async def scenario():
+            async with console(app, member) as sam:
+                return (await sam.post("/api/requests", json=ask("one"))).json()
+
+        made = asyncio.run(scenario())
+        assert made["status"] == "pending"
+        assert made["decision_note"] == "This request is already being decided, so a person decides."
+        assert source.calls == [] and rows(app) == []
+        with app.state.session_factory() as db:
+            events = list(db.scalars(select(Audit).where(Audit.action == "rule.access_checked",
+                                                         Audit.target_id == made["id"])))
+            assert len(events) == 1 and events[0].details["outcome"] == "waits"
+            assert events[0].details["why"] == made["decision_note"] and "minutes" not in events[0].details
+
+
+@BOTH
+def test_a_decision_taken_after_the_refresh_keeps_its_note(tmp_path, monkeypatch, database, request):
+    """The claim cannot be taken. A person decides after the rule has read the request as pending.
+    That decision and its note stay, and the rule records no waits."""
+    url = None if database == "sqlite" else postgres_database(request)
+    if database == "postgresql" and not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+    armed, real = {"on": False}, Session.refresh
+
+    def refresh(self, instance, *args, **kwargs):
+        real(self, instance, *args, **kwargs)
+        if not armed["on"] or not isinstance(instance, AccessRequest):
+            return
+        armed["on"] = False
+        previous = self.expire_on_commit
+        self.expire_on_commit = False
+        try:
+            self.commit()  # The read is over, so the next write sees the decision below.
+        finally:
+            self.expire_on_commit = previous
+        with app.state.session_factory() as other:
+            changed = other.execute(update(AccessRequest).where(AccessRequest.id == instance.id,
+                                                                AccessRequest.status == "pending")
+                                    .values(status="denied", decision_note="Not this one.", decided_by="someone"))
+            assert changed.rowcount == 1
+            other.commit()
+
+    with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, _client, member, _admin):
+        source = Source(monkeypatch)
+        monkeypatch.setattr(Session, "refresh", refresh)
+
+        def unavailable(db, request_id):
+            db.rollback()
+            armed["on"] = True
+            return None
+
+        monkeypatch.setattr(access, "hold_review", unavailable)
+
+        async def scenario():
+            async with console(app, member) as sam:
+                return (await sam.post("/api/requests", json=ask("one"))).json()
+
+        try:
+            made = asyncio.run(scenario())
+            assert (made["status"], made["decision_note"]) == ("denied", "Not this one.")
+            assert source.calls == []
+            with app.state.session_factory() as db:
+                events = list(db.scalars(select(Audit).where(Audit.action == "rule.access_checked",
+                                                             Audit.target_id == made["id"])))
+                assert events == []
+        finally:
+            app.state.engine.dispose()
 
 
 @pytest.mark.parametrize("failure, sent", [("no connection", False), ("refused before sending", False),

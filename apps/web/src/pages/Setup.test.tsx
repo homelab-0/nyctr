@@ -9,7 +9,13 @@ import type { AddressSeen, CollectionSchedule, Rules } from '../types';
 import Setup, { addressText } from './Setup';
 
 const rules: Rules = {
-  access: { enabled: false, max_score: 25, max_minutes: 60, per_day: 4 },
+  access: {
+    enabled: true,
+    per_day: 4,
+    daily_total: 10,
+    ad_tracker: { mode: 'on', max_score: 25, max_minutes: 30 },
+    threat_feed: { mode: 'off', max_minutes: 30, min_registered_days: 180 },
+  },
   guest: { enabled: false, hits: 3, minutes: 5 },
   writes: { access: 'none', guests: 'none' },
   sources: [],
@@ -92,6 +98,83 @@ afterEach(() => {
   cleanup();
   setCsrfToken('');
   vi.unstubAllGlobals();
+});
+
+describe('access rule in Setup', () => {
+  /** Opens the rule tab over the fabricated rule; a save replaces it, as the server does. */
+  function openRule() {
+    let current = rules;
+    const calls = mockApi({
+      'GET /rules': () => current,
+      'PUT /rules/access': (body: unknown) => {
+        current = { ...current, access: body as Rules['access'] };
+        return body;
+      },
+    });
+    render(<Setup params={new URLSearchParams('tab=rule')} />);
+    const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+    return { saved, user: userEvent.setup() };
+  }
+  const tier = async (name: string) => within(await screen.findByRole('region', { name }));
+
+  it('says which kinds of block can open by themselves and which always come to the administrator', async () => {
+    openRule();
+    const ads = await tier('Advertising and tracker lists');
+    const pressed = ads.getAllByRole('button', { pressed: true });
+    expect(pressed.map((button) => button.textContent)).toEqual(['On']);
+    expect(ads.getByText(/On: Nyctr opens these by itself/)).toBeDefined();
+    // The threat tier has no switch: it shows its conditions and says what it is waiting for.
+    const threats = await tier('Threat feeds');
+    expect(threats.getByText('Needs the risk analysis')).toBeDefined();
+    expect(threats.getByText(/the risk analysis comes in a later release/)).toBeDefined();
+    expect(threats.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'the name does not look machine-made or disguised',
+      'the address was registered at least 180 days ago',
+      'nobody said no to it before',
+      'it is opened for 30 minutes at most',
+    ]);
+    expect(threats.queryAllByRole('button')).toEqual([]);
+    // The kinds that never open are listed with why, and nothing there can be pressed.
+    const never = document.querySelector<HTMLElement>('.rows.boxed')!;
+    expect([...never.querySelectorAll('.t')].map((kind) => kind.textContent)).toEqual([
+      'Kinds of site you chose to block',
+      'Addresses on a deny list',
+      'Firewall rules',
+      'Intrusion prevention',
+      'Anything Nyctr does not recognise',
+    ]);
+    expect(never.querySelectorAll('.d')).toHaveLength(5);
+    expect(within(never).getByText(/newly registered, dynamic or parked address/)).toBeDefined();
+    expect(within(never).getAllByText('Never automatic')).toHaveLength(5);
+    expect(never.querySelectorAll('button, input, select')).toHaveLength(0);
+  });
+
+  it('saves record only for advertising lists and says that nothing is opened', async () => {
+    const { saved, user } = openRule();
+    const ads = await tier('Advertising and tracker lists');
+    await user.click(ads.getByRole('button', { name: 'Record only' }));
+    await waitFor(() =>
+      expect(saved()).toEqual([
+        { ...rules.access, ad_tracker: { mode: 'shadow', max_score: 25, max_minutes: 30 } },
+      ]),
+    );
+    expect(await ads.findByText(/Record only: Nyctr opens nothing/)).toBeDefined();
+  });
+
+  it('lowers the threat limit with the advertising minutes and saves the daily total for everyone', async () => {
+    const { saved, user } = openRule();
+    const ads = await tier('Advertising and tracker lists');
+    await user.click(ads.getByRole('button', { name: 'Lower minutes' }));
+    const shorter = {
+      ...rules.access,
+      ad_tracker: { mode: 'on', max_score: 25, max_minutes: 15 },
+      threat_feed: { mode: 'off', max_minutes: 15, min_registered_days: 180 },
+    };
+    await waitFor(() => expect(saved()).toEqual([shorter]));
+    expect(await screen.findByText('it is opened for 15 minutes at most')).toBeDefined();
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    await waitFor(() => expect(saved()[1]).toEqual({ ...shorter, daily_total: 9 }));
+  });
 });
 
 describe('collection schedule in Setup', () => {
