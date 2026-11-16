@@ -40,6 +40,8 @@ const WORDS: Record<string, string> = {
   'presence.setting_changed': 'Changed whether devices are recognised at sign-in',
   'model.changed': 'Changed the model connection',
   'model.tested': 'Tested the model',
+  'notices.changed': 'Changed where notices are sent',
+  'notices.tested': 'Sent a test notice',
   'suggestion.dismissed': 'Dismissed a suggestion',
   'graph.queried': 'Ran a graph query',
   'assistant.asked': 'Asked the assistant',
