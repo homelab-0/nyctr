@@ -4,16 +4,18 @@ Every case runs on a passed-in clock against stand-in sources whose reads pause 
 """
 
 import asyncio
+import threading
+import time
 from datetime import timedelta
 
 import httpx
 import pytest
 from conftest import live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from nyctr import access, schedule, worker
-from nyctr.collection import STOPPED
+from nyctr.collection import NO_SIGN, STOPPED, db_ago
 from nyctr.integrations import IntegrationError, Snapshot, core
 from nyctr.models import Audit, Integration, Lease, Setting, utcnow
 
@@ -212,6 +214,56 @@ def test_a_retry_that_comes_due_during_a_pass_is_run_once_by_that_pass(tmp_path,
             assert [(a.action.split(".")[1], a.details["attempt"]) for a in audits] == [
                 ("collection_failed", 0), ("collected", 1)]
             assert schedule.pending_retries(db) == []
+
+    with TestClient(app):
+        seed_live_member(app)
+        asyncio.run(scenario())
+
+
+def test_the_server_tick_frees_a_quiet_lease_off_the_loop(tmp_path, monkeypatch):
+    """Freeing a quiet lease on the server's tick does not run on the loop, so the server can still answer."""
+    app = live_app(tmp_path)
+    monkeypatch.setattr(worker, "TICK_SECONDS", 0.01)
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_DNS", "dns-secret")
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", "fabricated-key")
+
+    async def collect(*_args, **_kwargs):
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", collect)
+    real = worker.release_abandoned
+    seen = {}
+
+    def release(db, **kwargs):
+        seen["thread"] = threading.current_thread()
+        seen["loop"].call_soon_threadsafe(seen["event"].set)
+        time.sleep(0.3)
+        seen["loop_ran"] = seen["event"].is_set()
+        return real(db, **kwargs)
+
+    async def scenario():
+        seen["loop"] = asyncio.get_running_loop()
+        seen["event"] = asyncio.Event()
+        seen["loop_thread"] = threading.current_thread()
+        monkeypatch.setattr(worker, "release_abandoned", release)
+        with app.state.session_factory() as db:
+            past = db_ago(db.get_bind(), 120)
+            db.execute(update(Integration).where(Integration.id == "dns").values(
+                status="syncing", sync_holder="previous-start", sync_started_at=past, sync_heartbeat=past))
+            db.commit()
+        task = asyncio.create_task(worker.run(app))
+        for _ in range(40):
+            if "loop_ran" in seen:
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert seen.get("thread") is not seen["loop_thread"]
+        assert seen.get("loop_ran") is True
+        with app.state.session_factory() as db:
+            recorded = db.scalar(select(Audit).where(Audit.action == "integration.collection_interrupted"))
+            assert recorded is not None and recorded.details["why"] == NO_SIGN
 
     with TestClient(app):
         seed_live_member(app)

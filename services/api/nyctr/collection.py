@@ -15,7 +15,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, literal_column, or_, select, update
+from sqlalchemy import and_, delete, func, literal_column, or_, select, text, update
+from sqlalchemy.exc import OperationalError
 
 from . import retention
 from .models import (
@@ -47,6 +48,9 @@ RESUME_OVERLAP = timedelta(minutes=10)
 # well above one missed write, so a loop that is busy does not by itself let a second copy collect.
 HEARTBEAT_EVERY = 5
 HEARTBEAT_BOUND = timedelta(seconds=60)
+# Milliseconds a heartbeat or a release waits when SQLite's one writer is busy. The next beat or tick tries
+# again. A row someone else holds is a collection that is still running, so waiting it out would stall the rest.
+SQLITE_LOCK_WAIT_MS = 50
 LEASE_MINUTES = 5
 # What a card can say. Restart is only for a start that can see a different holder had the lease.
 CUT_SHORT = "The last collection was cut short by a restart."
@@ -504,32 +508,58 @@ def settle_abandoned(db, row, cause: str) -> bool:
     return True
 
 
+def _busy_timeout(db, milliseconds: int) -> None:
+    """How long this SQLite connection waits when the one writer is busy. PostgreSQL has no such wait."""
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text(f"PRAGMA busy_timeout = {int(milliseconds)}"))
+
+
+def _lock_abandoned(db, integration_id: str) -> bool:
+    """Lock this abandoned row without waiting. False when it is no longer abandoned, or someone else holds it.
+
+    A held row is a collection that is still in its store, so it is alive whatever its heartbeat says.
+    PostgreSQL skips the row. SQLite has one writer, so a short wait gives up and the next tick tries again.
+    The caller sets that short wait for the whole release, including the read of which rows are due.
+    """
+    bind = db.get_bind()
+    where = (Integration.id == integration_id, Integration.status == "syncing", abandoned_sql(bind))
+    if bind.dialect.name == "postgresql":
+        return db.scalar(select(Integration.id).where(*where).with_for_update(skip_locked=True)) is not None
+    locked = db.execute(update(Integration).where(*where).values(name=Integration.name).execution_options(
+        synchronize_session="fetch"))
+    return locked.rowcount == 1
+
+
 def release_abandoned(db, *, restart_of: str | None = None, only: str | None = None) -> list[str]:
     """Free every syncing lease whose holder is gone, in id order, and record each once.
 
-    The caller commits. A second caller waits on the same row and then finds it already settled,
-    so the collection is recorded once. `only` limits that to one source, which a collection does
+    The caller commits. A row this call cannot lock at once is left for the next tick: someone else is
+    still using it, or SQLite's writer is busy. `only` limits that to one source, which a collection does
     in its own transaction before it claims. `restart_of` is this start's holder id, and only the
     start-up call passes it. Two copies still cannot collect one source at once: a live holder's
     heartbeat is newer than the bound, so it does not match here, and the claim that follows is one
     conditional update of the row.
     """
-    where = [Integration.status == "syncing", abandoned_sql(db.get_bind())]
-    if only is not None:
-        where.append(Integration.id == only)
-    ids = list(db.scalars(select(Integration.id).where(*where).order_by(Integration.id)))
-    freed = []
-    for integration_id in ids:
-        locked = db.execute(update(Integration).where(
-            Integration.id == integration_id, Integration.status == "syncing", abandoned_sql(db.get_bind()),
-        ).values(name=Integration.name).execution_options(synchronize_session="fetch"))
-        if locked.rowcount != 1:
-            continue
-        row = db.get(Integration, integration_id)
-        db.refresh(row)
-        if settle_abandoned(db, row, _cause(row, restart_of)):
-            freed.append(integration_id)
-    return freed
+    _busy_timeout(db, SQLITE_LOCK_WAIT_MS)
+    try:
+        where = [Integration.status == "syncing", abandoned_sql(db.get_bind())]
+        if only is not None:
+            where.append(Integration.id == only)
+        ids = list(db.scalars(select(Integration.id).where(*where).order_by(Integration.id)))
+        freed = []
+        for integration_id in ids:
+            if not _lock_abandoned(db, integration_id):
+                continue
+            row = db.get(Integration, integration_id)
+            db.refresh(row)
+            if settle_abandoned(db, row, _cause(row, restart_of)):
+                freed.append(integration_id)
+        return freed
+    except OperationalError:
+        db.rollback()
+        return []
+    finally:
+        _busy_timeout(db, 5000)
 
 
 def _record_stopped(factory, integration_id: str, started, holder: str) -> None:
@@ -556,13 +586,50 @@ def _record_stopped(factory, integration_id: str, started, holder: str) -> None:
         db.commit()
 
 
+def _beat_one(factory, holder, integration_id: str) -> None:
+    """Stamp one lease from the database clock, and do not wait if its row is already held.
+
+    Each source commits on its own, so a store that holds one row cannot keep the others from being stamped.
+    A missed row is tried again on the next beat. The store that holds it refreshes that lease itself.
+    """
+    with factory() as db:
+        bind = db.get_bind()
+        where = (
+            Integration.id == integration_id, Integration.status == "syncing", Integration.sync_holder == holder,
+        )
+        _busy_timeout(db, SQLITE_LOCK_WAIT_MS)
+        try:
+            if bind.dialect.name == "postgresql":
+                if db.scalar(select(Integration.id).where(*where).with_for_update(skip_locked=True)) is None:
+                    db.rollback()
+                    return
+            db.execute(update(Integration).where(*where).values(
+                sync_heartbeat=db_now(bind)).execution_options(synchronize_session=False))
+            db.commit()
+        except OperationalError:
+            db.rollback()
+        finally:
+            _busy_timeout(db, 5000)
+
+
 def _beat_once(factory, holder) -> None:
     """Stamp every lease this start holds, from the database clock. A row held by anyone else is left alone."""
     with factory() as db:
-        db.execute(update(Integration).where(
-            Integration.status == "syncing", Integration.sync_holder == holder,
-        ).values(sync_heartbeat=db_now(db.get_bind())).execution_options(synchronize_session=False))
-        db.commit()
+        _busy_timeout(db, SQLITE_LOCK_WAIT_MS)
+        try:
+            ids = list(db.scalars(select(Integration.id).where(
+                Integration.status == "syncing", Integration.sync_holder == holder,
+            ).order_by(Integration.id)))
+        except OperationalError:
+            db.rollback()
+            return
+        finally:
+            _busy_timeout(db, 5000)
+    for integration_id in ids:
+        try:
+            _beat_one(factory, holder, integration_id)
+        except Exception as error:  # noqa: BLE001 - one source must not stop the others being stamped
+            log.warning("Collection heartbeat failed: %s", type(error).__name__)
 
 
 class Heartbeat:

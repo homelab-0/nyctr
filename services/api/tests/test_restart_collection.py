@@ -81,8 +81,11 @@ def saw_lock(engine) -> bool:
 
 
 @contextmanager
-def hold_the_lock(app, match, second):
-    """Run `second` while `match` sees the writer's statement, and keep the proof that it was still waiting."""
+def hold_the_lock(app, match, second, *, waits=True):
+    """Run `second` while `match` sees the writer's statement, and record whether that call was still waiting.
+
+    `waits` is for a call that blocks until this transaction ends. A call that skips a held row finishes instead.
+    """
     kind = app.state.engine.dialect.name
     seen = {"spawned": False, "waiting": False, "locked": False, "raised": [], "sql": []}
 
@@ -100,11 +103,11 @@ def hold_the_lock(app, match, second):
         other = threading.Thread(target=run, daemon=True)
         seen["started"].append(other)
         other.start()
-        if kind == "postgresql":
+        if kind == "postgresql" and waits:
             seen["locked"] = saw_lock(app.state.engine)
             seen["waiting"] = other.is_alive()
         else:
-            other.join(WAIT["sqlite"])
+            other.join(WAIT["sqlite"] if waits else 2)
             seen["waiting"] = other.is_alive()
 
     event.listen(app.state.engine, "after_cursor_execute", after)
@@ -115,9 +118,13 @@ def hold_the_lock(app, match, second):
     finally:
         event.remove(app.state.engine, "after_cursor_execute", after)
     assert seen["spawned"], seen["sql"]
-    assert seen["waiting"] and seen["raised"] == [], seen["raised"]
-    if kind == "postgresql":
-        assert seen["locked"]
+    assert seen["raised"] == [], seen["raised"]
+    if waits:
+        assert seen["waiting"], seen
+        if kind == "postgresql":
+            assert seen["locked"]
+    else:
+        assert not seen["waiting"], seen
 
 
 def stamp(app, ids, holder, heartbeat_age, started_age):
@@ -143,6 +150,76 @@ def whys(app):
 async def fake_collect(*_args, **_kwargs):
     """A collection that stores nothing and never calls a source."""
     return Snapshot()
+
+
+def _finished_within(work, seconds):
+    """Run `work` and return its result. Fail when it is still going after `seconds`."""
+    box = {}
+
+    def run():
+        try:
+            box["result"] = work()
+        except Exception as error:  # noqa: BLE001 - the assertion below reports it
+            box["error"] = error
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the call waited on a row another transaction holds"
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def test_a_busy_writer_does_not_stall_the_heartbeat(tmp_path, monkeypatch, request):
+    """A heartbeat gives up quickly when SQLite's writer is busy, and tries that source again on the next beat."""
+    app = prepare(tmp_path, monkeypatch, request, "sqlite")
+    holder = app.state.engine.nyctr_holder
+    stamp(app, ["dns", "unifi"], holder, 0, 0)
+    connection = app.state.engine.connect()
+    transaction = connection.begin()
+    try:
+        connection.execute(update(Integration).where(Integration.id == "dns").values(name=Integration.name))
+        started = time.monotonic()
+        _finished_within(lambda: _beat_once(app.state.session_factory, holder), 1)
+        assert time.monotonic() - started < 1
+    finally:
+        transaction.rollback()
+        connection.close()
+        app.state.engine.dispose()
+
+
+@pytest.mark.postgres
+def test_a_store_holding_one_source_does_not_let_the_other_go_quiet(tmp_path, monkeypatch, request):
+    """A store that holds source A past the bound does not stop B's heartbeat, so B is never released."""
+    monkeypatch.setattr(collection, "HEARTBEAT_BOUND", timedelta(seconds=1))
+    app = prepare(tmp_path, monkeypatch, request, "postgresql")
+    holder = app.state.engine.nyctr_holder
+    stamp(app, ["dns", "unifi"], holder, 5, 0)
+    with app.state.session_factory() as db:
+        before = {row.id: utc(row.sync_heartbeat) for row in db.scalars(select(Integration))}
+    connection = app.state.engine.connect()
+    transaction = connection.begin()
+    try:
+        connection.execute(select(Integration.id).where(Integration.id == "dns").with_for_update())
+        _finished_within(lambda: _beat_once(app.state.session_factory, holder), 2)
+        with app.state.session_factory() as db:
+            dns, unifi = db.get(Integration, "dns"), db.get(Integration, "unifi")
+            assert utc(dns.sync_heartbeat) == before["dns"]
+            assert utc(unifi.sync_heartbeat) > before["unifi"]
+
+        def release():
+            with app.state.session_factory() as db:
+                return release_abandoned(db)
+
+        assert _finished_within(release, 2) == []
+        with app.state.session_factory() as db:
+            assert db.get(Integration, "dns").status == "syncing"
+            assert db.get(Integration, "unifi").status == "syncing"
+    finally:
+        transaction.rollback()
+        connection.close()
+        app.state.engine.dispose()
 
 
 def test_the_heartbeat_bound_is_sixty_seconds():
@@ -261,9 +338,9 @@ def test_the_beat_refreshes_only_this_start(tmp_path, monkeypatch, request, engi
 
 @BOTH
 @pytest.mark.parametrize("at", (1, 2, 3))
-def test_a_second_release_waits_at_each_write_and_records_the_collection_once(
+def test_a_second_release_does_not_wait_on_a_held_row_and_records_the_collection_once(
         tmp_path, monkeypatch, request, engine, at):
-    """Whichever of the three writes the first release is in, the other waits, and one record is stored."""
+    """Whichever write the first release is in, the other does not wait, and the collection is recorded once."""
     app = prepare(tmp_path, monkeypatch, request, engine)
     writes = {"n": 0}
 
@@ -281,9 +358,9 @@ def test_a_second_release_waits_at_each_write_and_records_the_collection_once(
 
     try:
         stamp(app, ["dns", "unifi"], "previous-start", 61, 0)
-        with hold_the_lock(app, is_the_write, second):
+        with hold_the_lock(app, is_the_write, second, waits=False):
             with app.state.session_factory() as db:
-                assert release_abandoned(db) == ["dns", "unifi"]
+                release_abandoned(db)
                 db.commit()
         assert audits(app) == 2 and set(whys(app)) == {NO_SIGN}
         with app.state.session_factory() as db:

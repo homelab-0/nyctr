@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from test_collection import live_client, setup_integration
 
 from nyctr.collection import NO_SIGN, db_ago, holder_id
+from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import IntegrationError, Snapshot, core
 from nyctr.models import (
     AccessRequest,
@@ -544,6 +545,37 @@ def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch,
         assert integration.sync_started_at is None
     assert client.get("/api/integrations").json() == prior_health
     assert len(calls) == 2
+
+
+def test_diagnostics_restores_health_a_collection_finished_with(saved, monkeypatch):
+    """A collection that finishes after the probe has read the source, and before the probe takes its lease, is what the probe puts back."""
+    client, headers, integration_id = saved
+    sentence = "Collection failed. Check that the source can be reached and how it is set up."
+    with client.app.state.session_factory() as db:
+        row = db.get(Integration, integration_id)
+        row.status, row.last_error, row.last_sync = "connected", None, utcnow()
+        db.commit()
+
+    def finish_the_collection(source):
+        """Another copy stores a failed collection in the gap before this probe takes the lease."""
+        with client.app.state.session_factory() as db:
+            row = db.get(Integration, integration_id)
+            row.status, row.last_error = "error", sentence
+            db.commit()
+        return holder_id(source)
+
+    async def diagnose(provider, integration_id, config, secret_ref):
+        return DiagnosticReport(integration_id=integration_id, provider=provider, checked_at=utcnow(),
+                                duration_ms=1, outcome="failed", summary="Fabricated.", checks=[],
+                                capabilities=[], evidence_gaps=[], snapshot_counts=None)
+
+    monkeypatch.setattr("nyctr.main.holder_id", finish_the_collection)
+    monkeypatch.setattr("nyctr.main.diagnose_integration", diagnose)
+    response = client.post(f"/api/integrations/{integration_id}/diagnostics", headers=headers)
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as db:
+        row = db.get(Integration, integration_id)
+        assert (row.status, row.last_error, row.sync_holder) == ("error", sentence, None)
 
 
 def test_diagnostics_records_an_abandoned_collection(saved, monkeypatch):

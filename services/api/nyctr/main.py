@@ -598,6 +598,7 @@ def create_app(settings: Settings | None = None):
         previous_status = integration.status
         previous_started_at = integration.sync_started_at
         previous_error = integration.last_error
+        settled = False
         if previous_status == "syncing":
             # A live lease is refused. An abandoned one is recorded, the same way a collection
             # would record it, and the probe then restores the health from before that lease.
@@ -606,9 +607,26 @@ def create_app(settings: Settings | None = None):
                 db.rollback()
                 raise HTTPException(409, "A collection or diagnostic is already running")
             previous_status, previous_started_at = rebuilt, None
+            settled = True
             db.commit()
             integration = db.get(Integration, integration_id)
         holder = holder_id(factory)
+        # Read the health under the lock that claims the lease. The request may already hold a copy
+        # from before a collection finished, and that copy is not the health this probe puts back.
+        held = db.scalar(select(Integration).where(
+            Integration.id == integration_id, lease_free_sql(db.get_bind()),
+        ).with_for_update().execution_options(populate_existing=True))
+        if held is None:
+            db.rollback()
+            raise HTTPException(409, "A collection or diagnostic is already running")
+        # Settling an abandoned lease stores "silent" for the moment. The health from before that lease
+        # stays, unless a collection has since written a newer one.
+        if not settled or held.status != "silent":
+            previous_status = held.status
+            previous_started_at = held.sync_started_at
+            previous_error = held.last_error
+            if previous_status == "syncing":
+                previous_status, previous_started_at = _settled_status(db, held), None
         locked = db.execute(update(Integration).where(
             Integration.id == integration_id, lease_free_sql(db.get_bind()),
         ).values(**claim_values(holder, db.get_bind())).execution_options(synchronize_session="fetch"))
