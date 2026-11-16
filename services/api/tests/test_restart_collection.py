@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, event, func, select, update
 from test_collection_store import POSTGRES
 from test_presence import WAIT, on, others_finish
 
+from nyctr import collection
 from nyctr.collection import (
     CUT_SHORT,
     HEARTBEAT_BOUND,
@@ -461,6 +462,9 @@ def test_a_cancelled_collection_is_recorded_as_stopped(tmp_path, monkeypatch, re
         else:
             raise AssertionError("the collection never took the lease")
         task.cancel()
+        # The stand-in blocks in a thread. This run joins that thread on the way out,
+        # so open the wait here and the shutdown does not sit out the whole wait.
+        gate.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
@@ -516,7 +520,8 @@ def beating_past_the_bound(app, source_id) -> bool:
             return False
         if utc(row.sync_heartbeat) <= utc(row.sync_started_at):
             return False
-        bound = int(HEARTBEAT_BOUND.total_seconds())
+        # Read at call time, so a test can shorten the bound without changing the production value.
+        bound = int(collection.HEARTBEAT_BOUND.total_seconds())
         return db.scalar(select(Integration.id).where(
             Integration.id == source_id,
             Integration.sync_started_at <= db_ago(db.get_bind(), bound),
@@ -528,9 +533,13 @@ def test_the_running_app_writes_the_heartbeat_while_a_collection_stalls(tmp_path
     """A real start keeps the lease while a collection blocks the server loop for longer than the bound.
 
     The stand-in never yields, so a heartbeat running on that loop cannot write. Dropping the heartbeat
-    thread leaves the lease free once the bound passes, and this fails. The stand-in stores nothing of
-    its own and calls no source.
+    thread leaves the lease free once the bound passes, and this fails. The bound and the interval are
+    shortened here; the production values stay 60 seconds and 5 seconds. The stand-in stores nothing
+    of its own and calls no source.
     """
+    # Long enough that the first beat (one interval in) has happened, short enough not to sit out a minute.
+    monkeypatch.setattr(collection, "HEARTBEAT_BOUND", timedelta(seconds=3))
+    monkeypatch.setattr(collection, "HEARTBEAT_EVERY", 0.5)
     monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_DNS", "fabricated-key")
     monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", "fabricated-key")
     held, started = threading.Event(), threading.Event()
@@ -556,7 +565,7 @@ def test_the_running_app_writes_the_heartbeat_while_a_collection_stalls(tmp_path
             poster.start()
             try:
                 assert started.wait(10), "the collection did not start"
-                deadline = time.monotonic() + HEARTBEAT_BOUND.total_seconds() + 25
+                deadline = time.monotonic() + collection.HEARTBEAT_BOUND.total_seconds() + 6
                 while time.monotonic() < deadline and not beating_past_the_bound(app, "dns"):
                     threading.Event().wait(0.5)
                 assert beating_past_the_bound(app, "dns"), "the heartbeat did not move before the bound"
