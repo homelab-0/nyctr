@@ -131,3 +131,42 @@ describe('a decided request', () => {
     });
   });
 });
+
+describe('a request that is being checked', () => {
+  it('says the check is still running and shows the stored analysis to the administrator', async () => {
+    const row = {
+      id: 'r1',
+      block_id: 'block',
+      domain: 'shop.example',
+      device_name: 'Laptop',
+      requester_id: 'member',
+      reason: 'Need the page',
+      duration_minutes: 30,
+      status: 'analysing',
+      created_at: '2026-11-16T10:00:00Z',
+      risk_score: null,
+      analysis: {
+        id: 'a1',
+        verdict: 'not_justified',
+        risk: 'low',
+        uncertainty: 'The registry date is the only age on record.',
+        model_state: 'ok',
+        facts: { facts: [{ id: 'f1', kind: 'registration', state: 'known' }] },
+        reasons: [{ fact: 'f1', text: 'The block does not look justified.' }],
+      },
+    } as AccessRequest;
+    mockApi({
+      'GET /requests': [row],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    expect(await screen.findByText('Nyctr is still checking this request.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Check of this address' })).toBeTruthy();
+    expect(screen.getByText('not_justified')).toBeTruthy();
+    expect(screen.getByText('low')).toBeTruthy();
+    expect(screen.getByText('registration: known')).toBeTruthy();
+    expect(screen.getByText('The block does not look justified.')).toBeTruthy();
+  });
+});

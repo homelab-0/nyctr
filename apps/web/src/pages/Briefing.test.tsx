@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
@@ -105,6 +105,41 @@ const need = (
   title: `${id} source ${title}`,
   detail,
   at: null,
+});
+
+describe('an opening the rule made', () => {
+  it('shows the check and ends the opening with one press', async () => {
+    const calls = mockApi({
+      'GET /overview': overview,
+      'GET /leases': [],
+      'GET /integrations': [source('fine', 'connected')],
+      'GET /collection': scheduleOff(),
+      'POST /leases/lease-1/end': {},
+    });
+    render(
+      <Briefing
+        attention={[
+          {
+            kind: 'lease',
+            id: 'lease-1',
+            action: 'end',
+            severity: 'low',
+            title: 'shop.example was opened by the access rule',
+            detail: 'Nyctr checked this site: the risk looks low.',
+            at: null,
+          },
+        ]}
+        loading={false}
+      />,
+    );
+    expect(await screen.findByText('Nyctr checked this site: the risk looks low.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'End' }));
+    await waitFor(() =>
+      expect(
+        calls.some((call) => call.method === 'POST' && call.path === '/leases/lease-1/end'),
+      ).toBe(true),
+    );
+  });
 });
 
 describe('briefing: sources that need a look', () => {

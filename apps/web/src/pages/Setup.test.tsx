@@ -140,7 +140,9 @@ describe('access rule in Setup', () => {
     expect(ads.getByText(/A check can only stop an opening/)).toBeDefined();
     const threats = await tier('Threat feeds');
     expect(threats.getByRole('button', { name: 'Off', pressed: true })).toBeDefined();
-    expect(threats.getByText(/only when the check says the block does not look justified/)).toBeDefined();
+    expect(
+      threats.getByText(/only when the check says the block does not look justified/),
+    ).toBeDefined();
     expect(threats.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
       'the name does not look machine-made or disguised',
       'the address was registered at least 180 days ago',
