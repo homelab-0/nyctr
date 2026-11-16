@@ -63,7 +63,9 @@ describe('useApi', () => {
     );
     const { result } = renderHook(() => useApi<{ name: string }>('/a'));
     await waitFor(() => expect(result.current.data).toEqual({ name: 'a' }));
-    act(() => result.current.reload());
+    act(() => {
+      void result.current.reload();
+    });
     expect(result.current.data).toEqual({ name: 'a' });
     expect(result.current.loading).toBe(false);
   });

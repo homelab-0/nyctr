@@ -996,11 +996,22 @@ async function advance(ms: number) {
   });
 }
 function hide(hidden: boolean) {
-  Object.defineProperty(document, 'visibilityState', {
-    configurable: true,
-    get: () => (hidden ? 'hidden' : 'visible'),
+  act(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
   });
-  document.dispatchEvent(new Event('visibilitychange'));
+}
+/** The abort signal of each read, in the order the page started them. */
+function signals(path: string) {
+  const mocked = globalThis.fetch as unknown as {
+    mock: { calls: [unknown, RequestInit?][] };
+  };
+  return mocked.mock.calls
+    .filter((call) => String(call[0]).replace(/^\/api/, '') === path)
+    .map((call) => call[1]?.signal as AbortSignal);
 }
 function onlyOwn(calls: Calls) {
   expect(calls.every((call) => OWN.has(call.path))).toBe(true);
@@ -1121,7 +1132,7 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/blocks')).toBe(blocks);
   });
 
-  it('reads nothing while the tab is hidden, and resumes when it is shown', async () => {
+  it('reads nothing while the tab is hidden, and reads once as soon as it is shown', async () => {
     clock();
     const { calls } = open(
       { ...quiet, 'GET /requests': [request(pending)], 'GET /leases': [] },
@@ -1134,20 +1145,43 @@ describe('an answer while the member page stays open', () => {
     await advance(10_000);
     expect(reads(calls, '/requests')).toBe(before);
     hide(false);
+    await paint();
+    expect(reads(calls, '/requests')).toBe(before + 1);
     await advance(4_999);
-    expect(reads(calls, '/requests')).toBe(before);
-    await advance(1);
-    expect(reads(calls, '/requests')).toBe(before + 1);
-    // Time hidden still counts. Once two minutes have passed, the next read waits 30 seconds.
-    hide(true);
-    await advance(120_000);
-    expect(reads(calls, '/requests')).toBe(before + 1);
-    hide(false);
-    await advance(29_999);
     expect(reads(calls, '/requests')).toBe(before + 1);
     await advance(1);
     expect(reads(calls, '/requests')).toBe(before + 2);
-    expect(reads(calls, '/leases')).toBe(before + 2);
+    // Time hidden still counts. Once two minutes have passed, showing the tab reads at once,
+    // and the check after that waits 30 seconds.
+    hide(true);
+    await advance(120_000);
+    expect(reads(calls, '/requests')).toBe(before + 2);
+    hide(false);
+    await paint();
+    expect(reads(calls, '/requests')).toBe(before + 3);
+    await advance(29_999);
+    expect(reads(calls, '/requests')).toBe(before + 3);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(before + 4);
+    expect(reads(calls, '/leases')).toBe(before + 4);
+  });
+
+  it('does not postpone the next check when the tab is only hidden for a moment', async () => {
+    clock();
+    const { calls } = open(
+      { ...quiet, 'GET /requests': [request(pending)], 'GET /leases': [] },
+      '/portal?request=r1',
+    );
+    await paint();
+    const before = reads(calls, '/requests');
+    await advance(1_000);
+    hide(true);
+    await advance(1_000);
+    hide(false);
+    await advance(2_999);
+    expect(reads(calls, '/requests')).toBe(before);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(before + 1);
   });
 
   it('reads nothing once every request is decided, or away from My requests and the request', async () => {
@@ -1270,5 +1304,144 @@ describe('an answer while the member page stays open', () => {
     expect(other.calls.some((call) => call.path.includes('r1') || call.path.includes('sam'))).toBe(
       false,
     );
+  });
+
+  it('keeps the answer on screen when a later check fails, and tries again', async () => {
+    clock();
+    let mode: 'pending' | 'fail' | 'open' = 'pending';
+    const down = { __status: 503, detail: 'Down' };
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => {
+          if (mode === 'fail') return down;
+          if (mode === 'open') return [request({ status: 'approved', decided_by: 'admin' })];
+          return [request(pending)];
+        },
+        'GET /leases': () => (mode === 'open' ? [lease()] : mode === 'fail' ? down : []),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    const heading = screen.getByRole('heading', { name: 'A person needs to look at this.' });
+    const main = document.getElementById('main-content');
+    mode = 'fail';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBe(heading);
+    expect(document.body.textContent).toContain(
+      'The latest check failed. Trying again in 5 seconds.',
+    );
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
+    expect(document.getElementById('main-content')).toBe(main);
+    const during = reads(calls, '/requests');
+    await advance(4_999);
+    expect(reads(calls, '/requests')).toBe(during);
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBe(heading);
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
+    // The read at 120 seconds is the last of the fast checks. The next gap is 30 seconds.
+    for (let step = 0; step < 23; step += 1) await advance(5_000);
+    expect(document.body.textContent).toContain(
+      'The latest check failed. Trying again in 30 seconds.',
+    );
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBe(heading);
+    const beforeSlow = reads(calls, '/requests');
+    await advance(29_999);
+    expect(reads(calls, '/requests')).toBe(beforeSlow);
+    mode = 'open';
+    await advance(1);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).not.toContain('The latest check failed');
+    expect(document.body.textContent).not.toContain('Unable to load this view');
+    expect(document.getElementById('main-content')).toBe(main);
+  });
+
+  it('keeps My requests on screen when a later check fails', async () => {
+    clock();
+    let fail = false;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => (fail ? { __status: 503, detail: 'Down' } : [request(pending)]),
+        'GET /leases': [],
+      },
+      '/requests',
+    );
+    await paint();
+    const row = screen.getByText('photos.example').closest('a');
+    expect(row?.textContent).toContain('Waiting for a person');
+    fail = true;
+    await advance(5_000);
+    expect(screen.getByText('photos.example').closest('a')).toBe(row);
+    expect(row?.textContent).toContain('Waiting for a person');
+    expect(document.body.textContent).toContain(
+      'The latest check failed. Trying again in 5 seconds.',
+    );
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'My requests' })).toBeDefined();
+    const during = reads(calls, '/requests');
+    await advance(4_999);
+    expect(reads(calls, '/requests')).toBe(during);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(during + 1);
+    expect(screen.getByText('photos.example').closest('a')).toBe(row);
+  });
+
+  it('does not drop a slow check when the next moment comes', async () => {
+    clock();
+    let release: () => void = () => {};
+    let n = 0;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => {
+          n += 1;
+          if (n === 1) return [request(pending)];
+          if (n === 2)
+            return new Promise((resolve) => {
+              release = () => resolve([request(pending)]);
+            });
+          return [request({ status: 'denied', decided_by: 'admin', decision_note: null })];
+        },
+        'GET /leases': [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    await advance(5_000);
+    expect(reads(calls, '/requests')).toBe(2);
+    const slow = signals('/requests')[1];
+    expect(slow.aborted).toBe(false);
+    await advance(20_000);
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    expect(slow.aborted).toBe(false);
+    expect(signals('/leases')[1].aborted).toBe(false);
+    await act(async () => {
+      release();
+    });
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(slow.aborted).toBe(false);
+    await advance(4_999);
+    expect(reads(calls, '/requests')).toBe(2);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(screen.getByRole('heading', { name: 'Not this time.' })).toBeDefined();
+  });
+
+  it('reads nothing after the page is left', async () => {
+    clock();
+    const { calls } = open(
+      { ...quiet, 'GET /requests': [request(pending)], 'GET /leases': [] },
+      '/portal?request=r1',
+    );
+    await paint();
+    const before = reads(calls, '/requests');
+    cleanup();
+    document.dispatchEvent(new Event('visibilitychange'));
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(before);
+    expect(reads(calls, '/leases')).toBe(before);
   });
 });

@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react';
 import { post, useApi } from '../api';
 import { Empty, ErrorState, InlineError, Loading, Panel, Score } from '../components/ui';
 import { REMOVAL, ago, atSource, clock, isOpen, left, plural, useNow } from '../lib/format';
-import { useRefreshWhile } from '../lib/refresh';
+import { checkFailedLine, useRefreshWhile } from '../lib/refresh';
 import type { Lease, Suggestion } from '../types';
 
 /** How a closed exception ended, as the server recorded it. */
@@ -26,9 +26,9 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const now = useNow(5000);
   // While a row is not confirmed, read the list again so it updates when that opening settles.
-  useRefreshWhile(
+  const again = useRefreshWhile(
     (leases.data ?? []).some((row) => row.status === 'unconfirmed'),
-    leases.reload,
+    () => leases.reload(),
   );
   /** Runs one change, then reloads both lists so the screen reflects the server. */
   const run = async (key: string, action: () => Promise<unknown>) => {
@@ -45,8 +45,10 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
       onChange();
     }
   };
-  if (leases.loading) return <Loading text="Loading open access…" />;
-  if (leases.error) return <ErrorState message={leases.error} retry={leases.reload} />;
+  // The list is already on screen. A later failure must not replace it with the error screen.
+  const held = leases.data !== null;
+  if (!held && leases.loading) return <Loading text="Loading open access…" />;
+  if (!held && leases.error) return <ErrorState message={leases.error} retry={leases.reload} />;
   const all = leases.data || [];
   // Open means applied at a source. What was simulated or changed nothing is listed, never counted as open.
   const open = all.filter(isOpen);
@@ -66,6 +68,11 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   ? "Nothing is open on Nyctr's record. What is listed below was not confirmed and may still be open at the source, until Nyctr removes it or, where it cannot tell, a person checks there."
                   : 'Nothing is open. Temporary access appears here while it lasts.'}
           </p>
+          {held && leases.error && (
+            <p className="muted tiny" role="status">
+              {checkFailedLine(again)}
+            </p>
+          )}
         </div>
       </header>
       <Panel title="Open" flush>

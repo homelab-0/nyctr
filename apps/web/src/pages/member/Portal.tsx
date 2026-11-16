@@ -11,7 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { api, ApiError, post, useApi } from '../../api';
-import { useRefreshWhile } from '../../lib/refresh';
+import { checkFailedLine, useRefreshWhile } from '../../lib/refresh';
 import { everyText, useScheduleSummary } from '../../lib/schedule';
 import { useAuth } from '../../auth';
 import {
@@ -652,14 +652,26 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
   );
 }
 
+/** A failed later check, said under the answer the page is already showing. */
+function CheckNote({ failed, againMs }: { failed: boolean; againMs: number | null }) {
+  if (!failed) return null;
+  return (
+    <p className="aside" role="status">
+      {checkFailedLine(againMs)}
+    </p>
+  );
+}
+
 /** The outcome of a request: open (with reconnect steps), waiting, or declined. Never vague. */
-function Result({ data, id }: { data: Data; id: string }) {
+function Result({ data, id, againMs }: { data: Data; id: string; againMs: number | null }) {
   const [os, setOs] = useState<DeviceOs>(detectOs());
   const now = useNow(5000);
-  if (data.requests.loading || data.leases.loading) return <Loading />;
+  // Both lists are already on screen. A later failure must not replace them with the error screen.
+  const held = data.requests.data !== null && data.leases.data !== null;
+  if (!held && (data.requests.loading || data.leases.loading)) return <Loading />;
   // Without both lists the outcome is not known, so none is shown.
   const unread = data.requests.error || data.leases.error;
-  if (unread)
+  if (!held && unread)
     return (
       <div className="m-col">
         <ErrorState
@@ -827,6 +839,7 @@ function Result({ data, id }: { data: Data; id: string }) {
           </p>
         </header>
       )}
+      <CheckNote failed={Boolean(unread)} againMs={againMs} />
       <section className="m-card pad">
         <div className="m-score">
           <Score value={row.risk_score} big />
@@ -849,15 +862,17 @@ function Result({ data, id }: { data: Data; id: string }) {
   );
 }
 
-function MyRequests({ data }: { data: Data }) {
+function MyRequests({ data, againMs }: { data: Data; againMs: number | null }) {
   const now = useNow();
   // The reason stands only over an empty list of blocked sites. With one listed there is
   // something to ask about, whatever the collection is doing.
   const gap = data.blocks.data?.length === 0 ? notKnown(data) : null;
-  if (data.requests.loading || data.leases.loading) return <Loading />;
+  // The list is already on screen. A later failure must not replace it with the error screen.
+  const held = data.requests.data !== null && data.leases.data !== null;
+  if (!held && (data.requests.loading || data.leases.loading)) return <Loading />;
   // A list that could not be read is not an empty one, and an outcome needs both lists.
   const unread = data.requests.error || data.leases.error;
-  if (unread)
+  if (!held && unread)
     return (
       <div className="m-col">
         <h1 className="display d2">My requests</h1>
@@ -875,6 +890,7 @@ function MyRequests({ data }: { data: Data }) {
   return (
     <div className="m-col">
       <h1 className="display d2">My requests</h1>
+      <CheckNote failed={Boolean(unread)} againMs={againMs} />
       {rows.length === 0 ? (
         <Empty
           title="You have not asked for anything yet"
@@ -962,10 +978,9 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
     (data.requests.data ?? []).some((row) => row.status === 'pending');
-  useRefreshWhile(waiting, () => {
-    data.requests.reload();
-    data.leases.reload();
-  });
+  const again = useRefreshWhile(waiting, () =>
+    Promise.all([data.requests.reload(), data.leases.reload()]),
+  );
   useEffect(() => {
     document.title = 'Blocked sites · Nyctr';
     window.scrollTo?.(0, 0);
@@ -1008,11 +1023,11 @@ export default function Portal({ page, params }: { page: string; params: URLSear
       <main id="main-content">
         <InlineError message={error} />
         {section === 'requests' ? (
-          <MyRequests data={data} />
+          <MyRequests data={data} againMs={again} />
         ) : section === 'devices' ? (
           <MyDevices data={data} />
         ) : request ? (
-          <Result data={data} id={request} />
+          <Result data={data} id={request} againMs={again} />
         ) : block ? (
           // Keyed by the block: what was read or typed for one never stands under another.
           <BlockDetail key={block} data={data} id={block} />

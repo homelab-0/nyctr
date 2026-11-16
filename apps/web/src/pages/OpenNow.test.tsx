@@ -299,11 +299,13 @@ async function advance(ms: number) {
   });
 }
 function hide(hidden: boolean) {
-  Object.defineProperty(document, 'visibilityState', {
-    configurable: true,
-    get: () => (hidden ? 'hidden' : 'visible'),
+  act(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
   });
-  document.dispatchEvent(new Event('visibilitychange'));
 }
 
 describe('an unconfirmed row while Open now stays open', () => {
@@ -373,9 +375,7 @@ describe('an unconfirmed row while Open now stays open', () => {
     await advance(30_000);
     expect(times(calls, '/leases')).toBe(1);
     hide(false);
-    await advance(4_999);
-    expect(times(calls, '/leases')).toBe(1);
-    await advance(1);
+    await paint();
     expect(times(calls, '/leases')).toBe(2);
     expect(times(calls, '/suggestions')).toBe(1);
     cleanup();
@@ -388,5 +388,48 @@ describe('an unconfirmed row while Open now stays open', () => {
     await advance(60_000);
     expect(times(quiet, '/leases')).toBe(held);
     expect(times(quiet, '/suggestions')).toBe(1);
+  });
+
+  it('keeps the row when a later check fails, and then shows that it settled', async () => {
+    clock();
+    let mode: 'open' | 'fail' | 'settled' = 'open';
+    const calls = mockApi({
+      'GET /leases': () => {
+        if (mode === 'fail') return { __status: 503, detail: 'Down' };
+        if (mode === 'settled')
+          return [lease('slow', { status: 'active', execution: 'applied', owned: true })];
+        return [
+          lease('slow', {
+            status: 'unconfirmed',
+            execution: 'not_applied',
+            last_error: 'It may be open there.',
+          }),
+        ];
+      },
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={() => {}} />);
+    await paint();
+    const line = screen.getByText('slow.example').closest('tr')!;
+    expect(line.textContent).toContain('Not confirmed');
+    mode = 'fail';
+    await advance(5_000);
+    expect(screen.getByText('slow.example').closest('tr')).toBe(line);
+    expect(line.textContent).toContain('Not confirmed');
+    expect(document.body.textContent).toContain(
+      'The latest check failed. Trying again in 5 seconds.',
+    );
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
+    const during = times(calls, '/leases');
+    await advance(4_999);
+    expect(times(calls, '/leases')).toBe(during);
+    expect(screen.getByText('slow.example').closest('tr')).toBe(line);
+    mode = 'settled';
+    await advance(1);
+    expect(screen.getByText('slow.example').closest('tr')).toBe(line);
+    expect(line.textContent).toContain('Changed at the source and checked.');
+    expect(line.textContent).not.toContain('Not confirmed');
+    expect(document.body.textContent).not.toContain('The latest check failed');
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
   });
 });
