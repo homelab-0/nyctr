@@ -35,7 +35,7 @@ type Tab = 'rule' | 'people' | 'system';
 const ALWAYS_YOU: [string, string][] = [
   [
     'Kinds of site you chose to block',
-    'A content category or safe search is switched on at the source. That was a choice, so it stays yours.',
+    'A content category or safe search, or a newly registered, dynamic or parked address, is switched on at the source. That was a choice, so it stays yours.',
   ],
   ['Addresses on a deny list', 'Someone put this address on a deny list on purpose.'],
   [

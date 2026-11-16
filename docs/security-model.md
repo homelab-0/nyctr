@@ -173,8 +173,17 @@ earlier version is read as the advertising tier on with its old limits and
 everything else off. That version had no daily total. The total it is read
 with is its old limit for each person multiplied by the number of active
 accounts, and no less than 1 and no more than 100, which is all a rule may
-name. A rule written now starts at 10 for everyone. Up to that cap of 100,
-nothing that opened before stops opening.
+name. A rule written now starts at 10 for everyone. Within that cap, a member's
+opening that the old rule allowed still opens. Three things that used to open
+now wait. An administrator's own request for a block that is not assigned to a
+device waits, because the rule asks which device the block belongs to. A member
+can only ask about a block assigned to them, so this changes nothing a member
+could open. A block from a source that does not classify its own reasons, whose
+wording the plain table used to call a privacy list, waits. No source that can
+open an address is in that position. Once openings by everyone today reach the
+daily total, the next one waits. That can already have happened when an account
+that opened earlier in the day is no longer active, or when the limit for one
+person was lowered during the day.
 
 Whether one request may be opened is decided by one function,
 `policy.may_open`, from the stored rule and plain facts. It reads no database,
@@ -196,7 +205,9 @@ audit record (`rule.access_checked`):
    check always passes and no model output reaches the rule.
 9. The person's openings in the last day are under the limit for each person,
    and everyone's are under the daily total. Both are counted again when the
-   person's turn is held, and the total once more as the opening is stored.
+   person's turn is held. As the opening is stored, the rule's row is locked and
+   the rule is read again, and every check is run again with it. A refusal then
+   takes back what was added at the source and is recorded.
 10. The time is the shorter of what was asked and the tier's limit.
 
 ## Two addresses

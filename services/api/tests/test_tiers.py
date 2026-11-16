@@ -17,6 +17,7 @@ from conftest import LIVE_MEMBER, live_signin, signin
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy.exc import OperationalError
 from test_access import GALLERY, put_rule
 from test_crossing import DOMAIN, Source, ask, console, started
 
@@ -568,6 +569,11 @@ def test_two_people_at_one_instant_cannot_both_pass_the_daily_total(tmp_path, mo
             leases = {lease.domain: (lease.status, lease.owned) for lease in db.scalars(select(Lease))}
             assert leases == {"fonts.example": ("active", True), DOMAIN: ("unconfirmed", True)}
             assert held(db) == []
+            # The refusal is the rule's own record. The earlier may_open was stored before the add.
+            refused = [event for event in db.scalars(select(Audit).where(
+                Audit.action == "rule.access_checked", Audit.target_id == late["id"]))
+                if event.details.get("outcome") == "waits"]
+            assert len(refused) == 1 and ["daily_total", "failed"] in refused[0].details["checks"]
 
 
 @pytest.mark.parametrize("text,kind,tier", [
@@ -656,6 +662,12 @@ def test_two_people_opening_one_address_each_keep_the_rules_record(tmp_path, mon
     found, proceed = asyncio.Queue(), asyncio.Event()
     real_hold, real_pause = access.hold_entry, access._pause
 
+    # A stuck step ends at this bound. The step returns when its event is set, so the test does not sit it out.
+    bound = 300
+
+    async def until(awaitable):
+        return await asyncio.wait_for(awaitable, bound)
+
     async def stop(name):
         await found.put(name)
         await proceed.wait()
@@ -685,17 +697,17 @@ def test_two_people_opening_one_address_each_keep_the_rules_record(tmp_path, mon
     async def scenario(app, sam, other):
         async with console(app, sam) as first_person, console(app, other) as second_person:
             first = asyncio.create_task(first_person.post("/api/requests", json=ask("one")))
-            await asyncio.wait_for(source.reached.wait(), 30)
+            await until(source.reached.wait())
             arm["on"] = True
             second = asyncio.create_task(second_person.post("/api/requests", json=ask("robin")))
             for name in ("before the claim", "the claim is held"):
-                assert await asyncio.wait_for(found.get(), 30) == name
+                assert await until(found.get()) == name
                 assert _outcomes(app, "robin") == ["may_open"], name
                 if name == "the claim is held":
                     source.go.set()
                     sam_row = (await first).json()
                 proceed.set()
-            assert await asyncio.wait_for(found.get(), 30) == "the claim is taken"
+            assert await until(found.get()) == "the claim is taken"
             assert _outcomes(app, "robin") == ["may_open"], "the claim is taken"
             proceed.set()
             return sam_row, (await second).json()
@@ -725,5 +737,91 @@ def test_two_people_opening_one_address_each_keep_the_rules_record(tmp_path, mon
             assert _outcomes(app, "robin") == ["may_open"] and _outcomes(app, "sam") == ["may_open"]
             with app.state.session_factory() as db:
                 assert held(db) == []
+        finally:
+            app.state.engine.dispose()
+
+
+NOTES = {
+    "off": "Automatic access is switched off, so a person decides.",
+    "mode_off": "Automatic access is switched off for advertising and tracker lists, so a person decides.",
+    "total": "Nyctr has reached today's limit of 1 automatic openings for everyone, so a person decides.",
+}
+
+
+@BOTH
+@pytest.mark.parametrize("change", ["off", "mode_off", "total"])
+def test_a_rule_changed_while_the_add_is_unanswered_is_read_again(tmp_path, monkeypatch, change, database, request):
+    """Switching the rule off, switching the advertising tier off, or lowering the daily total while the add
+    is unanswered stops the opening. What was added stays on record to be removed, and the refusal is recorded."""
+    source = Source(monkeypatch, hold=(2, "after"))
+    url = None if database == "sqlite" else postgres_database(request)
+    if database == "postgresql" and not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+
+    async def scenario(app, member, admin):
+        async with console(app, member) as sam, console(app, admin) as owner:
+            first = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
+            await asyncio.wait_for(source.reached.wait(), 300)
+            if change == "total":  # One rule opening is already stored today, so a total of 1 leaves none.
+                with app.state.session_factory() as db:
+                    db.add(Lease(id="earlier", domain="x.example", device_name="x", requester_id="someone-else",
+                                 kind="temporary", execution="simulated", owned=True, scope="s", decided_by="rule",
+                                 status="ended"))
+                    db.commit()
+            body = {"enabled": change != "off", "per_day": 4, "daily_total": 1,
+                    "ad_tracker": {"mode": "off" if change == "mode_off" else "on", "max_score": 25,
+                                   "max_minutes": 60}}
+            put = await asyncio.wait_for(owner.put("/api/rules/access", json=body), 60)
+            assert put.status_code == 200, put.text
+            source.go.set()
+            return (await first).json()
+
+    with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, _client, member, admin):
+        try:
+            row = asyncio.run(scenario(app, member, admin))
+            assert row["status"] == "pending" and row["decision_note"] == NOTES[change]
+            assert DOMAIN in source.listed  # The add was sent, then the refusal took it back onto the record.
+            with app.state.session_factory() as db:
+                leases = {lease.domain: (lease.status, lease.owned) for lease in db.scalars(select(Lease))}
+                assert leases[DOMAIN] == ("unconfirmed", True)
+                assert set(leases) == ({DOMAIN, "x.example"} if change == "total" else {DOMAIN})
+                refused = [event for event in db.scalars(select(Audit).where(
+                    Audit.action == "rule.access_checked", Audit.target_id == row["id"]))
+                    if event.details.get("outcome") == "waits"]
+                assert len(refused) == 1 and refused[0].details["why"] == NOTES[change]
+                assert held(db) == []
+        finally:
+            app.state.engine.dispose()
+
+
+@pytest.mark.postgres
+def test_the_rule_row_is_locked_while_the_opening_is_stored(tmp_path, monkeypatch, request):
+    """While the opening holds the rule's row, a second transaction cannot lock it.
+
+    SQLite has one writer, so only PostgreSQL can show a row lock. Without the lock this second
+    transaction takes the row at once.
+    """
+    url = postgres_database(request)
+    if not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+    Source(monkeypatch)
+    seen, real = [], access._lock_rule
+
+    with started(tmp_path, rule=True, database_url=url) as (app, client, _member, _admin):
+        def lock(db):
+            real(db)
+            with app.state.session_factory() as second:
+                try:
+                    second.scalar(select(Setting.key).where(Setting.key == "access_rule")
+                                  .with_for_update(nowait=True))
+                    seen.append("free")
+                except OperationalError:
+                    seen.append("held")
+                    second.rollback()
+
+        monkeypatch.setattr(access, "_lock_rule", lock)
+        try:
+            row = client.post("/api/requests", headers=live_signin(client, LIVE_MEMBER), json=ask("one")).json()
+            assert row["status"] == "auto_approved" and seen == ["held"]
         finally:
             app.state.engine.dispose()

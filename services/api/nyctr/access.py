@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import timedelta
 from hashlib import sha256
 from typing import Literal
@@ -711,6 +711,20 @@ def _auto_opens_today(db: Session, user_id: str | None = None) -> int:
         *whose, Lease.decided_by == "rule", Lease.created_at > utcnow() - timedelta(hours=24))) or 0
 
 
+def _lock_rule(db: Session) -> None:
+    """Lock the rule's row until this transaction commits, so two openings are stored one after the other."""
+    db.execute(update(Setting).where(Setting.key == "access_rule").values(updated_by=Setting.updated_by)
+               .execution_options(synchronize_session=False))
+
+
+def _reread_rule(db: Session) -> AccessRule:
+    """The rule as stored now. This session's earlier copy is dropped, so a change made since is visible."""
+    held = db.get(Setting, "access_rule")
+    if held is not None:
+        db.expire(held)
+    return get_rule(db, "access_rule")
+
+
 def _left_to_a_person(verdict: policy.Decision, rule: AccessRule, assessment: risk.Assessment,
                       integration: Integration | None) -> str:
     """Say in plain words why the rule did not open a request: the first check that failed."""
@@ -771,16 +785,27 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
               **({"minutes": verdict.minutes} if verdict.allow or verdict.would else {}),
               **({"why": words} if words else {}))
 
-    def ask(final: bool) -> tuple[policy.Decision, str | None]:
-        """Put the facts as they stand now to the rule and word a refusal. A yes is recorded once, when final."""
-        verdict = policy.may_open(rule, policy.Facts(
+    def facts_now(pending: int = 0) -> policy.Facts:
+        """The facts as they stand now. `pending` is this opening's own lease, already in the session."""
+        return policy.Facts(
             policies=assessment.policies, can_open=_opener(integration) is not None,
             changes_on=bool(integration) and settings.write_mode(integration.provider) != "disabled", match=match,
             score=assessment.score, name_shape=len(assessment.factors) > 1, registered_days=None,
             declined=bool(db.scalar(select(AccessRequest.id).where(
                 AccessRequest.domain == row.domain, AccessRequest.status == "denied").limit(1))),
-            opened_today=_auto_opens_today(db, row.requester_id), opened_today_all=_auto_opens_today(db),
-            asked_minutes=row.duration_minutes))
+            opened_today=max(0, _auto_opens_today(db, row.requester_id) - pending),
+            opened_today_all=max(0, _auto_opens_today(db) - pending), asked_minutes=row.duration_minutes)
+
+    def ask(final: bool) -> tuple[policy.Decision, str | None]:
+        """Put the facts as they stand now to the rule and word a refusal. A yes is recorded once, when final.
+
+        The final ask reads the rule again. It may have been switched off, or its limits lowered, while this
+        opening waited for the person's turn.
+        """
+        nonlocal rule
+        if final:
+            rule = _reread_rule(db)
+        verdict = policy.may_open(rule, facts_now())
         words = None if verdict.allow else _left_to_a_person(verdict, rule, assessment, integration)
         if words or final:
             record(verdict, words)
@@ -815,14 +840,15 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                 await open_lease(db, settings, integration=integration, domain=row.domain,
                                  device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,
                                  minutes=minutes, decided_by="rule", risk_score=assessment.score, claim=claim)
-                # The turn is one person's and the day's total is everyone's. The rule's row is locked from here
-                # to the commit, so two people's openings are stored one after the other, and counted again.
-                db.execute(update(Setting).where(Setting.key == "access_rule").values(updated_by=Setting.updated_by)
-                           .execution_options(synchronize_session=False))
-                if _auto_opens_today(db) > rule.daily_total:
-                    db.rollback()  # Nothing is stored, and what was added stays on record to be removed.
+                # The rule's row is locked from here to the commit, so two openings are stored one after the
+                # other. The rule is read again under that lock: it may have been switched off, or a tier
+                # switched off, or a limit lowered, while the add was unanswered.
+                _lock_rule(db)
+                rule = _reread_rule(db)
+                late = policy.may_open(rule, facts_now(pending=1))
+                if not late.allow:  # Nothing is stored, and what was added stays on record to be removed.
+                    db.rollback()
                     release_entry(db, claim, unstored=True)
-                    late = replace(verdict, allow=False, failed="daily_total", checks=(("daily_total", "failed"),))
                     why = _left_to_a_person(late, rule, assessment, integration)
                     record(late, why)
                 # Compare and swap, as in the review route: a copy that does not know the request's claim may
