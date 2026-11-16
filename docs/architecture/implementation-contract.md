@@ -234,6 +234,9 @@ Schema version 4 adds the fact cache (`fact_cache`) and the list of names Nyctr
 itself looked up (`own_lookups`). Nothing that exists is altered.
 
 Schema version 5 adds two nullable columns on `integrations`, `sync_holder` and
-`sync_heartbeat`. No existing row is rewritten. A start of Nyctr that finds a
-collection whose holder is gone records it as cut short and does not leave the
-source marked as collecting.
+`sync_heartbeat`. No existing row is rewritten. Heartbeats are written and
+compared with the database clock. A start of Nyctr that finds a collection
+whose holder is a different one, and whose heartbeat is older than 60 seconds,
+records it as cut short by a restart. A missed beat is recorded as no sign of
+life, and a collection cancelled before it stored is recorded as stopped. None
+of these leave the source marked as collecting.

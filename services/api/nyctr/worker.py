@@ -211,8 +211,9 @@ class Upkeep:
         with self.factory() as db:
             # A holder that died since the last tick is recorded here too, so a copy that stayed up
             # does not leave another copy's card saying the source is still being collected.
-            # The heartbeat is the wall clock, so this check is too: a schedule clock moved ahead
-            # must not make a collection that is still running look abandoned.
+            # The heartbeat is the database clock, and so is this check: a schedule clock moved
+            # ahead must not make a collection that is still running look abandoned. A missed beat
+            # is no sign of life. Only a start of Nyctr calls a different holder a restart.
             release_abandoned(db)
             db.commit()
         if self.collecting is None or self.collecting.done():

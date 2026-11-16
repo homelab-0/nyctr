@@ -9,12 +9,13 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, literal_column, or_, select, update
 
 from . import retention
 from .models import (
@@ -40,13 +41,19 @@ BACKSTOP_SECONDS = 210
 # How far before the end of the last stored read a resumed read starts: the five minutes a source's
 # clock may differ from ours (the same allowance a future timestamp gets) and five for its log to settle.
 RESUME_OVERLAP = timedelta(minutes=10)
-# A holder writes this often. A heartbeat older than the bound means that holder is gone, so the
-# lease is free at the next start instead of being honoured for five minutes. Five minutes remains
-# the longest a lease is kept even when the heartbeat is fresh.
+# A holder writes this often, from its own thread. A heartbeat older than the bound means that
+# holder cannot be shown alive, so the lease is free instead of being honoured for five minutes.
+# Five minutes remains the longest a lease is kept even when the heartbeat is fresh. The bound sits
+# well above one missed write, so a loop that is busy does not by itself let a second copy collect.
 HEARTBEAT_EVERY = 5
-HEARTBEAT_BOUND = timedelta(seconds=15)
+HEARTBEAT_BOUND = timedelta(seconds=60)
 LEASE_MINUTES = 5
+# What a card can say. Restart is only for a start that can see a different holder had the lease.
 CUT_SHORT = "The last collection was cut short by a restart."
+NO_SIGN = "No sign of life from the copy that was collecting."
+STOPPED = "The last collection was stopped."
+CAUSE_STATUS = {CUT_SHORT: "interrupted", NO_SIGN: "silent", STOPPED: "stopped"}
+LEAVING = {status: sentence for sentence, status in CAUSE_STATUS.items()}
 # How many identifiers one lookup statement asks about.
 LOOKUP_BATCH = 500
 log = logging.getLogger("nyctr.collection")
@@ -415,10 +422,38 @@ def clear_lease(row) -> None:
     row.sync_started_at = row.sync_holder = row.sync_heartbeat = None
 
 
-def abandoned_sql(now):
-    """A syncing row whose holder cannot be shown alive, or whose lease is already five minutes old."""
-    stale = now - HEARTBEAT_BOUND
-    aged = now - timedelta(minutes=LEASE_MINUTES)
+def db_now(bind):
+    """The database clock, written so a later comparison of the same value matches.
+
+    SQLite's clock has milliseconds. The stored text keeps six fractional digits, which is how a
+    datetime is bound again, so the claim's start time still identifies that claim. PostgreSQL
+    `now()` already round-trips.
+    """
+    if bind.dialect.name == "sqlite":
+        return func.printf("%s000", func.strftime("%Y-%m-%d %H:%M:%f", "now"))
+    return func.now()
+
+
+def db_ago(bind, seconds: int):
+    """A timestamp this many seconds before the database clock, computed in the statement.
+
+    Copies compare this clock and no other, so a process clock set ahead or behind cannot free a
+    live lease or keep a dead one.
+    """
+    seconds = int(seconds)
+    if bind.dialect.name == "sqlite":
+        return func.datetime("now", f"-{seconds} seconds")
+    return func.now() - literal_column(f"interval '{seconds} seconds'")
+
+
+def abandoned_sql(bind):
+    """A syncing row whose holder cannot be shown alive, or whose lease is already five minutes old.
+
+    Both ages are the database clock. A heartbeat exactly at the bound is still held: the comparison
+    is older-than, so one write that lands on the bound does not free the lease.
+    """
+    stale = db_ago(bind, int(HEARTBEAT_BOUND.total_seconds()))
+    aged = db_ago(bind, LEASE_MINUTES * 60)
     return or_(
         Integration.sync_holder.is_(None),
         Integration.sync_heartbeat.is_(None),
@@ -428,99 +463,149 @@ def abandoned_sql(now):
     )
 
 
-def lease_free_sql(now):
+def lease_free_sql(bind):
     """A source that is not being collected, or whose collection can no longer be shown to be running."""
-    return or_(Integration.status != "syncing", abandoned_sql(now))
+    return or_(Integration.status != "syncing", abandoned_sql(bind))
 
 
-def row_held(row, now) -> bool:
-    """Whether this loaded row is a live lease at `now`. Matches `abandoned_sql`, including equal times."""
-    if row.status != "syncing" or not row.sync_holder or row.sync_heartbeat is None or row.sync_started_at is None:
-        return False
-    heartbeat, started = utc(row.sync_heartbeat), utc(row.sync_started_at)
-    return heartbeat >= utc(now) - HEARTBEAT_BOUND and started >= utc(now) - timedelta(minutes=LEASE_MINUTES)
-
-
-def claim_values(holder, when):
-    """The stamps a claim writes: this holder, and a heartbeat as new as the claim."""
+def claim_values(holder, bind):
+    """The stamps a claim writes. The database fills both times, so the heartbeat starts as new as the claim."""
+    when = db_now(bind)
     return {"status": "syncing", "sync_started_at": when, "sync_holder": holder, "sync_heartbeat": when}
 
 
-def settle_abandoned(db, row, now=None) -> bool:
-    """Record one cut-short collection and leave the source not collecting. False when the lease is live."""
-    now = now or utcnow()
-    if row.status != "syncing" or row_held(row, now):
+def _cause(row, restart_of: str | None) -> str:
+    """Which sentence this abandoned lease gets.
+
+    Restart only when the caller is a start of Nyctr and the lease names some other holder. A missing
+    holder is not a known restart. A tick, a claim, an edit, a removal and a diagnostic pass no
+    `restart_of`, so a missed beat stays no sign of life.
+    """
+    if restart_of and row.sync_holder and row.sync_holder != restart_of:
+        return CUT_SHORT
+    return NO_SIGN
+
+
+def settle_abandoned(db, row, cause: str) -> bool:
+    """Record why this collection ended and leave the source not collecting.
+
+    The caller has already locked the row as abandoned, on the database clock. False when the row is
+    no longer that syncing lease. The sentence is not stored as a failure, so the card does not say
+    the collection failed.
+    """
+    if row.status != "syncing" or cause not in CAUSE_STATUS:
         return False
-    row.status = "interrupted"
+    row.status = CAUSE_STATUS[cause]
     row.last_error = None
     clear_lease(row)
     db.flush()
-    audit(db, None, "integration.collection_interrupted", row.id, name=row.name, why=CUT_SHORT)
+    audit(db, None, "integration.collection_interrupted", row.id, name=row.name, why=cause)
     db.flush()
     return True
 
 
-def release_abandoned(db, now=None, only=None) -> list[str]:
+def release_abandoned(db, *, restart_of: str | None = None, only: str | None = None) -> list[str]:
     """Free every syncing lease whose holder is gone, in id order, and record each once.
 
     The caller commits. A second caller waits on the same row and then finds it already settled,
-    so the cut-short collection is recorded once. `only` limits that to one source, which a
-    collection does in its own transaction before it claims. Two copies still cannot collect one
-    source at once: a live holder's heartbeat is newer than the bound, so it does not match here,
-    and the claim that follows is one conditional update of the row.
+    so the collection is recorded once. `only` limits that to one source, which a collection does
+    in its own transaction before it claims. `restart_of` is this start's holder id, and only the
+    start-up call passes it. Two copies still cannot collect one source at once: a live holder's
+    heartbeat is newer than the bound, so it does not match here, and the claim that follows is one
+    conditional update of the row.
     """
-    now = now or utcnow()
-    where = [Integration.status == "syncing", abandoned_sql(now)]
+    where = [Integration.status == "syncing", abandoned_sql(db.get_bind())]
     if only is not None:
         where.append(Integration.id == only)
     ids = list(db.scalars(select(Integration.id).where(*where).order_by(Integration.id)))
     freed = []
     for integration_id in ids:
         locked = db.execute(update(Integration).where(
-            Integration.id == integration_id, Integration.status == "syncing", abandoned_sql(now),
+            Integration.id == integration_id, Integration.status == "syncing", abandoned_sql(db.get_bind()),
         ).values(name=Integration.name).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             continue
         row = db.get(Integration, integration_id)
         db.refresh(row)
-        if settle_abandoned(db, row, now):
+        if settle_abandoned(db, row, _cause(row, restart_of)):
             freed.append(integration_id)
     return freed
 
 
-def _beat_once(factory, holder) -> None:
-    """Stamp every lease this start holds. A row held by anyone else is left alone."""
+def _record_stopped(factory, integration_id: str, started, holder: str) -> None:
+    """Record a collection that was cancelled before it stored.
+
+    The update matches this claim's holder and the start time read back from the database, so a lease
+    taken since is left alone. A store that already finished is not passed here.
+    """
     with factory() as db:
-        db.execute(update(Integration).where(
-            Integration.status == "syncing", Integration.sync_holder == holder,
-        ).values(sync_heartbeat=utcnow()).execution_options(synchronize_session=False))
+        locked = db.execute(update(Integration).where(
+            Integration.id == integration_id, Integration.status == "syncing",
+            Integration.sync_started_at == started, Integration.sync_holder == holder,
+        ).values(name=Integration.name).execution_options(synchronize_session="fetch"))
+        if locked.rowcount != 1:
+            db.rollback()
+            return
+        row = db.get(Integration, integration_id)
+        db.refresh(row)
+        row.status = CAUSE_STATUS[STOPPED]
+        row.last_error = None
+        clear_lease(row)
+        db.flush()
+        audit(db, None, "integration.collection_interrupted", row.id, name=row.name, why=STOPPED)
         db.commit()
 
 
-async def beat(factory) -> None:
-    """Write this start's heartbeat until cancelled.
+def _beat_once(factory, holder) -> None:
+    """Stamp every lease this start holds, from the database clock. A row held by anyone else is left alone."""
+    with factory() as db:
+        db.execute(update(Integration).where(
+            Integration.status == "syncing", Integration.sync_holder == holder,
+        ).values(sync_heartbeat=db_now(db.get_bind())).execution_options(synchronize_session=False))
+        db.commit()
+
+
+class Heartbeat:
+    """Write this start's heartbeat on a thread that does not use the server's loop.
 
     The first write waits one interval, so a start that stops at once does not touch a lease.
-    One failed write is logged and the loop continues.
+    One failed write is logged and the loop continues. `stop` wakes the wait and joins the thread.
     """
-    holder = holder_id(factory)
-    while True:
-        await asyncio.sleep(HEARTBEAT_EVERY)
-        try:
-            await off_loop(lambda: _beat_once(factory, holder))
-        except Exception as error:  # noqa: BLE001 - one failed beat must not end the task
-            log.warning("Collection heartbeat failed: %s", type(error).__name__)
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._holder = holder_id(factory)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="nyctr-collection-heartbeat", daemon=True)
+
+    def start(self):
+        """Begin the thread. The caller stops it before disposing the engine."""
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        """Wake the thread and wait until it has left the database."""
+        self._stop.set()
+        self._thread.join(timeout=HEARTBEAT_EVERY + 2)
+
+    def _run(self) -> None:
+        while not self._stop.wait(HEARTBEAT_EVERY):
+            try:
+                _beat_once(self._factory, self._holder)
+            except Exception as error:  # noqa: BLE001 - one failed beat must not end the thread
+                log.warning("Collection heartbeat failed: %s", type(error).__name__)
 
 
 def _still_holds(db, integration_id: str, started, holder) -> bool:
     """Lock the source row and say whether the lease taken at `started` by `holder` is still this caller's.
 
-    Refreshing the heartbeat keeps a long store from looking abandoned while this row is locked.
+    Refreshing the heartbeat from the database clock keeps a long store from looking abandoned while
+    this row is locked. The holder is part of the match: the same start time with a new holder is not ours.
     """
     return db.execute(update(Integration).where(
         Integration.id == integration_id, Integration.status == "syncing",
         Integration.sync_started_at == started, Integration.sync_holder == holder,
-    ).values(sync_heartbeat=utcnow()).execution_options(synchronize_session=False)).rowcount == 1
+    ).values(sync_heartbeat=db_now(db.get_bind())).execution_options(synchronize_session=False)).rowcount == 1
 
 
 async def collect_integration(factory, settings, integration_id: str, actor: str | None, *,
@@ -555,28 +640,29 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
         # includes that edit; comparing against the later load would keep the secret resolved here.
         read_ref = integration.secret_ref
         previous = integration.status
-        started = utcnow()
         holder = holder_id(db.get_bind())
         # The read above holds a transaction. End it before freeing a dead holder, or that write waits
         # on this read and this read waits on that write. The record commits on its own, so a busy
         # result or a later rollback cannot erase it. Same session, so a caller counting sessions
         # still sees one for this read and one for the store.
         db.rollback()
-        release_abandoned(db, started, only=integration_id)
+        release_abandoned(db, only=integration_id)
         db.commit()
         integration = db.get(Integration, integration_id)
         if integration is None:
             return None, "missing"
         locked = db.execute(update(Integration).where(
-            Integration.id == integration.id, lease_free_sql(started),
-        ).values(**claim_values(holder, started)).execution_options(synchronize_session="fetch"))
+            Integration.id == integration.id, lease_free_sql(db.get_bind()),
+        ).values(**claim_values(holder, db.get_bind())).execution_options(synchronize_session="fetch"))
         if locked.rowcount != 1:
             db.rollback()
             return None, "busy" if db.get(Integration, integration_id) else "missing"
         db.commit()
+        # The start time the store matches is the one the database wrote, not this process's clock.
         # An edit may have been saved after the read above and before the lease. None can be while
         # the lease is held, so read the source again and use only the settings saved now.
         db.refresh(integration)
+        started = integration.sync_started_at
         if integration.secret_ref != read_ref:
             api_key = os.environ.get(integration.secret_ref)
             if not api_key:
@@ -654,6 +740,9 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                     items_new=new[0], lookups_read=len(snapshot.blocks), lookups_new=new[1])
         except asyncio.CancelledError:
             # Stopped by the server or a dropped request. A store already begun was waited for.
+            # A read that stored nothing is recorded now, as stopped, and is not left until the lease ages out.
+            if not stored:
+                _record_stopped(factory, integration_id, started, holder)
             _report("ended", name, outcome="stopped", **spent(evidence), stored=bool(stored))
             raise
         except Exception as exc:
@@ -678,7 +767,7 @@ async def collect_integration(factory, settings, integration_id: str, actor: str
                 drop_retry(db, integration_id)
                 integration = db.get(Integration, integration_id)
                 integration.last_error, retry_at = failure.message, None
-            keep = retry_at and previous not in {"syncing", "interrupted"}
+            keep = retry_at and previous not in {"syncing", *LEAVING}
             integration.status = previous if keep else "error"
             clear_lease(integration)
             # `why` is the sentence the source's card shows: Nyctr's own words, never the source's answer.

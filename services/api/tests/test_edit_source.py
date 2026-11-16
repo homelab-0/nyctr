@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from test_collection import live_client
 
-from nyctr.collection import collect_integration
+from nyctr.collection import collect_integration, holder_id
 from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import Snapshot
 from nyctr.main import MOVED_SOURCE, _settled_status
@@ -353,17 +353,18 @@ def test_diagnostics_never_probe_or_restore_what_an_edit_replaced_before_the_lea
         db.commit()
     land_edit, probed = edit_once(client, headers, id_), []
 
-    def clock():
+    def hold_then_edit(source):
+        """The route asks which start this is between reading the source and taking the lease."""
         land_edit()
-        return utcnow()
+        return holder_id(source)
 
     async def diagnose(provider, integration_id, config, secret_ref):
         probed.append((config["base_url"], secret_ref))
         return DiagnosticReport(integration_id=integration_id, provider=provider, checked_at=utcnow(), duration_ms=1,
                                 outcome="verified", summary="Fabricated.", checks=[], capabilities=[],
                                 evidence_gaps=[], snapshot_counts=None)
-    # The route reads the clock between loading the source and taking the lease.
-    monkeypatch.setattr("nyctr.main.utcnow", clock)
+    # The route asks which start this is between loading the source and taking the lease.
+    monkeypatch.setattr("nyctr.main.holder_id", hold_then_edit)
     monkeypatch.setattr("nyctr.main.diagnose_integration", diagnose)
     assert client.post(f"/api/integrations/{id_}/diagnostics", headers=headers).status_code == 200
     assert probed == [("https://second.example.net/api", NEW_ADDRESS["secret_ref"])]

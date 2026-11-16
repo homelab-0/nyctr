@@ -55,9 +55,11 @@ A store is one transaction that begins by checking the lease on the source: it
 is stored whole or not at all. A scheduled pass or a person's Collect that is
 stopped during a store waits for the store to end, however often it is
 cancelled. A collection started by the nudge address is not waited for when the
-server stops: it ends as if killed, with nothing stored. The next start frees
-that lease once the holder's heartbeat is older than 15 seconds, and records
-that the collection was cut short. A store reads what is already stored in a fixed number of statements
+server stops: it ends as if killed, with nothing stored. A collection cancelled
+before it stored is recorded as stopped. A heartbeat older than 60 seconds is
+recorded as no sign of life from the copy that was collecting, and the next
+start records a restart only when the lease names a holder that is not this
+start. A store reads what is already stored in a fixed number of statements
 plus one per 500 new identifiers, never one per item. On SQLite, which allows
 one writer, a request that writes waits for a store in progress and fails if
 the wait passes five seconds. On PostgreSQL a request waits only if it locks
@@ -218,15 +220,20 @@ up the next ending there by a minute at most. The limit is well under the
 five-minute hold, so a claim does not outlive its call. A collection locks
 its source's row and then the rows it stores, only while storing, so
 collections and endings never wait on each other.
-Stopping Nyctr cancels a pass in progress. Each start has its own holder id,
-and while a collection holds the source it writes a heartbeat every 5 seconds.
-A lease whose heartbeat is older than 15 seconds, or that records no holder
-or no heartbeat, is free. The next start records that the last collection was
-cut short by a restart, and the card says that until the next collection ends.
-It does not stay marked as collecting. A second copy on the same database
-still cannot collect that source while the holder's heartbeat is under 15
-seconds old, because taking the lease is one conditional update of the row. A
-lease is also free once it is five minutes old, whichever copy holds it.
+Stopping Nyctr cancels a pass in progress. Each start has its own holder id.
+While a collection holds the source, a thread of its own writes a heartbeat
+every 5 seconds, on the database clock, so a busy server loop cannot stall it
+and two copies cannot disagree about the time. A lease whose heartbeat is
+older than 60 seconds, or that records no holder or no heartbeat, is free. A
+missed beat is recorded as no sign of life from the copy that was collecting.
+A collection cancelled before it stored is recorded as stopped. The next start
+records a restart only when the lease names a holder and that holder is not
+this start. The card says which of those it was until the next collection
+ends. It does not stay marked as collecting. A second copy on the same
+database still cannot collect that source while the holder's heartbeat is
+under 60 seconds old, because taking the lease is one conditional update of
+the row, and a store keeps that row locked. A lease is also free once it is
+five minutes old, whichever copy holds it.
 
 Saved-integration diagnostics reuse the bounded, verified read transport under
 the collection lease. They return an ephemeral report of checked capabilities

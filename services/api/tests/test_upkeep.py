@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from nyctr import access, schedule, worker
+from nyctr.collection import STOPPED
 from nyctr.integrations import IntegrationError, Snapshot, core
 from nyctr.models import Audit, Integration, Lease, Setting, utcnow
 
@@ -218,7 +219,7 @@ def test_a_retry_that_comes_due_during_a_pass_is_run_once_by_that_pass(tmp_path,
 
 
 def test_stopping_during_a_pass_cancels_it_and_the_source_is_collected_again_later(tmp_path, monkeypatch):
-    """The read in progress is cancelled with the loop; its lease is left to age out and a later run takes it over."""
+    """The read in progress is cancelled with the loop, recorded as stopped, and a later run collects it."""
     app = live_app(tmp_path)
     monkeypatch.setattr(worker, "TICK_SECONDS", 0.01)
 
@@ -237,10 +238,11 @@ def test_stopping_during_a_pass_cancels_it_and_the_source_is_collected_again_lat
         sources = asyncio.run(scenario())
         with app.state.session_factory() as db:
             held = db.get(Integration, sources.asked[0])
-            assert held.status == "syncing" and held.sync_started_at is not None
+            assert held.status == "stopped" and held.sync_started_at is None and held.last_error is None
             assert schedule.pending_retries(db) == []
-            held.sync_started_at -= timedelta(minutes=6)  # A lease can be taken over after five minutes.
-            db.commit()
+            stopped = db.scalar(select(Audit).where(
+                Audit.action == "integration.collection_interrupted", Audit.target_id == held.id))
+            assert stopped is not None and stopped.details["why"] == STOPPED
         later = utcnow() + timedelta(minutes=15)
         assert asyncio.run(worker.collection_pass(app.state.session_factory, app.state.settings, later)) is True
         assert stored(app, Integration, "dns") == stored(app, Integration, "unifi") == "connected"

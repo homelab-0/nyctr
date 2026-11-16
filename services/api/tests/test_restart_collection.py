@@ -2,13 +2,14 @@
 
 import asyncio
 import threading
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
 from conftest import live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, select, update
 from test_collection_store import POSTGRES
 from test_presence import WAIT, on, others_finish
 
@@ -16,16 +17,20 @@ from nyctr.collection import (
     CUT_SHORT,
     HEARTBEAT_BOUND,
     HEARTBEAT_EVERY,
+    NO_SIGN,
+    STOPPED,
     _beat_once,
     begin_holder,
     collect_integration,
+    db_ago,
     release_abandoned,
 )
 from nyctr.database import migrate
 from nyctr.integrations import Snapshot
 from nyctr.models import Audit, Integration, utc, utcnow
 
-BOTH = pytest.mark.parametrize("engine", ["sqlite", "postgresql"])
+# The PostgreSQL case needs a server named in NYCTR_TEST_POSTGRES and makes a database of its own.
+BOTH = pytest.mark.parametrize("engine", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 
 
 def home(engine, tmp_path, request):
@@ -114,15 +119,24 @@ def hold_the_lock(app, match, second):
         assert seen["locked"]
 
 
-def leave_collecting(app, holder, heartbeat, started):
-    """Leave both fabricated sources looking mid-collection, held by `holder`."""
+def stamp(app, ids, holder, heartbeat_age, started_age):
+    """Leave these sources collecting. Ages are seconds before the database clock. None leaves that stamp empty."""
     with app.state.session_factory() as db:
-        for row in db.scalars(select(Integration)):
-            row.status = "syncing"
-            row.sync_started_at = started
-            row.sync_holder = holder
-            row.sync_heartbeat = heartbeat
+        bind = db.get_bind()
+        db.execute(update(Integration).where(Integration.id.in_(ids)).values(
+            status="syncing", sync_holder=holder,
+            sync_heartbeat=None if heartbeat_age is None else db_ago(bind, heartbeat_age),
+            sync_started_at=None if started_age is None else db_ago(bind, started_age),
+        ))
         db.commit()
+
+
+def whys(app):
+    """The sentences recorded for collections that ended without storing, oldest first."""
+    with app.state.session_factory() as db:
+        rows = db.scalars(select(Audit).where(Audit.action == "integration.collection_interrupted")
+                          .order_by(Audit.created_at))
+        return [row.details.get("why") for row in rows]
 
 
 async def fake_collect(*_args, **_kwargs):
@@ -130,9 +144,9 @@ async def fake_collect(*_args, **_kwargs):
     return Snapshot()
 
 
-def test_the_heartbeat_bound_is_fifteen_seconds():
-    """The bound is part of the behaviour: a holder is treated as gone after fifteen seconds, not five minutes."""
-    assert HEARTBEAT_BOUND == timedelta(seconds=15) and HEARTBEAT_EVERY == 5
+def test_the_heartbeat_bound_is_sixty_seconds():
+    """The bound is part of the behaviour: a holder is treated as gone after sixty seconds, not five minutes."""
+    assert HEARTBEAT_BOUND == timedelta(seconds=60) and HEARTBEAT_EVERY == 5
 
 
 @BOTH
@@ -145,13 +159,13 @@ def test_a_restart_frees_the_collection_and_collect_and_remove_are_accepted(tmp_
     first = live_app(tmp_path, **place)
     with TestClient(first):
         seed_live_member(first)
-        leave_collecting(first, "previous-start", utcnow() - HEARTBEAT_BOUND - timedelta(seconds=1), utcnow())
+        stamp(first, ["dns", "unifi"], "previous-start", 61, 0)
     again = live_app(tmp_path, **place)
     with TestClient(again) as client:
         headers = live_signin(client)
         listed = {row["id"]: row["status"] for row in client.get("/api/integrations").json()}
         assert listed == {"dns": "interrupted", "unifi": "interrupted"}
-        assert audits(again) == 2
+        assert audits(again) == 2 and set(whys(again)) == {CUT_SHORT}
         attention = client.get("/api/attention").json()
         assert [item["detail"] for item in attention if item["detail"] == CUT_SHORT] == [CUT_SHORT, CUT_SHORT]
         third = live_app(tmp_path, **place)
@@ -180,12 +194,7 @@ def test_a_live_holder_is_still_busy_after_another_copy_starts(tmp_path, monkeyp
     first = live_app(tmp_path, **place)
     with TestClient(first):
         seed_live_member(first)
-        now = utcnow()
-        with first.state.session_factory() as db:
-            row = db.get(Integration, "dns")
-            row.status, row.sync_started_at = "syncing", now
-            row.sync_holder, row.sync_heartbeat = "other-copy", now - timedelta(seconds=1)
-            db.commit()
+        stamp(first, ["dns"], "other-copy", 1, 0)
     again = live_app(tmp_path, **place)
     with TestClient(again) as client:
         headers = live_signin(client)
@@ -201,32 +210,29 @@ def test_a_live_holder_is_still_busy_after_another_copy_starts(tmp_path, monkeyp
 def test_what_makes_a_lease_free(tmp_path, monkeypatch, request, engine):
     """No holder, no heartbeat, a heartbeat past the bound, or a start past five minutes: free. One second: held."""
     app = prepare(tmp_path, monkeypatch, request, engine)
-    now = utcnow()
+    # heartbeat age, holder, start age. None leaves that stamp empty. Ages are the database clock.
     cases = {
-        "stale": (now, "other", now - HEARTBEAT_BOUND - timedelta(seconds=1)),
-        "recent": (now, "other", now - timedelta(seconds=1)),
-        "aged": (now - timedelta(minutes=6), "other", now),
-        "no-beat": (now, "other", None),
-        "no-holder": (now, None, now),
+        "stale": (61, "other", 0),
+        "recent": (1, "other", 0),
+        "aged": (0, "other", 6 * 60),
+        "no-beat": (None, "other", 0),
+        "no-holder": (0, None, 0),
     }
 
     def release(names):
+        for name, source in zip(names, ("dns", "unifi"), strict=True):
+            heartbeat_age, holder, started_age = cases[name]
+            stamp(app, [source], holder, heartbeat_age, started_age)
         with app.state.session_factory() as db:
-            rows = list(db.scalars(select(Integration).order_by(Integration.id)))
-            for row, name in zip(rows, names, strict=True):
-                started, holder, heartbeat = cases[name]
-                row.status, row.sync_started_at = "syncing", started
-                row.sync_holder, row.sync_heartbeat = holder, heartbeat
-            db.commit()
-        with app.state.session_factory() as db:
-            release_abandoned(db, now)
+            release_abandoned(db)
             db.commit()
             return {row.id: row.status for row in db.scalars(select(Integration))}
 
     try:
-        assert release(("stale", "recent")) == {"dns": "interrupted", "unifi": "syncing"}
-        assert release(("aged", "no-beat")) == {"dns": "interrupted", "unifi": "interrupted"}
-        assert release(("no-holder", "no-holder")) == {"dns": "interrupted", "unifi": "interrupted"}
+        assert release(("stale", "recent")) == {"dns": "silent", "unifi": "syncing"}
+        assert release(("aged", "no-beat")) == {"dns": "silent", "unifi": "silent"}
+        assert release(("no-holder", "no-holder")) == {"dns": "silent", "unifi": "silent"}
+        assert set(whys(app)) == {NO_SIGN}
     finally:
         app.state.engine.dispose()
 
@@ -258,7 +264,6 @@ def test_a_second_release_waits_at_each_write_and_records_the_collection_once(
         tmp_path, monkeypatch, request, engine, at):
     """Whichever of the three writes the first release is in, the other waits, and one record is stored."""
     app = prepare(tmp_path, monkeypatch, request, engine)
-    now = utcnow()
     writes = {"n": 0}
 
     def is_the_write(statement):
@@ -270,18 +275,18 @@ def test_a_second_release_waits_at_each_write_and_records_the_collection_once(
 
     def second():
         with app.state.session_factory() as db:
-            release_abandoned(db, now)
+            release_abandoned(db)
             db.commit()
 
     try:
-        leave_collecting(app, "previous-start", now - HEARTBEAT_BOUND - timedelta(seconds=1), now)
+        stamp(app, ["dns", "unifi"], "previous-start", 61, 0)
         with hold_the_lock(app, is_the_write, second):
             with app.state.session_factory() as db:
-                assert release_abandoned(db, now) == ["dns", "unifi"]
+                assert release_abandoned(db) == ["dns", "unifi"]
                 db.commit()
-        assert audits(app) == 2
+        assert audits(app) == 2 and set(whys(app)) == {NO_SIGN}
         with app.state.session_factory() as db:
-            assert {row.status for row in db.scalars(select(Integration))} == {"interrupted"}
+            assert {row.status for row in db.scalars(select(Integration))} == {"silent"}
     finally:
         app.state.engine.dispose()
 
@@ -327,3 +332,262 @@ def test_a_second_claim_waits_until_the_first_commits_and_is_then_busy(tmp_path,
     finally:
         one.state.engine.dispose()
         two.state.engine.dispose()
+
+
+def _collect(app, source="dns"):
+    """Run one collection against the stand-in the test installed. Nothing here calls a real source."""
+    return asyncio.run(collect_integration(app.state.session_factory, app.state.settings, source, None))
+
+
+@BOTH
+def test_clock_skew_cannot_free_or_pin_a_lease(tmp_path, monkeypatch, request, engine):
+    """A process clock an hour off does not decide the lease. The database clock does, with no wait."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+    real = utcnow()
+    try:
+        stamp(app, ["dns"], "other", 0, 0)
+        monkeypatch.setattr("nyctr.collection.utcnow", lambda: real + timedelta(hours=1))
+        with app.state.session_factory() as db:
+            assert release_abandoned(db) == []
+            db.rollback()
+            assert db.get(Integration, "dns").status == "syncing"
+        stamp(app, ["dns"], "other", 61, 0)
+        monkeypatch.setattr("nyctr.collection.utcnow", lambda: real - timedelta(hours=2))
+        with app.state.session_factory() as db:
+            assert release_abandoned(db) == ["dns"]
+            db.commit()
+        assert whys(app) == [NO_SIGN]
+        with app.state.session_factory() as db:
+            assert db.get(Integration, "dns").status == "silent"
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_restart_is_recorded_only_when_another_holder_is_known(tmp_path, monkeypatch, request, engine):
+    """Restart needs a holder id on the lease that is not this start. Anything else is no sign of life."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+    me = app.state.engine.nyctr_holder
+
+    def once(holder, restart_of):
+        stamp(app, ["dns"], holder, 61, 0)
+        with app.state.session_factory() as db:
+            release_abandoned(db, restart_of=restart_of)
+            db.commit()
+            status = db.get(Integration, "dns").status
+        return status, whys(app)[-1]
+
+    try:
+        assert once("previous-start", me) == ("interrupted", CUT_SHORT)
+        assert once(None, me) == ("silent", NO_SIGN)
+        assert once(me, me) == ("silent", NO_SIGN)
+        assert once("previous-start", None) == ("silent", NO_SIGN)
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_store_stops_when_only_the_holder_changed(tmp_path, monkeypatch, request, engine):
+    """The same start time with a new holder is not this collection's lease, so the store writes nothing."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+
+    async def steal(*_args, **_kwargs):
+        with app.state.session_factory() as db:
+            db.execute(update(Integration).where(Integration.id == "dns").values(sync_holder="other-holder"))
+            db.commit()
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", steal)
+    try:
+        assert _collect(app) == (None, "replaced")
+        with app.state.session_factory() as db:
+            row = db.get(Integration, "dns")
+            assert (row.status, row.sync_holder) == ("syncing", "other-holder")
+            assert db.scalar(select(func.count()).select_from(Audit).where(
+                Audit.action == "integration.collected")) == 0
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_claim_takes_an_abandoned_lease_without_a_release_first(tmp_path, monkeypatch, request, engine):
+    """The claim itself accepts a stale syncing row. Settling it first would hide a claim that only checks status."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+    monkeypatch.setattr("nyctr.collection.release_abandoned", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("nyctr.integrations.collect", fake_collect)
+    try:
+        stamp(app, ["dns"], "other", 61, 0)
+        assert _collect(app)[1] is None
+        with app.state.session_factory() as db:
+            assert db.get(Integration, "dns").status == "connected"
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_collection_records_an_abandoned_lease_before_it_claims(tmp_path, monkeypatch, request, engine):
+    """Collecting over a missed beat records that beat, then stores the new read."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+    monkeypatch.setattr("nyctr.integrations.collect", fake_collect)
+    try:
+        stamp(app, ["dns"], "previous-start", 61, 0)
+        assert _collect(app)[1] is None
+        assert whys(app) == [NO_SIGN]
+        with app.state.session_factory() as db:
+            assert db.get(Integration, "dns").status == "connected"
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_cancelled_collection_is_recorded_as_stopped(tmp_path, monkeypatch, request, engine):
+    """Cancelling the read records stopped at once. It does not wait, and it does not say Nyctr restarted."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+    gate = threading.Event()
+
+    async def block(*_args, **_kwargs):
+        await asyncio.to_thread(gate.wait, 30)
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", block)
+
+    async def scenario():
+        task = asyncio.create_task(collect_integration(app.state.session_factory, app.state.settings, "dns", None))
+        for _ in range(100):
+            with app.state.session_factory() as db:
+                if db.get(Integration, "dns").status == "syncing":
+                    break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("the collection never took the lease")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(scenario())
+        with app.state.session_factory() as db:
+            row = db.get(Integration, "dns")
+            assert row.status == "stopped" and row.sync_holder is None and row.last_error is None
+        assert whys(app) == [STOPPED]
+    finally:
+        gate.set()
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_cancelled_collection_does_not_clear_a_replacement_lease(tmp_path, monkeypatch, request, engine):
+    """The stop matches this claim's holder and start time, so a lease taken since stays."""
+    app = prepare(tmp_path, monkeypatch, request, engine)
+    seen = threading.Event()
+
+    async def steal(*_args, **_kwargs):
+        with app.state.session_factory() as db:
+            db.execute(update(Integration).where(Integration.id == "dns").values(sync_holder="other-holder"))
+            db.commit()
+        seen.set()
+        await asyncio.sleep(30)
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", steal)
+
+    async def scenario():
+        task = asyncio.create_task(collect_integration(app.state.session_factory, app.state.settings, "dns", None))
+        assert await asyncio.to_thread(seen.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(scenario())
+        with app.state.session_factory() as db:
+            row = db.get(Integration, "dns")
+            assert (row.status, row.sync_holder) == ("syncing", "other-holder")
+        assert whys(app) == []
+    finally:
+        app.state.engine.dispose()
+
+
+def beating_past_the_bound(app, source_id) -> bool:
+    """Whether the database clock is past the claim by the bound and a later heartbeat has been written."""
+    with app.state.session_factory() as db:
+        row = db.get(Integration, source_id)
+        if row is None or row.status != "syncing" or row.sync_heartbeat is None or row.sync_started_at is None:
+            return False
+        if utc(row.sync_heartbeat) <= utc(row.sync_started_at):
+            return False
+        bound = int(HEARTBEAT_BOUND.total_seconds())
+        return db.scalar(select(Integration.id).where(
+            Integration.id == source_id,
+            Integration.sync_started_at <= db_ago(db.get_bind(), bound),
+        )) is not None
+
+
+@BOTH
+def test_the_running_app_writes_the_heartbeat_while_a_collection_stalls(tmp_path, monkeypatch, request, engine):
+    """A real start keeps the lease while a collection blocks the server loop for longer than the bound.
+
+    The stand-in never yields, so a heartbeat running on that loop cannot write. Dropping the heartbeat
+    thread leaves the lease free once the bound passes, and this fails. The stand-in stores nothing of
+    its own and calls no source.
+    """
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_DNS", "fabricated-key")
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", "fabricated-key")
+    held, started = threading.Event(), threading.Event()
+
+    async def stall(*_args, **_kwargs):
+        started.set()
+        while not held.is_set():
+            time.sleep(0.2)
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", stall)
+    app = live_app(tmp_path, **home(engine, tmp_path, request))
+    outcome = {}
+
+    def post(client, headers):
+        outcome["response"] = client.post("/api/integrations/dns/sync", headers=headers)
+
+    try:
+        with TestClient(app) as client:
+            seed_live_member(app)
+            headers = live_signin(client)
+            poster = threading.Thread(target=post, args=(client, headers))
+            poster.start()
+            try:
+                assert started.wait(10), "the collection did not start"
+                deadline = time.monotonic() + HEARTBEAT_BOUND.total_seconds() + 25
+                while time.monotonic() < deadline and not beating_past_the_bound(app, "dns"):
+                    threading.Event().wait(0.5)
+                assert beating_past_the_bound(app, "dns"), "the heartbeat did not move before the bound"
+                with app.state.session_factory() as db:
+                    assert db.get(Integration, "dns").status == "syncing"
+                    assert release_abandoned(db) == []
+                    db.rollback()
+            finally:
+                held.set()
+                poster.join(30)
+        assert outcome["response"].status_code == 200, getattr(outcome.get("response"), "text", outcome)
+    finally:
+        held.set()
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_removing_an_abandoned_source_records_the_collection(tmp_path, monkeypatch, request, engine):
+    """Remove records a missed beat before it deletes the source. Skipping that leaves no such record."""
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_DNS", "fabricated-key")
+    monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_UNIFI", "fabricated-key")
+    app = live_app(tmp_path, **home(engine, tmp_path, request))
+    try:
+        with TestClient(app) as client:
+            seed_live_member(app)
+            stamp(app, ["unifi"], "previous-start", 61, 0)
+            headers = live_signin(client)
+            removed = client.request("DELETE", "/api/integrations/unifi", headers=headers, json={"name": "UniFi"})
+            assert removed.status_code == 200, removed.text
+            assert whys(app) == [NO_SIGN]
+            with app.state.session_factory() as db:
+                assert db.get(Integration, "unifi") is None
+    finally:
+        app.state.engine.dispose()

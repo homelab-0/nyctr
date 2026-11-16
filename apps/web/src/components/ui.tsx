@@ -68,7 +68,7 @@ export function Badge({ children, tone = '' }: { children: ReactNode; tone?: str
 export function Status({ value }: { value: string }) {
   const tone = /high|denied|failed|error|blocked/.test(value)
     ? 'red'
-    : /medium|pending|partial|unattributed|unknown|interrupted/.test(value)
+    : /medium|pending|partial|unattributed|unknown|interrupted|silent|stopped/.test(value)
       ? 'amber'
       : /connected|ready|reviewed|observed/.test(value)
         ? 'green'
