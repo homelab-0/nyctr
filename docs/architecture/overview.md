@@ -285,8 +285,11 @@ authorization → execution → verification. Each step has an explicit owner.
   and what it can change. Everything below asks the registry for a capability and
   never names a vendor; see [the integration contract](../integration-contract.md).
 - Collection: `nyctr/integrations/*` adapters and `nyctr/collection.py`. Read only.
-- Analysis: `nyctr/risk.py` (block scoring), `nyctr/analysis.py` (rule-based
-  findings) and `nyctr/links.py` (inferred links between sources). No model.
+- Analysis: `nyctr/risk.py` (block scoring), `nyctr/facts.py` (facts about a
+  name: the stored block, the score, where it resolves and its registration;
+  the certificate and third-party reputation are not asked), `nyctr/analysis.py`
+  (rule-based findings) and `nyctr/links.py` (inferred links between sources).
+  No model.
 - Authorization: an administrator's decision, or a rule in `nyctr/policy.py`.
 - Execution: `nyctr/integrations/actions.py`, gated by `NYCTR_PROVIDER_WRITES`,
   called from `nyctr/access.py` (leases) and `nyctr/guests.py`.

@@ -923,7 +923,9 @@ def test_only_the_model_module_builds_a_request_to_the_model():
         if "model" in {alias.name for node in froms if node.module in (None, "nyctr") for alias in node.names} \
                 or imported & {"model", "nyctr.model"}:
             importers.add(name)
-    assert senders == {"model.py", "oidc.py", "integrations/core.py", "integrations/actions.py"}
+    # facts.py opens a connection to a domain registry and to the resolver. It does not
+    # import the model or read its key; the assertions below keep that so.
+    assert senders == {"model.py", "oidc.py", "integrations/core.py", "integrations/actions.py", "facts.py"}
     assert readers == {"model.py", "config.py"}  # config.py declares the server's own settings and checks them
     assert callers == {"assistant.py", "main.py"}  # the assistant's two uses, and the console's test
     # No other module can be handed the model's address, or call it under another name, without importing it.

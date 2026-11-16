@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import delete, or_, select, update
 
+from .facts import KEPT
 from .integrations import registry
 from .models import (
     AccessRequest,
@@ -28,6 +29,7 @@ from .models import (
     Integration,
     Lease,
     Observation,
+    OwnLookup,
     Resource,
     utc,
 )
@@ -297,9 +299,15 @@ def drop_from(factory, integration_id: str, now: datetime) -> tuple[int, bool]:
 
 
 def expire_lookups(factory, now: datetime) -> None:
-    """Remove the blocked lookups whose time is up. A request keeps its own copy of what it asked about."""
+    """Remove the blocked lookups whose time is up, and the names Nyctr asked about a day ago.
+
+    A request keeps its own copy of what it asked about. The names this
+    installation resolved or sent to a registry use the same day as a
+    gathering, and a gathering still drops them when it writes.
+    """
     with factory() as db:
         db.execute(delete(Observation).where(Observation.expires_at <= now))
+        db.execute(delete(OwnLookup).where(OwnLookup.at <= now - KEPT))
         db.commit()
 
 

@@ -34,6 +34,45 @@ that offers only session sign-in (Pi-hole) is sent one sign-in and one sign-out
 request for the collection's own session. There are no firewall mutations and no
 AI tool calls.
 
+An administrator can ask what Nyctr knows about a name (`GET /api/facts`).
+Fixed code gathers the answer. It reads the stored block and its reason, the
+rule-based score and the factors behind it, and what those stored blocks show
+of the name on this network: when it was first seen, on how many devices and
+how often. It also asks two places outside the network:
+
+- The list of domain registries at `https://data.iana.org/rdap/dns.json`, kept
+  for a day, then the registry that list names for the name. The request is a
+  GET for the name. Nyctr reads the registration date, the expiry date, the
+  registrar and the status words.
+- The system resolver, for where the name resolves. A resolver that gives no
+  address is reported as "the resolver refuses it". That is not an address and
+  not a sign that the name is safe.
+
+The certificate is not asked, because reading it means connecting to the host
+itself. A reputation service run by a third party is not asked, because asking
+would tell that service what was looked up. The demonstration does not make
+either outside request.
+
+A registry request is HTTPS only, and a redirect is not followed. The system
+resolver's DNS is not encrypted. One call has 5 seconds of clock time and the
+whole gathering has 8. At most 256 kB is read, and the read stops when the
+time or the size is reached. A compressed registry answer is refused and not
+read. Before any connection the host is resolved, and a private, loopback,
+link-local, site-local or other address that is not a public one is refused
+with nothing sent. A registry sees the public address the connection comes
+from, even though the request itself carries the name only: no person, no
+device and no network address. A registration that was read, and the list
+of registries, are kept for a day. A failure is kept for ten minutes. A
+timeout is not kept, and neither is running out of time. The database is
+closed before any of these calls, and the answers are written afterwards.
+Each name that was resolved or asked about is written down for a day
+(`own_lookups`) so a later change can ignore Nyctr's own questions. The
+upkeep tick drops a name once that day is up. Nothing reads that list yet.
+A fact that could not be had is marked unavailable, with the reason, and is
+never filled in with a default. A name that would be changed into a different
+name is refused. When the registry's
+answer is for a parent of the name, the fact says so.
+
 Nyctr can change a provider in three narrow ways, all in
 `nyctr/integrations/actions.py`: add or remove one NextDNS allowlist entry,
 create or delete one UniFi hotspot voucher, and authorise or unauthorise one UniFi
@@ -139,6 +178,7 @@ passes for a proxy and can name any address; Nyctr cannot tell the two apart.
 | Stale block becomes an access grant | Reject stale requests. An approval is refused once the blocked lookup behind it has expired; refusing or noting a request needs no fresh evidence |
 | Provider redirects leak an API key | No redirected credential-bearing requests |
 | Configured endpoint targets internal metadata | Explicit console host allowlist, HTTPS validation, reserved-address restrictions |
+| A lookup of a blocked name is aimed at an internal address, or tells someone what was looked up | The registry list and the registry are HTTPS only, with no redirect, 5 seconds of clock time a call, 8 seconds of clock time for the whole gathering and 256 kB. The system resolver's DNS is not encrypted. A private, loopback, link-local, site-local or other address that is not public is refused before any connection. The request carries the name only. A compressed registry answer is refused. A failure is kept for ten minutes. A timeout is not kept. An answer that was read is kept for a day. The database is not held while a call is open. The certificate and third-party reputation are not asked. The demonstration does not make these requests |
 | Provider returns misleading successful HTTP status | Parse provider-level errors; never treat missing/error data as safe |
 | Log text or domain is used as prompt instructions | Future AI treats source text as untrusted evidence and cannot execute |
 | Model invents confidence or permissions | Unknown risk remains unknown; external authorization owns decisions |

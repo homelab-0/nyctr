@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import inspect, select, text
 from test_collection_store import POSTGRES, postgres_database
 
-from nyctr.database import _V2_COLUMNS, _V2_TABLES, make_engine, migrate, session_factory
+from nyctr.database import _V2_COLUMNS, _V2_TABLES, _V4_TABLES, make_engine, migrate, session_factory
 from nyctr.models import AccessRequest, Base, SchemaVersion, User
 from nyctr.seed import seed_demo
 
@@ -13,7 +13,8 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
     """A database created by the first release gains the new tables and columns without losing data."""
     engine = make_engine(f"sqlite:///{tmp_path}/old.db")
     with engine.begin() as connection:
-        old = [t for name, t in Base.metadata.tables.items() if name not in (*_V2_TABLES, "device_presence")]
+        old = [t for name, t in Base.metadata.tables.items()
+               if name not in (*_V2_TABLES, "device_presence", *_V4_TABLES)]
         Base.metadata.create_all(connection, tables=old)
         for table, names in _V2_COLUMNS.items():
             for name in names:
@@ -30,7 +31,7 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
     tables = set(inspect(engine).get_table_names())
     assert set(_V2_TABLES) <= tables
     with session_factory(engine)() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4]
         row = db.get(AccessRequest, "r1")
         assert row.domain == "example.com" and row.risk_score is None and row.decided_by is None
         assert db.get(User, "u1").name == "A"
@@ -38,7 +39,7 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
 
 @pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tmp_path, request, engine_kind):
-    """Schema 2, filled with the demonstration's rows, upgrades to 3 with every stored row unchanged."""
+    """Schema 2, which is the alpha.6 database, upgrades with every stored row unchanged."""
     place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/a6.db"}
     if not place:
         pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
@@ -65,5 +66,45 @@ def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tm
     after = everything()
     assert after.pop("device_presence") == [] and after == before
     with session_factory(engine)() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4]
+    engine.dispose()
+
+
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
+def test_a_schema_three_database_gains_only_the_fact_tables_and_keeps_every_row(tmp_path, request, engine_kind):
+    """Schema 3 gains the fact cache and the lookup list and nothing else.
+
+    The alpha.6 release is schema 2. The test above is that upgrade.
+    """
+    place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/a6.db"}
+    if not place:
+        pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    engine = make_engine(place["database_url"])
+    with engine.begin() as connection:
+        kept = [table for name, table in Base.metadata.tables.items() if name not in _V4_TABLES]
+        Base.metadata.create_all(connection, tables=kept)
+        connection.execute(SchemaVersion.__table__.insert(), [{"version": 1}, {"version": 2}, {"version": 3}])
+    with session_factory(engine)() as db:
+        seed_demo(db)
+        db.commit()
+
+    def everything():
+        with engine.connect() as connection:
+            return {name: sorted(map(repr, connection.execute(text(f"SELECT * FROM {name}"))))
+                    for name in inspect(connection).get_table_names() if name != "schema_versions"}
+
+    before = everything()
+    assert set(_V4_TABLES).isdisjoint(before) and sum(map(len, before.values())) > 100
+    migrate(engine)
+    migrate(engine)  # A second start must be a no-op.
+    after = everything()
+    assert after.pop("fact_cache") == [] and after.pop("own_lookups") == [] and after == before
+    with engine.connect() as connection:
+        present = set(inspect(connection).get_table_names())
+        columns = {name: [column["name"] for column in inspect(connection).get_columns(name)] for name in _V4_TABLES}
+    assert set(_V4_TABLES) <= present and columns == {
+        "fact_cache": ["domain", "kind", "value", "state", "fetched_at"],
+        "own_lookups": ["id", "name", "at"]}
+    with session_factory(engine)() as db:
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4]
     engine.dispose()
