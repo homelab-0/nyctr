@@ -22,7 +22,7 @@ machine in place of `55432`, and any container name that is not in use.
 ```sh
 docker run -d --name nyctr-test-postgres -e POSTGRES_PASSWORD=local-only \
   -p 127.0.0.1:55432:5432 postgres:17-bookworm
-until docker exec nyctr-test-postgres pg_isready -U postgres; do sleep 1; done
+until docker exec nyctr-test-postgres pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
 ```
 
 Then point the tests at it. The address ends in `/`: each case makes a database
