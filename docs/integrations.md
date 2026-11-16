@@ -221,8 +221,13 @@ sharing between sites, is tested with fabricated answers only.
   which is two full minutes of the limit and happens only when something else
   used the console just before. If it would have to wait longer it ends as a
   rate limit and the scheduled retry comes back after the wait. So a collection
-  ends within 180 seconds, a backstop stops it at 210, and its lease on the
-  source lasts 300.
+  ends within 180 seconds, and a backstop stops it at 210. The lease stays with
+  the copy that holds it while that copy's heartbeat is under 60 seconds old,
+  and for 300 seconds at most. The heartbeat is written every 5 seconds from
+  the copy's own thread, on the database clock. A restart has a new holder id.
+  The next start calls the lease a restart only when it names a different
+  holder. A missed beat is no sign of life, and a collection cancelled before
+  it stored is stopped.
 - A connection test waits at most 20 seconds in total for a turn. Past that it
   reports that the request limit is in use and to try again shortly. A test
   that sent all 96 requests itself, waited for nothing else, and still needed

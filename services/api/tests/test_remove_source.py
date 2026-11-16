@@ -222,6 +222,7 @@ def test_refused_removals_change_nothing(world, case, status):
         with app.state.session_factory() as db:
             row = db.get(Integration, "unifi")
             row.status, row.sync_started_at = "syncing", utcnow()
+            row.sync_holder, row.sync_heartbeat = "live", row.sync_started_at
             db.commit()
     before = snapshot(app)
     assert remove(client, headers, id_, name).status_code == status

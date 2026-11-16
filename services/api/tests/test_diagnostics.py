@@ -9,9 +9,11 @@ from threading import Event
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from test_collection import live_client, setup_integration
 
+from nyctr.collection import NO_SIGN, db_ago, holder_id
+from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import IntegrationError, Snapshot, core
 from nyctr.models import (
     AccessRequest,
@@ -23,7 +25,6 @@ from nyctr.models import (
     Relationship,
     Resource,
     User,
-    utc,
     utcnow,
 )
 
@@ -387,6 +388,7 @@ def test_existing_collection_lease_rejects_probe_without_provider_io(saved, monk
         integration = db.get(Integration, integration_id)
         integration.status = "syncing"
         integration.sync_started_at = utcnow()
+        integration.sync_holder, integration.sync_heartbeat = "live", integration.sync_started_at
         db.commit()
     response = client.post(f"/api/integrations/{integration_id}/diagnostics", headers=headers)
     assert response.status_code == 409 and calls == []
@@ -493,17 +495,12 @@ def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch,
                                   **({"rows_kept": 30} if last_partial else {})}))
         db.commit()
     prior_health = client.get("/api/integrations").json()
-    lease_clock = [utcnow()]
     started = [Event(), Event()]
     release = [Event(), Event()]
     calls = []
 
-    def lease_time():
-        """Advance only lease time so expiration is deterministic without a five-minute test delay."""
-        return lease_clock[0]
-
     async def held_provider(*args):
-        """Pause each of two real HTTP probes independently after its successful lease claim."""
+        """Pause each of two probes independently after its successful lease claim. No source is contacted."""
         index = len(calls)
         calls.append(index)
         started[index].set()
@@ -511,7 +508,14 @@ def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch,
             await asyncio.sleep(0.005)
         return Snapshot()
 
-    monkeypatch.setattr("nyctr.main.utcnow", lease_time)
+    def age_the_lease():
+        """Make the held lease older than five minutes on the database clock, without moving the process clock."""
+        with client.app.state.session_factory() as db:
+            past = db_ago(db.get_bind(), 6 * 60)
+            db.execute(update(Integration).where(Integration.id == integration_id).values(
+                sync_started_at=past, sync_heartbeat=past))
+            db.commit()
+
     monkeypatch.setattr("nyctr.integrations.collect", held_provider)
     path = f"/api/integrations/{integration_id}"
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -519,7 +523,7 @@ def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch,
         replacement = None
         try:
             assert started[0].wait(timeout=5)
-            lease_clock[0] += timedelta(minutes=6)
+            age_the_lease()
             replacement = pool.submit(client.post, path + "/diagnostics", headers=headers)
             assert started[1].wait(timeout=5)
             release[0].set()
@@ -527,7 +531,8 @@ def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch,
             with client.app.state.session_factory() as db:
                 integration = db.get(Integration, integration_id)
                 assert integration.status == "syncing"
-                assert utc(integration.sync_started_at) == lease_clock[0]
+                assert integration.sync_holder == holder_id(client.app.state.session_factory)
+                assert integration.sync_started_at is not None
             assert client.post(path + "/diagnostics", headers=headers).status_code == 409
             assert client.post(path + "/sync", headers=headers).status_code == 409
         finally:
@@ -540,6 +545,92 @@ def test_expired_diagnostic_cannot_clear_a_replacement_lease(saved, monkeypatch,
         assert integration.sync_started_at is None
     assert client.get("/api/integrations").json() == prior_health
     assert len(calls) == 2
+
+
+def test_diagnostics_restores_health_a_collection_finished_with(saved, monkeypatch):
+    """A collection that finishes after the probe has read the source, and before the probe takes its lease, is what the probe puts back."""
+    client, headers, integration_id = saved
+    sentence = "Collection failed. Check that the source can be reached and how it is set up."
+    with client.app.state.session_factory() as db:
+        row = db.get(Integration, integration_id)
+        row.status, row.last_error, row.last_sync = "connected", None, utcnow()
+        db.commit()
+
+    def finish_the_collection(source):
+        """Another copy stores a failed collection in the gap before this probe takes the lease."""
+        with client.app.state.session_factory() as db:
+            row = db.get(Integration, integration_id)
+            row.status, row.last_error = "error", sentence
+            db.commit()
+        return holder_id(source)
+
+    async def diagnose(provider, integration_id, config, secret_ref):
+        return DiagnosticReport(integration_id=integration_id, provider=provider, checked_at=utcnow(),
+                                duration_ms=1, outcome="failed", summary="Fabricated.", checks=[],
+                                capabilities=[], evidence_gaps=[], snapshot_counts=None)
+
+    monkeypatch.setattr("nyctr.main.holder_id", finish_the_collection)
+    monkeypatch.setattr("nyctr.main.diagnose_integration", diagnose)
+    response = client.post(f"/api/integrations/{integration_id}/diagnostics", headers=headers)
+    assert response.status_code == 200, response.text
+    with client.app.state.session_factory() as db:
+        row = db.get(Integration, integration_id)
+        assert (row.status, row.last_error, row.sync_holder) == ("error", sentence, None)
+
+
+def test_diagnostics_records_an_abandoned_collection(saved, monkeypatch):
+    """A probe that takes over a quiet collection records it, then leaves the earlier health in place."""
+    client, headers, integration_id = saved
+    with client.app.state.session_factory() as db:
+        past = db_ago(db.get_bind(), 120)
+        db.execute(update(Integration).where(Integration.id == integration_id).values(
+            status="syncing", sync_holder="previous-start", sync_started_at=past, sync_heartbeat=past))
+        db.commit()
+
+    async def local(*_args, **_kwargs):
+        """A probe that never leaves the process."""
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", local)
+    response = client.post(f"/api/integrations/{integration_id}/diagnostics", headers=headers)
+    assert response.status_code == 200, response.text
+    assert client.get("/api/integrations").json()[0]["status"] == "configured"
+    with client.app.state.session_factory() as db:
+        recorded = list(db.scalars(select(Audit).where(Audit.action == "integration.collection_interrupted")))
+        assert [row.details.get("why") for row in recorded] == [NO_SIGN]
+        assert db.get(Integration, integration_id).sync_holder is None
+
+
+def test_a_probe_does_not_clear_another_holders_lease_at_the_same_start(saved, monkeypatch):
+    """Cleanup matches the holder as well as the start time, so the same start time held by someone else stays."""
+    client, headers, integration_id = saved
+    started, release = Event(), Event()
+
+    async def blocked(*_args, **_kwargs):
+        """Hold the probe open. Nothing is read from a source."""
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.005)
+        return Snapshot()
+
+    monkeypatch.setattr("nyctr.integrations.collect", blocked)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, f"/api/integrations/{integration_id}/diagnostics", headers=headers)
+        try:
+            assert started.wait(timeout=5)
+            with client.app.state.session_factory() as db:
+                row = db.get(Integration, integration_id)
+                claimed = row.sync_started_at
+                row.sync_holder = "other-holder"
+                db.commit()
+            release.set()
+            assert future.result(timeout=5).status_code == 200
+        finally:
+            release.set()
+    with client.app.state.session_factory() as db:
+        row = db.get(Integration, integration_id)
+        assert row.status == "syncing" and row.sync_holder == "other-holder"
+        assert row.sync_started_at == claimed
 
 
 def test_probe_context_isolation_prevents_previous_success_from_verifying_a_failed_probe(saved, monkeypatch):

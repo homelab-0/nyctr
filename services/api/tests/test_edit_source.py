@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from test_collection import live_client
 
-from nyctr.collection import collect_integration
+from nyctr.collection import collect_integration, holder_id
 from nyctr.diagnostics import DiagnosticReport
 from nyctr.integrations import Snapshot
 from nyctr.main import MOVED_SOURCE, _settled_status
@@ -220,10 +220,14 @@ def test_demo_sources_cannot_be_edited(client, admin_headers):
 
 
 def hold_lease(client, id_, started):
-    """Mark the source as being read since `started`, as a collection or a diagnostic does."""
+    """Mark the source as being read since `started`, with a fresh heartbeat.
+
+    The heartbeat is new, so the only reason the lease is free is that `started` is past five minutes.
+    """
     with client.app.state.session_factory() as db:
         row = db.get(Integration, id_)
         row.status, row.sync_started_at = "syncing", started
+        row.sync_holder, row.sync_heartbeat = "live", utcnow()
         db.commit()
 
 
@@ -336,7 +340,8 @@ def test_a_read_that_outlived_its_lease_stores_nothing_after_the_source_moved(so
                                                                                             None, None)
     assert row["config"]["base_url"] == "https://second.example.net/api"
     assert client.get("/api/resources").json() == []
-    assert not [entry for entry in audit_trail(client) if entry[0].startswith("integration.collect")]
+    assert [entry[0] for entry in audit_trail(client) if entry[0].startswith("integration.collect")] == [
+        "integration.collection_interrupted"]
 
 
 @new_source
@@ -348,17 +353,18 @@ def test_diagnostics_never_probe_or_restore_what_an_edit_replaced_before_the_lea
         db.commit()
     land_edit, probed = edit_once(client, headers, id_), []
 
-    def clock():
+    def hold_then_edit(source):
+        """The route asks which start this is between reading the source and taking the lease."""
         land_edit()
-        return utcnow()
+        return holder_id(source)
 
     async def diagnose(provider, integration_id, config, secret_ref):
         probed.append((config["base_url"], secret_ref))
         return DiagnosticReport(integration_id=integration_id, provider=provider, checked_at=utcnow(), duration_ms=1,
                                 outcome="verified", summary="Fabricated.", checks=[], capabilities=[],
                                 evidence_gaps=[], snapshot_counts=None)
-    # The route reads the clock between loading the source and taking the lease.
-    monkeypatch.setattr("nyctr.main.utcnow", clock)
+    # The route asks which start this is between loading the source and taking the lease.
+    monkeypatch.setattr("nyctr.main.holder_id", hold_then_edit)
     monkeypatch.setattr("nyctr.main.diagnose_integration", diagnose)
     assert client.post(f"/api/integrations/{id_}/diagnostics", headers=headers).status_code == 200
     assert probed == [("https://second.example.net/api", NEW_ADDRESS["secret_ref"])]

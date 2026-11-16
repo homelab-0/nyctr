@@ -449,3 +449,37 @@ describe('Activity rows about a sign-in tie', () => {
     expect(screen.getAllByText('Ended a tie between a person and a device')).toHaveLength(1);
   });
 });
+
+describe('Activity when a collection stopped short', () => {
+  it('says why that collection stopped, and does not call every one a restart', async () => {
+    mockApi({
+      'GET /audit': [
+        event('a', 'integration.collection_interrupted', {
+          name: 'Office DNS',
+          why: 'The last collection was cut short by a restart.',
+        }),
+        event('b', 'integration.collection_interrupted', {
+          name: 'Office DNS',
+          why: 'No sign of life from the copy that was collecting.',
+        }),
+        event('c', 'integration.collection_interrupted', {
+          name: 'Office DNS',
+          why: 'The last collection was stopped.',
+        }),
+      ],
+      'GET /users': [],
+      'GET /integrations': [],
+    });
+    render(<Activity />);
+    const rows = (await screen.findAllByText('Stopped collecting from Office DNS')).map((cell) =>
+      cell.closest('tr')!,
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('The last collection was cut short by a restart.');
+    expect(rows[1].textContent).toContain('No sign of life from the copy that was collecting.');
+    expect(rows[1].textContent).not.toContain('restart');
+    expect(rows[2].textContent).toContain('The last collection was stopped.');
+    expect(rows[2].textContent).not.toContain('restart');
+    expect(document.body.textContent).not.toContain('integration.collection_interrupted');
+  });
+});

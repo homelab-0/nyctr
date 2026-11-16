@@ -37,6 +37,22 @@ import {
   useIntegrationDiagnostics,
 } from '../components/IntegrationDiagnostics';
 
+/** A collection that ended without storing, in the words the card uses. Not a failed collection. */
+const LEFT_OFF: Record<string, { badge: string; notice: string }> = {
+  interrupted: {
+    badge: 'Cut short by a restart',
+    notice: 'The last collection was cut short by a restart.',
+  },
+  silent: {
+    badge: 'No sign of life',
+    notice: 'No sign of life from the copy that was collecting.',
+  },
+  stopped: {
+    badge: 'Stopped',
+    notice: 'The last collection was stopped.',
+  },
+};
+
 /** Shown wherever a collection stopped at its read limit, so it is never taken for a complete one. */
 /** Shown on the edit form of a source that has collected; the server refuses with the same words. */
 const FIXED_SOURCE =
@@ -573,7 +589,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
               <Card className="integration-card" key={integration.id}>
                 <div className="integration-top">
                   <SourceTag provider={integration.provider} big />
-                  {integration.status === 'connected' && integration.gaps?.length ? (
+                  {LEFT_OFF[integration.status] ? (
+                    <Badge tone="amber">{LEFT_OFF[integration.status].badge}</Badge>
+                  ) : integration.status === 'connected' && integration.gaps?.length ? (
                     <Badge tone="amber">Connected, with gaps</Badge>
                   ) : (
                     <Status value={integration.status} />
@@ -618,6 +636,9 @@ export default function Integrations({ sources = [] }: { sources?: Rules['source
                     <span>Next collection</span>
                     <strong>{nextCollection(schedule.data, now)}</strong>
                   </div>
+                )}
+                {LEFT_OFF[integration.status] && (
+                  <Notice tone="amber">{LEFT_OFF[integration.status].notice}</Notice>
                 )}
                 {integration.status === 'partial' && (
                   <Notice tone="amber">

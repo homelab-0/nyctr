@@ -196,6 +196,37 @@ describe('briefing sources', () => {
     expect(rows.get('silent')!.querySelector('.dot')!.className).toBe('dot red');
   });
 
+  it.each([
+    [
+      'interrupted',
+      'The last collection was cut short by a restart.',
+      'was cut short by a restart',
+    ],
+    ['silent', 'No sign of life from the copy that was collecting.', 'had no sign of life'],
+    ['stopped', 'The last collection was stopped.', 'was stopped'],
+  ])(
+    'says a %s collection ended, and not that it is still running or that it failed',
+    async (status, notice, title) => {
+      const rows = await open([source('cut', status)], scheduleFixture(), [
+        {
+          kind: 'source',
+          id: 'cut',
+          severity: 'medium',
+          at: null,
+          title: `The last collection from cut source ${title}`,
+          detail: notice,
+        },
+      ]);
+      const cut = rows.get('cut')!;
+      expect(cut.textContent).toContain(notice);
+      expect(cut.textContent).not.toContain('Collected');
+      expect(cut.textContent).not.toContain('Last collection failed');
+      expect(cut.querySelector('.dot')!.className).toBe('dot yellow');
+      expect(screen.getByText(`The last collection from cut source ${title}`)).toBeTruthy();
+      expect(screen.getAllByText(notice)).toHaveLength(2);
+    },
+  );
+
   it('says when each source is next collected, failed ones included', async () => {
     const rows = await open([source('fine', 'connected'), source('failed', 'error')]);
     await screen.findAllByText('Next collection in 12 min');

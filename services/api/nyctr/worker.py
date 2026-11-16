@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 
 from . import presence, retention, schedule
 from .access import OPEN, BeingEnded, clear_stale_reviews, end_lease
-from .collection import analyse, collect_integration, off_loop
+from .collection import analyse, collect_integration, off_loop, release_abandoned
 from .guests import enforce
 from .models import Integration, Lease, utcnow
 from .security import audit
@@ -199,6 +199,17 @@ class Upkeep:
         self.clearing: asyncio.Task | None = None
         self.dropped: dict = {}  # When each source was last gone through for what has left it.
 
+    def _release(self) -> None:
+        """Record collections whose holder is gone. A row another transaction holds is left until the next tick."""
+        with self.factory() as db:
+            # A holder that died since the last tick is recorded here too, so a copy that stayed up
+            # does not leave another copy's card saying the source is still being collected.
+            # The heartbeat is the database clock, and so is this check: a schedule clock moved
+            # ahead must not make a collection that is still running look abandoned. A missed beat
+            # is no sign of life. Only a start of Nyctr calls a different holder a restart.
+            release_abandoned(db)
+            db.commit()
+
     def tick(self) -> None:
         """Start a collection pass if none is going, the endings that are due, and the clearing out.
 
@@ -208,6 +219,20 @@ class Upkeep:
         A run or retry that comes due during a pass is not claimed until the pass
         ends, so it stays due in the database for the next tick, or for another copy.
         """
+        self._release()
+        self._start()
+
+    async def tick_on_loop(self) -> None:
+        """The tick the server runs. Freeing a lease can wait on a row, so that work stays off this loop.
+
+        It still finishes before a collection starts, which is the order `tick` keeps for a caller that is
+        already off the loop.
+        """
+        await off_loop(self._release)
+        self._start()
+
+    def _start(self) -> None:
+        """Start the collection, the endings and the clearing that are due. The release has already run."""
         if self.collecting is None or self.collecting.done():
             self.collecting = asyncio.create_task(self._collect())
         with self.factory() as db:
@@ -263,7 +288,7 @@ async def run(app) -> None:
         while True:
             await asyncio.sleep(TICK_SECONDS)
             try:
-                upkeep.tick()
+                await upkeep.tick_on_loop()
             except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
                 log.warning("Background upkeep failed: %s", type(error).__name__)
     finally:

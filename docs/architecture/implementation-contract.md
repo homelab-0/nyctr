@@ -229,3 +229,14 @@ access_requests. No existing row is rewritten.
 Schema version 3 adds one table, `device_presence` (sign-in ties and conflicts), and alters
 nothing else. The upgrade from version 2 is tested on SQLite and PostgreSQL 17 with every
 stored row compared before and after.
+
+Schema version 4 adds the fact cache (`fact_cache`) and the list of names Nyctr
+itself looked up (`own_lookups`). Nothing that exists is altered.
+
+Schema version 5 adds two nullable columns on `integrations`, `sync_holder` and
+`sync_heartbeat`. No existing row is rewritten. Heartbeats are written and
+compared with the database clock. A start of Nyctr that finds a collection
+whose holder is a different one, and whose heartbeat is older than 60 seconds,
+records it as cut short by a restart. A missed beat is recorded as no sign of
+life, and a collection cancelled before it stored is recorded as stopped. None
+of these leave the source marked as collecting.

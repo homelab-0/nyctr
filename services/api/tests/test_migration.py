@@ -9,6 +9,13 @@ from nyctr.models import AccessRequest, Base, SchemaVersion, User
 from nyctr.seed import seed_demo
 
 
+def _rows(engine):
+    """Every stored row except the schema version list, so a test can compare a migration."""
+    with engine.connect() as connection:
+        return {name: sorted(map(repr, connection.execute(text(f"SELECT * FROM {name}"))))
+                for name in inspect(connection).get_table_names() if name != "schema_versions"}
+
+
 def test_schema_one_database_is_upgraded_in_place(tmp_path):
     """A database created by the first release gains the new tables and columns without losing data."""
     engine = make_engine(f"sqlite:///{tmp_path}/old.db")
@@ -19,6 +26,8 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
         for table, names in _V2_COLUMNS.items():
             for name in names:
                 connection.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))
+        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_holder"))
+        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_heartbeat"))
         connection.execute(SchemaVersion.__table__.insert().values(version=1))
         connection.execute(text("INSERT INTO users (id, email, name, role, active) "
                                 "VALUES ('u1', 'a@example.net', 'A', 'member', 1)"))
@@ -29,9 +38,11 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
     migrate(engine)
     migrate(engine)  # A second start must be a no-op.
     tables = set(inspect(engine).get_table_names())
-    assert set(_V2_TABLES) <= tables
+    assert set(_V2_TABLES) <= tables and set(_V4_TABLES) <= tables
     with session_factory(engine)() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4, 5]
+        columns = {column["name"] for column in inspect(engine).get_columns("integrations")}
+        assert {"sync_holder", "sync_heartbeat"} <= columns
         row = db.get(AccessRequest, "r1")
         assert row.domain == "example.com" and row.risk_score is None and row.decided_by is None
         assert db.get(User, "u1").name == "A"
@@ -54,19 +65,14 @@ def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tm
     with engine.begin() as connection:
         ties.drop(connection)  # alpha.6 had every table but this one
 
-    def everything():
-        with engine.connect() as connection:
-            return {name: sorted(map(repr, connection.execute(text(f"SELECT * FROM {name}"))))
-                    for name in inspect(connection).get_table_names() if name != "schema_versions"}
-
-    before = everything()
+    before = _rows(engine)
     assert "device_presence" not in before and sum(map(len, before.values())) > 100
     migrate(engine)
     migrate(engine)  # A second start must be a no-op.
-    after = everything()
+    after = _rows(engine)
     assert after.pop("device_presence") == [] and after == before
     with session_factory(engine)() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4, 5]
     engine.dispose()
 
 
@@ -88,16 +94,11 @@ def test_a_schema_three_database_gains_only_the_fact_tables_and_keeps_every_row(
         seed_demo(db)
         db.commit()
 
-    def everything():
-        with engine.connect() as connection:
-            return {name: sorted(map(repr, connection.execute(text(f"SELECT * FROM {name}"))))
-                    for name in inspect(connection).get_table_names() if name != "schema_versions"}
-
-    before = everything()
+    before = _rows(engine)
     assert set(_V4_TABLES).isdisjoint(before) and sum(map(len, before.values())) > 100
     migrate(engine)
     migrate(engine)  # A second start must be a no-op.
-    after = everything()
+    after = _rows(engine)
     assert after.pop("fact_cache") == [] and after.pop("own_lookups") == [] and after == before
     with engine.connect() as connection:
         present = set(inspect(connection).get_table_names())
@@ -106,5 +107,41 @@ def test_a_schema_three_database_gains_only_the_fact_tables_and_keeps_every_row(
         "fact_cache": ["domain", "kind", "value", "state", "fetched_at"],
         "own_lookups": ["id", "name", "at"]}
     with session_factory(engine)() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4, 5]
+    engine.dispose()
+
+
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
+def test_a_schema_four_database_gains_only_the_lease_columns_and_keeps_every_row(tmp_path, request, engine_kind):
+    """Schema 4 gains the collection holder's id and heartbeat, and every stored row stays."""
+    place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/a6.db"}
+    if not place:
+        pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    engine = make_engine(place["database_url"])
+    with engine.begin() as connection:
+        Base.metadata.create_all(connection)
+        connection.execute(SchemaVersion.__table__.insert(),
+                           [{"version": 1}, {"version": 2}, {"version": 3}, {"version": 4}])
+    with session_factory(engine)() as db:
+        seed_demo(db)
+        db.commit()
+    # The rows are stored first. Dropping the columns afterwards is what a schema 4 database looks like.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_holder"))
+        connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_heartbeat"))
+
+    before = _rows(engine)
+    assert sum(map(len, before.values())) > 100
+    migrate(engine)
+    migrate(engine)  # A second start must be a no-op.
+    after = _rows(engine)
+    stored_before, stored_after = before.pop("integrations"), after.pop("integrations")
+    assert after == before and len(stored_after) == len(stored_before) > 0
+    with engine.connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("integrations")}
+        holders = connection.execute(text("SELECT sync_holder, sync_heartbeat FROM integrations")).all()
+    assert {"sync_holder", "sync_heartbeat"} <= columns
+    assert holders and all(row == (None, None) for row in holders)
+    with session_factory(engine)() as db:
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4, 5]
     engine.dispose()

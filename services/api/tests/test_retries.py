@@ -168,7 +168,9 @@ def test_a_retry_waits_while_the_source_is_being_collected_and_never_runs_in_dem
         seed_live_member(live)
         tick(live, start)
         with live.state.session_factory() as db:
-            db.get(Integration, "dns").status, db.get(Integration, "dns").sync_started_at = "syncing", utcnow()
+            row = db.get(Integration, "dns")
+            row.status, row.sync_started_at = "syncing", utcnow()
+            row.sync_holder, row.sync_heartbeat = "live", row.sync_started_at
             db.commit()
         tick(live, start + timedelta(minutes=1))
         assert len(asked) == 1
