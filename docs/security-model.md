@@ -206,8 +206,9 @@ audit record (`rule.access_checked`):
 9. The person's openings in the last day are under the limit for each person,
    and everyone's are under the daily total. Both are counted again when the
    person's turn is held. As the opening is stored, the rule's row is locked and
-   the rule is read again, and every check is run again with it. A refusal then
-   takes back what was added at the source and is recorded.
+   the rule is read again, and every check is run again with it. A refusal is
+   recorded. What was added at the source is removed by the next upkeep tick,
+   not at once.
 10. The time is the shorter of what was asked and the tier's limit.
 
 ## Two addresses
