@@ -880,7 +880,7 @@ def engine_for(kind, tmp_path, request):
     return engine
 
 
-@pytest.mark.parametrize("kind", ["sqlite", "postgresql"])
+@pytest.mark.parametrize("kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 def test_a_slow_registry_does_not_lock_the_database(tmp_path, monkeypatch, request, kind):
     """Another write commits while the registry is still answering. It is not told the database is locked."""
     entered, release = threading.Event(), threading.Event()
@@ -929,4 +929,49 @@ def test_a_slow_registry_does_not_lock_the_database(tmp_path, monkeypatch, reque
     finally:
         release.set()
         other.join(15)
+        engine.dispose()
+
+
+@pytest.mark.parametrize("kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
+@pytest.mark.parametrize("domains", [("example.com", "example.com"), ("left.example", "right.example")])
+def test_two_gatherings_that_both_miss_the_cache_both_finish(tmp_path, monkeypatch, request, kind, domains):
+    """Two gatherings that write at the same moment both finish, and both keep the names they asked about."""
+    net = Net()
+    net.install(monkeypatch)
+    real = facts._persist
+    gate = threading.Barrier(2)
+
+    def persist(*args, **kwargs):
+        gate.wait(15)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(facts, "_persist", persist)
+    engine = engine_for(kind, tmp_path, request)
+    factory = session_factory(engine)
+    found = []
+
+    def run(domain):
+        try:
+            with factory() as db:
+                found.append((domain, facts.gather(db, domain)))
+        except Exception as error:  # noqa: BLE001 - the test reports the lost write
+            found.append((domain, error))
+
+    threads = [threading.Thread(target=run, args=(domain,)) for domain in domains]
+    for thread in threads:
+        thread.start()
+    try:
+        for thread in threads:
+            thread.join(20)
+        assert [thread.is_alive() for thread in threads] == [False, False]
+        assert len(found) == 2
+        assert all(isinstance(result, list) for _domain, result in found)
+        with factory() as db:
+            names = [row.name for row in db.scalars(select(OwnLookup))]
+        assert names.count("data.iana.org") == 2
+        for domain, result in found:
+            registration = {item.kind: item for item in result}["registration"]
+            assert registration.state in {"known", "unavailable"} and not isinstance(registration, Exception)
+            assert domain in names
+    finally:
         engine.dispose()

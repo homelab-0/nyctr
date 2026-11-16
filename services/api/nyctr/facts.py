@@ -21,7 +21,8 @@ can ignore Nyctr's own questions. Nothing reads that list yet.
 
 The cache is read and the database is closed before any of those calls. The
 answers and the lookup list are written afterwards, in one short step. A call
-does not hold the database.
+does not hold the database. A second gathering that reaches the same cache row
+updates it, and still writes the names it asked about.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import idna
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from . import risk
@@ -250,14 +253,25 @@ def _cached(db: Session, domain: str, kind: str, wall: datetime) -> FactCache | 
     return row if _fresh(row, wall) else None
 
 
+def _insert(db: Session):
+    """The insert that can update a row both SQLite and PostgreSQL already have."""
+    return pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+
+
 def _store(db: Session, domain: str, kind: str, fact: Fact, wall: datetime) -> None:
-    """Write one cache row. The caller commits it, with no network call left open."""
+    """Write one cache row, or update it when another gathering wrote it first.
+
+    Two gatherings can both miss the cache and then write. An insert that
+    updates on conflict keeps both of those writes, including the lookup list
+    committed with this row.
+    """
     payload = {"value": fact.value, "reason": fact.reason}
-    row = db.get(FactCache, (domain, kind))
-    if row is None:
-        db.add(FactCache(domain=domain, kind=kind, value=payload, state=fact.state, fetched_at=wall))
-    else:
-        row.value, row.state, row.fetched_at = payload, fact.state, wall
+    statement = _insert(db)(FactCache).values(domain=domain, kind=kind, value=payload, state=fact.state,
+                                              fetched_at=wall)
+    excluded = statement.excluded
+    statement = statement.on_conflict_do_update(index_elements=[FactCache.domain, FactCache.kind], set_={
+        "value": excluded.value, "state": excluded.state, "fetched_at": excluded.fetched_at})
+    db.execute(statement)
 
 
 def _from_cache(row: FactCache, kind: str, source: str) -> Fact:
@@ -686,14 +700,19 @@ def _network(memo: _Memo, name: str, wall: datetime, started: float):
 
 
 def _persist(db: Session, name: str, wall: datetime, lookups: list[str], services, remembered: Fact | None) -> None:
-    """Write the cache and the lookup list in one transaction, after the calls have finished."""
+    """Write the cache and the lookup list in one transaction, after the calls have finished.
+
+    The cache rows update when another gathering has just written them. Each
+    name asked about is a new lookup row: its id is new, so two gatherings do
+    not collide there, and both lists survive the commit.
+    """
     if services is not None:
         _store(db, "", "rdap_bootstrap", _known("rdap_bootstrap", "registry", services, wall), wall)
     if remembered is not None:
         _store(db, name, "registration", remembered, wall)
     db.execute(delete(OwnLookup).where(OwnLookup.at <= wall - KEPT))
-    for item in lookups:
-        db.add(OwnLookup(name=item, at=wall))
+    if lookups:
+        db.execute(_insert(db)(OwnLookup), [{"name": item, "at": wall} for item in lookups])
     db.commit()
 
 

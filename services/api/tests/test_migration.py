@@ -70,7 +70,7 @@ def test_an_alpha_6_database_gains_only_the_table_of_ties_and_keeps_every_row(tm
     engine.dispose()
 
 
-@pytest.mark.parametrize("engine_kind", ["sqlite", "postgresql"])
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 def test_a_schema_three_database_gains_only_the_fact_tables_and_keeps_every_row(tmp_path, request, engine_kind):
     """Schema 3 gains the fact cache and the lookup list and nothing else.
 
