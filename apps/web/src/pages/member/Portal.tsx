@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { api, ApiError, post, useApi } from '../../api';
+import { useRefreshWhile } from '../../lib/refresh';
 import { everyText, useScheduleSummary } from '../../lib/schedule';
 import { useAuth } from '../../auth';
 import {
@@ -956,6 +957,15 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const block = params.get('block');
   const request = params.get('request');
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
+  // My requests and a request's own page keep reading while one of this member's
+  // requests is still undecided, so the answer shows up where they are already looking.
+  const waiting =
+    (section === 'requests' || (section === 'portal' && request !== null)) &&
+    (data.requests.data ?? []).some((row) => row.status === 'pending');
+  useRefreshWhile(waiting, () => {
+    data.requests.reload();
+    data.leases.reload();
+  });
   useEffect(() => {
     document.title = 'Blocked sites · Nyctr';
     window.scrollTo?.(0, 0);

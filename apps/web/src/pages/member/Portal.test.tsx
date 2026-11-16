@@ -101,9 +101,13 @@ function open(routes: Record<string, unknown>, hash = '/portal') {
   return { calls, user: userEvent.setup() };
 }
 
+const scrollTo = window.scrollTo.bind(window);
 beforeEach(() => setCsrfToken(''));
 afterEach(() => {
   cleanup();
+  window.scrollTo = scrollTo;
+  vi.useRealTimers();
+  Reflect.deleteProperty(document, 'visibilityState');
   setCsrfToken('');
   vi.unstubAllGlobals();
 });
@@ -953,4 +957,318 @@ describe('the device a member signed in on', () => {
     },
     patient,
   );
+});
+
+const FAKED = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] as const;
+const OWN = new Set([
+  '/auth/me',
+  '/me/device',
+  '/requests',
+  '/leases',
+  '/devices',
+  '/blocks',
+  '/blocks/coverage',
+  '/presence',
+]);
+type Calls = { method: string; path: string }[];
+const reads = (calls: Calls, path: string) =>
+  calls.filter((call) => call.method === 'GET' && call.path === path).length;
+const pending = {
+  status: 'pending',
+  decided_by: null,
+  decision_note: 'It will not open by itself.',
+};
+const quiet = { 'GET /presence': { items: [] } };
+
+function clock() {
+  vi.useFakeTimers({ now: Date.now(), toFake: [...FAKED] });
+}
+/** Lets the open page finish its first read without moving the fake clock. */
+async function paint() {
+  for (let turn = 0; turn < 20; turn += 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+}
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+function hide(hidden: boolean) {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => (hidden ? 'hidden' : 'visible'),
+  });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+function onlyOwn(calls: Calls) {
+  expect(calls.every((call) => OWN.has(call.path))).toBe(true);
+}
+
+describe('an answer while the member page stays open', () => {
+  it('shows a decision within five seconds, in place, and then stops', async () => {
+    clock();
+    const moved = vi.fn();
+    window.scrollTo = moved;
+    let decided = false;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(decided ? { status: 'approved', decided_by: 'admin' } : pending),
+        ],
+        'GET /leases': () => (decided ? [lease()] : []),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    expect(document.body.textContent).toContain('The answer will show up here.');
+    const main = document.getElementById('main-content');
+    const place = window.location.hash;
+    moved.mockClear();
+    await advance(4_999);
+    expect(reads(calls, '/requests')).toBe(1);
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    decided = true;
+    await advance(1);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).not.toContain('The answer will show up here');
+    expect(document.body.textContent).not.toContain('A person needs to look at this');
+    expect(document.getElementById('main-content')).toBe(main);
+    expect(window.location.hash).toBe(place);
+    expect(moved).not.toHaveBeenCalled();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    onlyOwn(calls);
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+  });
+
+  it('shows a decision in My requests within five seconds, in the same row', async () => {
+    clock();
+    let decided = false;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(
+            decided ? { status: 'denied', decided_by: 'admin', decision_note: null } : pending,
+          ),
+        ],
+        'GET /leases': [],
+      },
+      '/requests',
+    );
+    await paint();
+    const row = screen.getByText('photos.example').closest('a');
+    expect(row?.textContent).toContain('Waiting for a person');
+    decided = true;
+    await advance(5_000);
+    expect(screen.getByText('photos.example').closest('a')).toBe(row);
+    expect(row?.textContent).toContain('Not approved');
+    expect(row?.textContent).not.toContain('Waiting for a person');
+    expect(reads(calls, '/requests')).toBe(2);
+    onlyOwn(calls);
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(2);
+  });
+
+  it('reads every five seconds for two minutes, then every thirty', async () => {
+    clock();
+    const moved = vi.fn();
+    window.scrollTo = moved;
+    let decided = false;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(
+            decided ? { status: 'denied', decided_by: 'admin', decision_note: null } : pending,
+          ),
+        ],
+        'GET /leases': [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    const main = document.getElementById('main-content');
+    moved.mockClear();
+    let expected = 1;
+    expect(reads(calls, '/requests')).toBe(expected);
+    for (let second = 5; second <= 120; second += 5) {
+      await advance(5_000);
+      expected += 1;
+      expect(reads(calls, '/requests')).toBe(expected);
+      expect(reads(calls, '/leases')).toBe(expected);
+    }
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    await advance(29_999);
+    expect(reads(calls, '/requests')).toBe(expected);
+    decided = true;
+    await advance(1);
+    expected += 1;
+    expect(reads(calls, '/requests')).toBe(expected);
+    expect(screen.getByRole('heading', { name: 'Not this time.' })).toBeDefined();
+    expect(document.body.textContent).not.toContain('The answer will show up here');
+    expect(document.getElementById('main-content')).toBe(main);
+    expect(moved).not.toHaveBeenCalled();
+    const blocks = reads(calls, '/blocks');
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(expected);
+    expect(reads(calls, '/blocks')).toBe(blocks);
+  });
+
+  it('reads nothing while the tab is hidden, and resumes when it is shown', async () => {
+    clock();
+    const { calls } = open(
+      { ...quiet, 'GET /requests': [request(pending)], 'GET /leases': [] },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    const before = reads(calls, '/requests');
+    hide(true);
+    await advance(10_000);
+    expect(reads(calls, '/requests')).toBe(before);
+    hide(false);
+    await advance(4_999);
+    expect(reads(calls, '/requests')).toBe(before);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(before + 1);
+    // Time hidden still counts. Once two minutes have passed, the next read waits 30 seconds.
+    hide(true);
+    await advance(120_000);
+    expect(reads(calls, '/requests')).toBe(before + 1);
+    hide(false);
+    await advance(29_999);
+    expect(reads(calls, '/requests')).toBe(before + 1);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(before + 2);
+    expect(reads(calls, '/leases')).toBe(before + 2);
+  });
+
+  it('reads nothing once every request is decided, or away from My requests and the request', async () => {
+    clock();
+    const decided = open(
+      {
+        ...quiet,
+        'GET /requests': [request({ status: 'denied', decided_by: 'admin', decision_note: null })],
+        'GET /leases': [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Not this time.' })).toBeDefined();
+    const held = reads(decided.calls, '/requests');
+    await advance(180_000);
+    expect(reads(decided.calls, '/requests')).toBe(held);
+    cleanup();
+
+    const home = open(
+      {
+        ...quiet,
+        'GET /collection': { enabled: false, interval_seconds: 900, next_at: null },
+        'GET /requests': [request(pending)],
+        'GET /leases': [],
+      },
+      '/portal',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'What got blocked?' })).toBeDefined();
+    const homeReads = reads(home.calls, '/requests');
+    await advance(30_000);
+    expect(reads(home.calls, '/requests')).toBe(homeReads);
+    cleanup();
+
+    const devices = open(
+      { ...quiet, 'GET /requests': [request(pending)], 'GET /leases': [] },
+      '/devices',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'My devices' })).toBeDefined();
+    const deviceReads = reads(devices.calls, '/requests');
+    await advance(30_000);
+    expect(reads(devices.calls, '/requests')).toBe(deviceReads);
+  });
+
+  it("reads each member's own requests, and a second member never sees the first", async () => {
+    clock();
+    let samDecided = false;
+    const sam = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(
+            samDecided ? { status: 'denied', decided_by: 'admin', decision_note: null } : pending,
+          ),
+        ],
+        'GET /leases': [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    expect(document.body.textContent).not.toContain('files.example');
+    samDecided = true;
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: 'Not this time.' })).toBeDefined();
+    expect(document.body.textContent).toContain('photos.example');
+    expect(document.body.textContent).not.toContain('files.example');
+    onlyOwn(sam.calls);
+    expect(reads(sam.calls, '/requests')).toBe(2);
+    expect(reads(sam.calls, '/leases')).toBe(2);
+    cleanup();
+
+    const riley: User = {
+      id: 'riley',
+      email: 'riley@example.test',
+      name: 'Riley',
+      role: 'member',
+      mode: 'live',
+      csrf_token: 'csrf',
+    };
+    let rileyDecided = false;
+    const own = {
+      id: 'r2',
+      domain: 'files.example',
+      requester_id: 'riley',
+      device_name: "Riley's phone",
+    };
+    const other = open(
+      {
+        ...quiet,
+        'GET /auth/me': riley,
+        'GET /me/device': { device_id: 'phone', name: "Riley's phone", simulated: false },
+        'GET /devices': [{ id: 'phone', name: "Riley's phone" }],
+        'GET /requests': () => [
+          request(
+            rileyDecided
+              ? { ...own, status: 'denied', decided_by: 'admin', decision_note: null }
+              : { ...own, ...pending },
+          ),
+        ],
+        'GET /leases': [],
+      },
+      '/portal?request=r2',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    expect(document.body.textContent).toContain('files.example');
+    expect(document.body.textContent).not.toContain('photos.example');
+    expect(document.body.textContent).not.toContain('Sam');
+    rileyDecided = true;
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: 'Not this time.' })).toBeDefined();
+    expect(document.body.textContent).toContain('files.example');
+    expect(document.body.textContent).not.toContain('photos.example');
+    expect(document.body.textContent).not.toContain('Sam');
+    onlyOwn(other.calls);
+    expect(reads(other.calls, '/requests')).toBe(2);
+    expect(other.calls.some((call) => call.path.includes('r1') || call.path.includes('sam'))).toBe(
+      false,
+    );
+  });
 });

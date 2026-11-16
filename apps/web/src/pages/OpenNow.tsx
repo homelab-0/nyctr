@@ -2,6 +2,7 @@ import { Fragment, useState } from 'react';
 import { post, useApi } from '../api';
 import { Empty, ErrorState, InlineError, Loading, Panel, Score } from '../components/ui';
 import { REMOVAL, ago, atSource, clock, isOpen, left, plural, useNow } from '../lib/format';
+import { useRefreshWhile } from '../lib/refresh';
 import type { Lease, Suggestion } from '../types';
 
 /** How a closed exception ended, as the server recorded it. */
@@ -24,6 +25,11 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const now = useNow(5000);
+  // While a row is not confirmed, read the list again so it updates when that opening settles.
+  useRefreshWhile(
+    (leases.data ?? []).some((row) => row.status === 'unconfirmed'),
+    leases.reload,
+  );
   /** Runs one change, then reloads both lists so the screen reflects the server. */
   const run = async (key: string, action: () => Promise<unknown>) => {
     setBusy(key);

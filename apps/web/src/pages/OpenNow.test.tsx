@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import type { Lease } from '../types';
@@ -26,6 +26,8 @@ const under = (domain: string) => screen.getByText(domain).closest('tr')?.nextEl
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
+  Reflect.deleteProperty(document, 'visibilityState');
   vi.unstubAllGlobals();
 });
 
@@ -276,4 +278,115 @@ describe('how many exceptions Open now says are open', () => {
       );
     },
   );
+});
+
+const FAKED = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] as const;
+const times = (calls: { path: string }[], path: string) =>
+  calls.filter((call) => call.path === path).length;
+
+function clock() {
+  vi.useFakeTimers({ now: Date.now(), toFake: [...FAKED] });
+}
+async function paint() {
+  for (let turn = 0; turn < 20; turn += 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+}
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+function hide(hidden: boolean) {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => (hidden ? 'hidden' : 'visible'),
+  });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('an unconfirmed row while Open now stays open', () => {
+  it('updates that row in place when it settles, and then stops reading', async () => {
+    clock();
+    const until = new Date(Date.now() + 60 * 60_000).toISOString();
+    let settled = false;
+    const unconfirmed = {
+      status: 'unconfirmed' as const,
+      execution: 'not_applied' as const,
+      last_error: 'It may be open there.',
+      expires_at: until,
+    };
+    const confirmed = {
+      status: 'active' as const,
+      execution: 'applied' as const,
+      owned: true,
+      last_error: null,
+      decided_by_name: 'Ada',
+      expires_at: until,
+    };
+    const changed = vi.fn();
+    const calls = mockApi({
+      'GET /leases': () => [lease('slow', settled ? confirmed : unconfirmed)],
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={changed} />);
+    await paint();
+    const line = screen.getByText('slow.example').closest('tr')!;
+    expect(line.textContent).toContain('Not confirmed');
+    expect(line.textContent).toContain('Not opened');
+    await advance(4_999);
+    expect(times(calls, '/leases')).toBe(1);
+    settled = true;
+    await advance(1);
+    expect(screen.getByText('slow.example').closest('tr')).toBe(line);
+    expect(line.textContent).toContain('Changed at the source and checked.');
+    expect(line.textContent).toContain('Ada');
+    expect(line.textContent).not.toContain('Not confirmed');
+    expect(line.textContent).not.toContain('Not opened');
+    expect(line.textContent).not.toContain('It may be open there.');
+    expect(document.body.textContent).toContain('1 exception open.');
+    expect(times(calls, '/leases')).toBe(2);
+    expect(times(calls, '/suggestions')).toBe(1);
+    expect(changed).not.toHaveBeenCalled();
+    await advance(60_000);
+    expect(times(calls, '/leases')).toBe(2);
+    expect(times(calls, '/suggestions')).toBe(1);
+  });
+
+  it('reads nothing while the tab is hidden, and nothing once every row is confirmed', async () => {
+    clock();
+    const calls = mockApi({
+      'GET /leases': [
+        lease('slow', {
+          status: 'unconfirmed',
+          execution: 'not_applied',
+          last_error: 'Check there.',
+        }),
+      ],
+      'GET /suggestions': [],
+    });
+    render(<OpenNow onChange={() => {}} />);
+    await paint();
+    expect(screen.getByText('slow.example').closest('tr')!.textContent).toContain('Not confirmed');
+    hide(true);
+    await advance(30_000);
+    expect(times(calls, '/leases')).toBe(1);
+    hide(false);
+    await advance(4_999);
+    expect(times(calls, '/leases')).toBe(1);
+    await advance(1);
+    expect(times(calls, '/leases')).toBe(2);
+    expect(times(calls, '/suggestions')).toBe(1);
+    cleanup();
+
+    const quiet = mockApi({ 'GET /leases': [lease('open', {})], 'GET /suggestions': [] });
+    render(<OpenNow onChange={() => {}} />);
+    await paint();
+    expect(screen.getByText('open.example')).toBeDefined();
+    const held = times(quiet, '/leases');
+    await advance(60_000);
+    expect(times(quiet, '/leases')).toBe(held);
+    expect(times(quiet, '/suggestions')).toBe(1);
+  });
 });
