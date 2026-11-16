@@ -144,9 +144,7 @@ describe('access rule in Setup', () => {
       'Anything Nyctr does not recognise',
     ]);
     expect(never.querySelectorAll('.d')).toHaveLength(5);
-    expect(
-      within(never).getByText(/newly registered, dynamic or parked address/),
-    ).toBeDefined();
+    expect(within(never).getByText(/newly registered, dynamic or parked address/)).toBeDefined();
     expect(within(never).getAllByText('Never automatic')).toHaveLength(5);
     expect(never.querySelectorAll('button, input, select')).toHaveLength(0);
   });
