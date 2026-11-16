@@ -18,7 +18,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, access, assistant, guests, model, presence, query, removal, retention, worker
+from . import (
+    __version__,
+    access,
+    assistant,
+    facts,
+    guests,
+    model,
+    presence,
+    query,
+    removal,
+    retention,
+    worker,
+)
 from . import blocks as block_list
 from .collection import (  # noqa: F401
     after_collection,
@@ -683,6 +695,20 @@ def create_app(settings: Settings | None = None):
                          (row.classification, row.owner_id, set(body.user_ids)) != before)
         db.commit()
         return resource_json(row)
+
+    @app.get("/api/facts")
+    def address_facts(domain: str = Query(min_length=1, max_length=253), _user=Depends(admin),
+                      db: Session = Depends(get_db)):
+        """Return the facts gathered about a typed name. For an administrator, on the console address.
+
+        Members, the portal address and a caller with no session are refused. The
+        demonstration returns what is stored and does not look the name up.
+        """
+        try:
+            found = facts.gather(db, domain)
+        except facts.NotAName as error:
+            raise HTTPException(422, str(error)) from None
+        return [item.as_dict() for item in found]
 
     @app.get("/api/blocks")
     def blocks(band: Literal["high", "medium", "low", "unknown"] | None = None,

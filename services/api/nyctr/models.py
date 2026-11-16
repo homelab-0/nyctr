@@ -351,4 +351,30 @@ class Insight(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class FactCache(Base):
+    """One looked-up fact about a name, kept so the next day is the soonest it is asked again.
+
+    `value` holds `{"value", "reason"}`. The registry list itself is stored here too,
+    under an empty domain, because it is not a fact about one name.
+    """
+    __tablename__ = "fact_cache"
+    domain: Mapped[str] = mapped_column(String(253), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    state: Mapped[str] = mapped_column(String(20))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class OwnLookup(Base):
+    """A name this installation resolved or asked a registry about.
+
+    Kept so a later match can ignore Nyctr's own questions. Nothing reads it yet.
+    """
+    __tablename__ = "own_lookups"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(253))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 Index("ix_device_grant_validity", DeviceGrant.device_id, DeviceGrant.user_id, DeviceGrant.valid_from)
+Index("ix_own_lookups_name_at", OwnLookup.name, OwnLookup.at)

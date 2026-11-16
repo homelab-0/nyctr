@@ -6,10 +6,12 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
+# Schema 4 adds the fact cache and the list of names Nyctr itself looked up.
+_V4_TABLES = ("fact_cache", "own_lookups")
 _V2_COLUMNS = {
     "observations": ("reason_codes", "source_device_id"),
     "access_requests": ("risk_score", "risk_category", "risk_factors", "decided_by", "decision_note",
@@ -38,6 +40,15 @@ def _upgrade_to_3(connection):
     if "device_presence" not in inspect(connection).get_table_names():
         Base.metadata.create_all(connection, tables=[Base.metadata.tables["device_presence"]])
     connection.execute(SchemaVersion.__table__.insert().values(version=3))
+
+
+def _upgrade_to_4(connection):
+    """Add the fact cache and Nyctr's own lookup list. Nothing that exists is altered."""
+    existing = set(inspect(connection).get_table_names())
+    missing = [Base.metadata.tables[name] for name in _V4_TABLES if name not in existing]
+    if missing:
+        Base.metadata.create_all(connection, tables=missing)
+    connection.execute(SchemaVersion.__table__.insert().values(version=4))
 
 
 def make_engine(database_url: str):
@@ -84,6 +95,9 @@ def migrate(engine):
         if version == 2:
             _upgrade_to_3(connection)
             version = 3
+        if version == 3:
+            _upgrade_to_4(connection)
+            version = 4
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 
