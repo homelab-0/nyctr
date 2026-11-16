@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, put, useApi } from '../api';
+import { ApiError, api, dateTime, put, useApi } from '../api';
 import { ModelPanel } from '../components/ModelPanel';
 import {
   ErrorState,
@@ -21,6 +21,8 @@ import type {
   CollectionSchedule,
   DeviceLabel,
   Person,
+  Presence,
+  PresenceRow,
   Resource,
   Rules,
   WriteMode,
@@ -137,11 +139,15 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   );
 }
 
+/** Where a person signed in from, for the line under a device. Empty when the record holds no address. */
+const from = (item: PresenceRow) => (item.address ? ` from ${item.address}` : '');
+
 /** Who each device belongs to, and which inventory device a DNS label really is. */
 function PeoplePanel() {
   const devices = useApi<Resource[]>('/devices');
   const people = useApi<Person[]>('/users');
   const labels = useApi<DeviceLabel[]>('/device-links');
+  const signIns = useApi<Presence>('/presence');
   const [error, setError] = useState<string | null>(null);
   const run = async (action: () => Promise<unknown>) => {
     setError(null);
@@ -149,6 +155,7 @@ function PeoplePanel() {
       await action();
       devices.reload();
       labels.reload();
+      signIns.reload();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -176,6 +183,15 @@ function PeoplePanel() {
   return (
     <div className="stack">
       <InlineError message={error} />
+      {signIns.error && (
+        <p className="aside" role="alert">
+          Nyctr could not read who signed in on which device, so the sign-ins under the devices
+          below may be missing or out of date.{' '}
+          <button className="linklike" onClick={signIns.reload}>
+            Try again
+          </button>
+        </p>
+      )}
       <Panel
         title="Whose device is it"
         hint="A member only ever sees blocks from devices that are theirs or shared."
@@ -200,6 +216,30 @@ function PeoplePanel() {
                         <Icon size={15} /> {row.name}
                       </span>{' '}
                       {isMissing(row) && <span className="tag yellow">{missingFor(row)}</span>}
+                      {(signIns.data?.items || [])
+                        .filter((item) => item.device_id === row.id && !item.ended_at)
+                        .map((item) => (
+                          <div className="muted tiny" key={item.id}>
+                            {item.kind === 'tie'
+                              ? `${item.user_name} signed in on it${from(item)}, last on ${dateTime(item.last_at)}. `
+                              : `${item.user_name} signed in on it${from(item)} on ${dateTime(item.last_at)} and was not tied to it, because it is someone else's.`}
+                            {item.kind === 'tie' && (
+                              <button
+                                className="button quiet small"
+                                aria-label={`End ${item.user_name}'s tie to ${row.name}`}
+                                onClick={() =>
+                                  void run(() =>
+                                    api(`/presence/${encodeURIComponent(item.id)}`, {
+                                      method: 'DELETE',
+                                    }),
+                                  )
+                                }
+                              >
+                                End this tie
+                              </button>
+                            )}
+                          </div>
+                        ))}
                     </th>
                     <td className="muted mono">{String(row.attributes.ip || '')}</td>
                     <td>
@@ -502,6 +542,97 @@ export function addressText(seen: AddressSeen): string {
   }
 }
 
+/** The switch that lets a sign-in tie a person to the device they are on, beside the check it rests on. */
+function RecognitionPanel() {
+  const presence = useApi<Presence>('/presence');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  // What the last save answered: the setting in force. It is shown until the setting has been read
+  // again, so the switch never shows a value older than the one just saved.
+  const [answered, setAnswered] = useState<Recognition | null>(null);
+  const busy = useRef(false);
+  useEffect(() => setAnswered(null), [presence.data]);
+  const read = presence.data;
+  const value =
+    answered ??
+    (read && read.enabled !== undefined
+      ? { enabled: read.enabled, reach_back_hours: read.reach_back_hours ?? 2 }
+      : null);
+  if (!value) return <InlineError message={presence.error} />;
+  // Only what was changed is sent. A value this page still shows can then never undo a change made
+  // since, here or by another administrator. As with the schedule, input during a save is ignored
+  // and nothing is disabled, so keyboard focus stays where it is.
+  const save = async (change: Partial<Recognition>) => {
+    if (busy.current) return;
+    busy.current = true;
+    setError(null);
+    setSaving(true);
+    try {
+      setAnswered(await put<Recognition>('/presence', change));
+    } catch (e) {
+      // With no answer the save may still have landed: what is read next says what is in force.
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : `${UNREACHABLE} Check what is shown here before you try again.`,
+      );
+    }
+    presence.reload();
+    busy.current = false;
+    setSaving(false);
+  };
+  return (
+    <Panel
+      title="Recognise members' devices when they sign in"
+      hint="A member who signs in on a device sees what was blocked on it, with nothing set up on the device."
+    >
+      <div className="stack" aria-busy={saving}>
+        <div className="bar">
+          <Switch
+            label="Recognise members' devices when they sign in"
+            checked={value.enabled}
+            onChange={(enabled) => void save({ enabled })}
+          />
+          <span className="aside">
+            Before you switch this on, check that the panel below shows the address of the device
+            you are on now. If it shows a proxy's or a router's address, every member arrives from
+            that one address and Nyctr cannot tell their devices apart.
+          </span>
+        </div>
+        <div className="rule">
+          A member sees what was blocked on that device from
+          <Stepper
+            label="hours before the first sign-in"
+            min={0}
+            max={24}
+            value={value.reach_back_hours}
+            onChange={(reach_back_hours) => void save({ reach_back_hours })}
+          />
+          hours before they first signed in on it.
+        </div>
+        <p className="aside">
+          Nyctr takes it that the person signing in was the one using the device in those hours. A
+          tie never changes whose a device is. It ends 30 days after the last sign-in from the
+          device, or when the member or you end it; who signed in on which device is listed under
+          People and devices. Switching this off ends every tie at once.
+        </p>
+        {presence.error && (
+          <p className="aside" role="alert">
+            Nyctr could not read this setting again, so what is shown here may be out of date.{' '}
+            <button className="linklike" onClick={presence.reload}>
+              Try again
+            </button>
+          </p>
+        )}
+        <InlineError message={error} />
+      </div>
+    </Panel>
+  );
+}
+
+/** Whether signing in ties a person to a device, and how far back a new tie reaches. */
+type Recognition = { enabled: boolean; reach_back_hours: number };
+
 /** The operator's check that a proxy passes the right address on, before members rely on it. */
 function AddressPanel() {
   const seen = useApi<AddressSeen>('/me/address');
@@ -581,6 +712,7 @@ export default function Setup({ params }: { params: URLSearchParams }) {
           <SchedulePanel />
           <ModelPanel />
           <SystemPanel rules={rules.data} />
+          <RecognitionPanel />
           <AddressPanel />
         </div>
       )}

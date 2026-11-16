@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowLeft,
   Check,
@@ -41,6 +41,7 @@ import type {
   BlockCoverage,
   BlockList,
   Lease,
+  Presence,
   Resource,
   ThisDevice,
 } from '../../types';
@@ -110,7 +111,22 @@ function useMemberData() {
   const device = useApi<ThisDevice>('/me/device');
   const devices = useApi<Resource[]>('/devices');
   const coverage = useApi<BlockCoverage>('/blocks/coverage');
-  return { blocks, requests, leases, device, devices, coverage };
+  // The devices this person is tied to by having signed in on them. Without an answer, none.
+  const ties = useApi<Presence>('/presence');
+  // A first sign-in on a device is tied to it by the answer to `/me/device`, which can come after the
+  // lists were worked out without that tie. So once that answer says "signed in", the lists that
+  // depend on it are read once more: the page that says the device is recognised lists its blocks.
+  const tied = device.data?.how === 'signed_in' ? device.data.device_id : null;
+  const readFor = useRef<string | null>(null);
+  const [readBlocks, readDevices, readTies] = [list.reload, devices.reload, ties.reload];
+  useEffect(() => {
+    if (!tied || readFor.current === tied) return;
+    readFor.current = tied;
+    readBlocks();
+    readDevices();
+    readTies();
+  }, [tied, readBlocks, readDevices, readTies]);
+  return { blocks, requests, leases, device, devices, coverage, ties };
 }
 type Data = ReturnType<typeof useMemberData>;
 
@@ -149,6 +165,51 @@ function notKnown(data: Data): { title: string; text: string } | null {
       text: `Nyctr has not finished reading what was blocked on this network, so it does not know whether a site was blocked for you. ${ASK} when it will.`,
     };
   return null;
+}
+
+/**
+ * Says that the list of ties could not be read, with a way to read it again. Without it a Forget
+ * button would simply be missing, and nobody could tell that from there being nothing to forget.
+ */
+function TiesNotRead({ data }: { data: Data }) {
+  if (!data.ties.error) return null;
+  return (
+    <p className="aside" role="alert">
+      Nyctr could not read which devices you signed in on, so it cannot offer to forget one here.{' '}
+      <button className="linklike" onClick={data.ties.reload}>
+        Try again
+      </button>
+    </p>
+  );
+}
+
+/** A plain button that ends the tie a sign-in made to a device. Shown only where there is such a tie. */
+function Forget({ data, device, name }: { data: Data; device: string; name: string }) {
+  const [error, setError] = useState<string | null>(null);
+  const tie = data.ties.data?.items.find((row) => row.kind === 'tie' && row.device_id === device);
+  if (!tie) return null;
+  const forget = async () => {
+    setError(null);
+    try {
+      await api(`/presence/${encodeURIComponent(tie.id)}`, { method: 'DELETE' });
+      for (const read of [data.ties, data.device, data.devices, data.blocks]) read.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className="button quiet small"
+        style={{ justifySelf: 'start' }}
+        onClick={() => void forget()}
+      >
+        Forget {name}
+      </button>
+      <InlineError message={error} />
+    </>
+  );
 }
 
 /** One row per address, newest first, so a page that retried ten times shows once. */
@@ -236,6 +297,10 @@ function Home({ data }: { data: Data }) {
       ? 'ask whoever runs Nyctr to collect. New blocks show up here only after that.'
       : 'come back here later.';
   const here = data.device.data;
+  // Why this device was not recognised, in the server's words when it gave any.
+  const unrecognised = here?.message
+    ? `${here.message} Nyctr is showing all of your devices`
+    : 'Nyctr could not tell which of your devices this is, so it is showing all of them';
   const gap = notKnown(data);
   const noDevices = data.devices.data?.length === 0;
   // Some stored lookups are tied to nobody's device, so a block of theirs may be among those and
@@ -304,21 +369,29 @@ function Home({ data }: { data: Data }) {
         <h1 className="display d1">What got blocked?</h1>
         {gap && noDevices ? (
           <p className="lede">
-            <b>{gap.title}.</b> {gap.text}
+            <b>{gap.title}.</b> {gap.text} {here?.message}
           </p>
         ) : here?.name ? (
           <p className="lede">
             <Laptop size={15} style={{ verticalAlign: '-2px' }} /> You're on <b>{here.name}</b>
-            {here.simulated ? ' (demo: pretending this browser is that device).' : '.'}
+            {here.simulated
+              ? ' (demo: pretending this browser is that device).'
+              : here.how === 'signed_in'
+                ? ', recognised because you signed in on it. '
+                : here.how === 'assigned'
+                  ? ', a device assigned to you. '
+                  : '.'}
+            {here.device_id && <Forget data={data} device={here.device_id} name="this device" />}
           </p>
         ) : (
           <p className="lede">
             {/* One sentence when lookups tied to no device are also missing, so two notes never stack. */}
             {cover?.unassigned && !gap
-              ? `Nyctr could not tell which of your devices this is, so it is showing all of them, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
-              : 'Nyctr could not tell which of your devices this is, so it is showing all of them.'}
+              ? `${unrecognised}, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
+              : `${unrecognised}.`}
           </p>
         )}
+        {here?.device_id && <TiesNotRead data={data} />}
       </header>
       <form className="m-find" onSubmit={find}>
         <Search size={18} />
@@ -847,14 +920,20 @@ function MyDevices({ data }: { data: Data }) {
     <div className="m-col">
       <h1 className="display d2">My devices</h1>
       <p className="lede">You see blocked sites only from these. {ASK} to add one.</p>
+      <TiesNotRead data={data} />
       <section className="m-card">
         {(devices.data || []).map((device) => (
           <div className="m-row" key={device.id}>
             <span>
               <span className="dom">{device.name}</span>
               <span className="d">
-                {device.classification === 'shared' ? 'Shared device' : 'Yours'}
+                {device.classification === 'shared'
+                  ? 'Shared device'
+                  : device.classification === 'personal'
+                    ? 'Yours'
+                    : 'You signed in on it'}
               </span>
+              <Forget data={data} device={device.id} name={device.name} />
             </span>
             {data.device.data?.device_id === device.id && (
               <span className="tag blue">This device</span>

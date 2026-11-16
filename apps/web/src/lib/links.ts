@@ -14,6 +14,7 @@ export function hrefFor(kind: string, id: string) {
     case 'source':
       return '#/sources';
     case 'model':
+    case 'presence':
       return '#/setup?tab=system';
     case 'resource':
       return `#/map?focus=${value}`;

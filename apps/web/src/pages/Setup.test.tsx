@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../api';
@@ -37,6 +37,7 @@ function open(first: CollectionSchedule, mode: 'live' | 'demo' = 'live') {
     'GET /auth/config': { mode, local_enabled: true, oidc_enabled: false },
     'GET /model': modelFixture(),
     'GET /me/address': seen,
+    'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
     'GET /collection': () => current,
     'PUT /collection': (body: unknown) => {
       const sent = body as { enabled: boolean; minutes: number };
@@ -61,6 +62,7 @@ const system = {
   'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
   'GET /model': modelFixture(),
   'GET /me/address': seen,
+  'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
 };
 
 /** Holds back every later request of one kind until `release` is called. */
@@ -430,4 +432,240 @@ describe('the address Nyctr sees for you, in Setup', () => {
       'The server did not say where the connection came from.',
     );
   });
+});
+
+describe('recognising devices at sign-in, in Setup', () => {
+  const wait = { timeout: 20_000 };
+  const patient = 30_000;
+  const signIn = (id: string, kind: string, who: string, ended_at: string | null = null) => ({
+    id,
+    kind,
+    user_id: who.toLowerCase(),
+    user_name: who,
+    device_id: 'laptop',
+    device_name: 'Laptop',
+    address: '192.0.2.10',
+    first_at: '2026-11-14T09:00:00Z',
+    last_at: '2026-11-15T09:00:00Z',
+    ended_at,
+  });
+
+  it(
+    'is off until switched on, sits before the address check it points at, and saves the reach',
+    async () => {
+      let current = { items: [], enabled: false, reach_back_hours: 2 };
+      const calls = mockApi({
+        ...system,
+        'GET /collection': scheduleFixture(),
+        'GET /presence': () => current,
+        'PUT /presence': (body: unknown) => (current = { ...current, ...(body as object) }),
+      });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const name = "Recognise members' devices when they sign in";
+      const toggle = await screen.findByRole('switch', { name }, wait);
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(document.body.textContent).toContain(
+        'check that the panel below shows the address of the device you are on now',
+      );
+      const below = await screen.findByText('The address Nyctr sees for you', undefined, wait);
+      expect(toggle.compareDocumentPosition(below) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+      fireEvent.click(toggle);
+      // Each save carries only what was changed.
+      await waitFor(() => expect(saved()).toEqual([{ enabled: true }]), wait);
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'), wait);
+      fireEvent.click(screen.getByRole('button', { name: 'Raise hours before the first sign-in' }));
+      await waitFor(() => expect(saved()[1]).toEqual({ reach_back_hours: 3 }), wait);
+    },
+    patient,
+  );
+
+  const name = "Recognise members' devices when they sign in";
+  const raise = () => screen.getByRole('button', { name: 'Raise hours before the first sign-in' });
+  /** A server that keeps the setting and changes only the part a save carries, as the real one does. */
+  const server = (first: { enabled: boolean; reach_back_hours: number }) => {
+    const kept = { now: first };
+    const calls = mockApi({
+      ...system,
+      'GET /collection': scheduleFixture(),
+      'GET /presence': () => ({ items: [], ...kept.now }),
+      'PUT /presence': (body: unknown) => (kept.now = { ...kept.now, ...(body as object) }),
+    });
+    const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+    return { kept, saved };
+  };
+
+  it(
+    'cannot switch recognition back on by changing the hours before the page has read it again',
+    async () => {
+      const { kept, saved } = server({ enabled: true, reach_back_hours: 2 });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const toggle = await screen.findByRole('switch', { name }, wait);
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      // No read after this gets an answer until released: only the saves' own answers reach the page.
+      const release = holdBack('GET', '/presence');
+      fireEvent.click(toggle);
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'), wait);
+      fireEvent.click(raise());
+      await waitFor(() => expect(saved()).toHaveLength(2), wait);
+      expect(saved()).toEqual([{ enabled: false }, { reach_back_hours: 3 }]);
+      expect(kept.now).toEqual({ enabled: false, reach_back_hours: 3 });
+      const hours = () => raise().parentElement!.querySelector('output')!.textContent;
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(hours()).toBe('3');
+      // And once the setting is read again it says the same.
+      release();
+      await waitFor(() => expect(hours()).toBe('3'), wait);
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+    },
+    patient,
+  );
+
+  it(
+    'ignores a second press while a save is under way and keeps keyboard focus on the switch',
+    async () => {
+      const { saved } = server({ enabled: false, reach_back_hours: 2 });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const toggle = (await screen.findByRole('switch', { name }, wait)) as HTMLButtonElement;
+      const release = holdBack('PUT', '/presence');
+      toggle.focus();
+      fireEvent.click(toggle);
+      await waitFor(() => expect(saved()).toHaveLength(1), wait);
+      expect(toggle.closest('[aria-busy="true"]')).not.toBeNull();
+      // Pressed again, and the hours changed, before the first save has answered: neither is sent.
+      fireEvent.click(toggle);
+      fireEvent.click(raise());
+      expect(toggle.disabled).toBe(false);
+      expect(document.activeElement).toBe(toggle);
+      release();
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'), wait);
+      expect(saved()).toEqual([{ enabled: true }]);
+      expect(toggle.closest('[aria-busy="true"]')).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'shows what the save answered and says so when the setting cannot be read again',
+    async () => {
+      let reads = 0;
+      let failing = true;
+      mockApi({
+        ...system,
+        'GET /collection': scheduleFixture(),
+        'GET /presence': () => {
+          reads += 1;
+          if (reads > 1 && failing) throw new TypeError('Failed to fetch');
+          return { items: [], enabled: reads > 1, reach_back_hours: 2 };
+        },
+        'PUT /presence': { enabled: true, reach_back_hours: 2 },
+      });
+      render(<Setup params={new URLSearchParams('tab=system')} />);
+      const toggle = await screen.findByRole('switch', { name }, wait);
+      fireEvent.click(toggle);
+      // The switch shows On, as the server has it, although the read after the save failed.
+      const said = await screen.findByText(
+        /Nyctr could not read this setting again, so what is shown here may be out of date\./,
+        undefined,
+        wait,
+      );
+      expect(said.getAttribute('role')).toBe('alert');
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      failing = false;
+      fireEvent.click(within(said).getByRole('button', { name: 'Try again' }));
+      await waitFor(
+        () => expect(screen.queryByText(/could not read this setting again/)).toBeNull(),
+        wait,
+      );
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+    },
+    patient,
+  );
+
+  it(
+    'says so, with a way to try again, when who signed in on which device cannot be read',
+    async () => {
+      let failing = true;
+      mockApi({
+        'GET /rules': rules,
+        'GET /users': [{ id: 'sam', name: 'Sam', active: true }],
+        'GET /device-links': [],
+        'GET /devices': [
+          {
+            id: 'laptop',
+            name: 'Laptop',
+            kind: 'client',
+            classification: 'unassigned',
+            attributes: {},
+          },
+        ],
+        'GET /presence': () => {
+          if (failing) throw new TypeError('Failed to fetch');
+          return { items: [signIn('t1', 'tie', 'Sam')], enabled: true, reach_back_hours: 2 };
+        },
+      });
+      render(<Setup params={new URLSearchParams('tab=people')} />);
+      const said = await screen.findByText(
+        /Nyctr could not read who signed in on which device/,
+        undefined,
+        wait,
+      );
+      expect(said.getAttribute('role')).toBe('alert');
+      expect(screen.queryByText(/signed in on it/)).toBeNull();
+      failing = false;
+      fireEvent.click(within(said).getByRole('button', { name: 'Try again' }));
+      expect(await screen.findByText(/Sam signed in on it/, undefined, wait)).toBeDefined();
+      expect(screen.queryByText(/could not read who signed in/)).toBeNull();
+    },
+    patient,
+  );
+
+  it(
+    'lists who signed in on a device under it, and an administrator ends a tie there',
+    async () => {
+      const calls = mockApi({
+        'GET /rules': rules,
+        'GET /users': [{ id: 'sam', name: 'Sam', active: true }],
+        'GET /device-links': [],
+        'GET /devices': [
+          {
+            id: 'laptop',
+            name: 'Laptop',
+            kind: 'client',
+            classification: 'unassigned',
+            attributes: {},
+          },
+        ],
+        'GET /presence': {
+          items: [
+            signIn('t1', 'tie', 'Sam'),
+            signIn('c1', 'conflict', 'Kim'),
+            signIn('t0', 'tie', 'Lee', '2026-11-10T09:00:00Z'),
+          ],
+          enabled: true,
+          reach_back_hours: 2,
+        },
+        'DELETE /presence/t1': { ok: true },
+      });
+      render(<Setup params={new URLSearchParams('tab=people')} />);
+      expect(
+        await screen.findByText(/Sam signed in on it from 192\.0\.2\.10, last on/, undefined, wait),
+      ).toBeDefined();
+      expect(
+        screen.getByText(/Kim signed in on it from 192\.0\.2\.10 on .+ and was not tied to it/),
+      ).toBeDefined();
+      expect(document.body.textContent).not.toContain('Lee'); // an ended tie is not listed under the device
+      expect(screen.getAllByRole('button', { name: /^End / })).toHaveLength(1);
+      expect(screen.getByText('End this tie')).toBeDefined();
+      fireEvent.click(screen.getByRole('button', { name: "End Sam's tie to Laptop" }));
+      await waitFor(
+        () =>
+          expect(calls.map((call) => `${call.method} ${call.path}`)).toContain(
+            'DELETE /presence/t1',
+          ),
+        wait,
+      );
+    },
+    patient,
+  );
 });

@@ -1020,6 +1020,31 @@ def test_a_shared_device_holds_several_ties_and_an_administrator_sees_and_ends_t
         assert {row.actor_id for row in ended} == {changed.actor_id}
 
 
+def test_changing_the_hours_never_switches_recognition_on_or_off(tmp_path, monkeypatch):
+    """Each part of the setting is changed on its own, so a page that still shows the old switch cannot undo it."""
+    app, _gateway = home(tmp_path, monkeypatch)
+    with browser(app, "198.51.100.9", LIVE_ADMIN) as first, browser(app, "198.51.100.9", LIVE_ADMIN) as second, \
+            browser(app, LAPTOP) as sam:
+        sam.get("/api/me/device")
+        # One administrator switches recognition off. Another, whose page still shows it on, changes the hours.
+        assert first.put("/api/presence", json={"enabled": False}).json() == {"enabled": False, "reach_back_hours": 2}
+        assert second.put("/api/presence", json={"reach_back_hours": 5}).json() == {
+            "enabled": False, "reach_back_hours": 5}
+        assert sam.get("/api/devices").json() == [] and all(tie.ended_at for tie in stored(app))
+        assert first.put("/api/presence", json={"enabled": True}).json() == {"enabled": True, "reach_back_hours": 5}
+        assert second.put("/api/presence", json={"reach_back_hours": 1}).json() == {
+            "enabled": True, "reach_back_hours": 1}
+        assert second.put("/api/presence", json={}).json() == {"enabled": True, "reach_back_hours": 1}
+        assert first.get("/api/presence").json()["enabled"] is True
+        for wrong in ({"reach_back_hours": 25}, {"reach_back_hours": -1}, {"enabled": True, "more": 1}):
+            assert first.put("/api/presence", json=wrong).status_code == 422
+    with app.state.session_factory() as db:
+        assert [row.details for row in db.scalars(select(Audit).where(
+            Audit.action == "presence.setting_changed").order_by(Audit.created_at))][:2] == [
+                {"enabled": False, "reach_back_hours": 2, "ties_ended": 1},
+                {"enabled": False, "reach_back_hours": 5, "ties_ended": 0}]
+
+
 def assigned(admin, device, classification, *owners):
     """Have an administrator say whose a device is, as the console does."""
     answer = admin.put(f"/api/devices/gw:client:{device}/assignment",

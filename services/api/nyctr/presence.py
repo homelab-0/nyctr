@@ -100,6 +100,17 @@ class Recognition(BaseModel):
     reach_back_hours: int = Field(default=2, ge=0, le=24)
 
 
+class Change(BaseModel):
+    """What an administrator changes about recognition: the switch, the hours, or both.
+
+    A part left out stays as it is stored. So a page that still shows an older value of the one
+    can save the other without putting the older value back.
+    """
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool | None = None
+    reach_back_hours: int | None = Field(default=None, ge=0, le=24)
+
+
 @dataclass
 class Found:
     """What one request showed: the device and its tie, or why there is none."""
@@ -473,10 +484,11 @@ def listed(auth=Depends(identity), db: Session = Depends(get_db)):
 
 
 @router.put("/presence")
-def switch(body: Recognition, user=Depends(admin), db: Session = Depends(get_db)):
-    """Switch recognition on or off and set how far back a tie reaches.
+def switch(body: Change, user=Depends(admin), db: Session = Depends(get_db)):
+    """Switch recognition on or off, set how far back a tie reaches, or both. Answers the setting now in force.
 
-    Switching it off ends every tie at once, each with its own audit record.
+    Only the part that is sent changes; the other is taken from what is stored, read under
+    the lock. Switching it off ends every tie at once, each with its own audit record.
     A shorter reach applies to ties already made; a longer one never widens them.
     """
     now, ended = utcnow(), 0
@@ -485,17 +497,20 @@ def switch(body: Recognition, user=Depends(admin), db: Session = Depends(get_db)
         db.flush()
     # A sign-in that is writing a tie finishes first, and none starts until this commits. No device's row is
     # taken: a collection being stored holds some, in its own order, and the two would wait for each other.
-    hold(db)
+    stored = hold(db)
+    new = Recognition(
+        enabled=stored.enabled if body.enabled is None else body.enabled,
+        reach_back_hours=stored.reach_back_hours if body.reach_back_hours is None else body.reach_back_hours)
     for tie in _ties(db, *live_ties(now)):  # read under the locks, so nothing written meanwhile is put back
-        if not body.enabled:
+        if not new.enabled:
             tie.ended_at, tie.ended_by, ended = now, user.id, ended + 1
             _said(db, user.id, tie, "switched_off")
-        tie.reach_from = max(utc(tie.reach_from), utc(tie.first_at) - timedelta(hours=body.reach_back_hours))
+        tie.reach_from = max(utc(tie.reach_from), utc(tie.first_at) - timedelta(hours=new.reach_back_hours))
     row = db.get(Setting, KEY)
-    row.value, row.updated_at, row.updated_by = body.model_dump(), now, user.id
-    audit(db, user.id, "presence.setting_changed", KEY, **body.model_dump(), ties_ended=ended)
+    row.value, row.updated_at, row.updated_by = new.model_dump(), now, user.id
+    audit(db, user.id, "presence.setting_changed", KEY, **new.model_dump(), ties_ended=ended)
     db.commit()
-    return body.model_dump()
+    return new.model_dump()
 
 
 @router.delete("/presence/{tie_id}")
