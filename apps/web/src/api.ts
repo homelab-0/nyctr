@@ -103,10 +103,13 @@ export function useApi<T>(path: string | null) {
       setError(null);
     }
     const finish = () => {
-      const resolve = settled.current.get(id);
-      if (!resolve) return;
-      settled.current.delete(id);
-      resolve();
+      // Two reloads before the next paint leave only the later revision running.
+      // Settle every earlier waiter too, or the caller waiting on the first one never continues.
+      for (const [waiter, resolve] of settled.current) {
+        if (waiter > id) continue;
+        settled.current.delete(waiter);
+        resolve();
+      }
     };
     const stale = () => controller.signal.aborted || epoch.current !== mine;
     api<T>(path, { signal: controller.signal })

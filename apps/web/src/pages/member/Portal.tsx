@@ -975,9 +975,12 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
   // My requests and a request's own page keep reading while one of this member's
   // requests is still undecided, so the answer shows up where they are already looking.
+  // After that decision, a failed lease read would leave the previous list on screen, so
+  // reading continues until the lease list has been read successfully as well.
+  const undecided = (data.requests.data ?? []).some((row) => row.status === 'pending');
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
-    (data.requests.data ?? []).some((row) => row.status === 'pending');
+    (undecided || (data.requests.data !== null && Boolean(data.leases.error)));
   const again = useRefreshWhile(waiting, () =>
     Promise.all([data.requests.reload(), data.leases.reload()]),
   );

@@ -1355,6 +1355,50 @@ describe('an answer while the member page stays open', () => {
     expect(document.getElementById('main-content')).toBe(main);
   });
 
+  it('keeps reading after the decision when the lease list failed', async () => {
+    clock();
+    let phase: 'pending' | 'approved' | 'open' = 'pending';
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(phase === 'pending' ? pending : { status: 'approved', decided_by: 'admin' }),
+        ],
+        'GET /leases': () => {
+          if (phase === 'open') return [lease()];
+          if (phase === 'approved') return { __status: 503, detail: 'Down' };
+          return [];
+        },
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    phase = 'approved';
+    await advance(5_000);
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(document.body.textContent).toContain(
+      'The latest check failed. Trying again in 5 seconds.',
+    );
+    const during = reads(calls, '/leases');
+    await advance(5_000);
+    expect(reads(calls, '/leases')).toBe(during + 1);
+    expect(reads(calls, '/requests')).toBe(during + 1);
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    phase = 'open';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).not.toContain('The latest check failed');
+    const settled = reads(calls, '/leases');
+    await advance(30_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+    expect(reads(calls, '/requests')).toBe(settled);
+  });
+
   it('keeps My requests on screen when a later check fails', async () => {
     clock();
     let fail = false;
