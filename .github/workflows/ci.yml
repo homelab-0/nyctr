@@ -18,7 +18,7 @@ jobs:
   backend:
     name: API and security boundaries
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17-bookworm

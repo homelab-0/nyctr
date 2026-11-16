@@ -11,6 +11,7 @@ import pytest
 from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
 from sqlalchemy import event, insert, select
+from test_collection_store import POSTGRES, postgres_database
 
 from nyctr import collection, retention, schedule, worker
 from nyctr.collection import collect_integration
@@ -120,6 +121,18 @@ class World:
 def world(tmp_path, monkeypatch):
     """Sam's assigned laptop at the network source, and one stored lookup tied to it at the DNS source."""
     app = live_app(tmp_path)
+    with TestClient(app) as client:
+        seed_live_member(app)
+        yield World(app, client, monkeypatch)
+
+
+@pytest.fixture
+def world_on_postgresql(tmp_path, monkeypatch, request):
+    """The same world on the PostgreSQL server named in the environment; the test skips when none is named."""
+    place = postgres_database(request)
+    if not place:
+        pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    app = live_app(tmp_path, **place)
     with TestClient(app) as client:
         seed_live_member(app)
         yield World(app, client, monkeypatch)
@@ -665,12 +678,11 @@ def test_an_item_whose_mark_was_taken_off_after_the_run_read_what_may_go_is_kept
     assert world.drop() == 0 and "unifi:client:back" in world.stored()
 
 
-def test_a_device_being_filed_while_a_batch_reads_it_is_kept_on_postgresql(world, monkeypatch):
+def test_a_device_being_filed_while_a_batch_reads_it_is_kept_on_postgresql(world_on_postgresql, monkeypatch):
     """The batch locks its items before it decides. Without that, a device an administrator is filing
     at that moment is judged by what it was, and deleted once the filing is saved."""
+    world = world_on_postgresql
     engine = world.app.state.session_factory.kw["bind"]
-    if engine.dialect.name != "postgresql":
-        pytest.skip("SQLite has one writer, so nothing can be filing a device while a batch is open")
     world.read(LAPTOP)
     world.change(world.gone("old"))
     with world.app.state.session_factory() as filing:
