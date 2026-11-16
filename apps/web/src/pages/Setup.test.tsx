@@ -13,7 +13,7 @@ const rules: Rules = {
     enabled: true,
     per_day: 4,
     daily_total: 10,
-    ad_tracker: { mode: 'on', max_score: 25, max_minutes: 30 },
+    ad_tracker: { mode: 'on', max_score: 25, max_minutes: 30, analysis_required: false },
     threat_feed: { mode: 'off', max_minutes: 30, min_registered_days: 180 },
   },
   guest: { enabled: false, hits: 3, minutes: 5 },
@@ -137,17 +137,16 @@ describe('access rule in Setup', () => {
     const pressed = ads.getAllByRole('button', { pressed: true });
     expect(pressed.map((button) => button.textContent)).toEqual(['On']);
     expect(ads.getByText(/On: Nyctr opens these by itself/)).toBeDefined();
-    // The threat tier has no switch: it shows its conditions and says what it is waiting for.
+    expect(ads.getByText(/A check can only stop an opening/)).toBeDefined();
     const threats = await tier('Threat feeds');
-    expect(threats.getByText('Needs the risk analysis')).toBeDefined();
-    expect(threats.getByText(/the risk analysis comes in a later release/)).toBeDefined();
+    expect(threats.getByRole('button', { name: 'Off', pressed: true })).toBeDefined();
+    expect(threats.getByText(/only when the check says the block does not look justified/)).toBeDefined();
     expect(threats.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
       'the name does not look machine-made or disguised',
       'the address was registered at least 180 days ago',
       'nobody said no to it before',
       'it is opened for 30 minutes at most',
     ]);
-    expect(threats.queryAllByRole('button')).toEqual([]);
     // The kinds that never open are listed with why, and nothing there can be pressed.
     const never = document.querySelector<HTMLElement>('.rows.boxed')!;
     expect([...never.querySelectorAll('.t')].map((kind) => kind.textContent)).toEqual([
@@ -169,7 +168,10 @@ describe('access rule in Setup', () => {
     await user.click(ads.getByRole('button', { name: 'Record only' }));
     await waitFor(() =>
       expect(saved()).toEqual([
-        { ...rules.access, ad_tracker: { mode: 'shadow', max_score: 25, max_minutes: 30 } },
+        {
+          ...rules.access,
+          ad_tracker: { mode: 'shadow', max_score: 25, max_minutes: 30, analysis_required: false },
+        },
       ]),
     );
     expect(await ads.findByText(/Record only: Nyctr opens nothing/)).toBeDefined();
@@ -181,7 +183,7 @@ describe('access rule in Setup', () => {
     await user.click(ads.getByRole('button', { name: 'Lower minutes' }));
     const shorter = {
       ...rules.access,
-      ad_tracker: { mode: 'on', max_score: 25, max_minutes: 15 },
+      ad_tracker: { mode: 'on', max_score: 25, max_minutes: 15, analysis_required: false },
       threat_feed: { mode: 'off', max_minutes: 15, min_registered_days: 180 },
     };
     await waitFor(() => expect(saved()).toEqual([shorter]));

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
+from test_access import settled
 
 from nyctr import access, risk
 from nyctr.config import Settings
@@ -202,8 +203,8 @@ def test_a_new_integration_changes_behaviour_by_declaration_alone(tmp_path, monk
         rules = client.get("/api/rules").json()
         assert {s["provider_name"]: s["write_mode"] for s in rules["sources"]}["Acme Resolver"] == "none"
         member = live_signin(client, LIVE_MEMBER)
-        row = client.post("/api/requests", headers=member, json={
-            "block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
+        row = settled(client, member, client.post("/api/requests", headers=member, json={
+            "block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}))
         assert row["status"] == "pending" and row["risk_score"] == 16
         assert row["decision_note"] == "Nyctr cannot open addresses at Office resolver, so a person decides."
         admin_headers = live_signin(client)
@@ -239,10 +240,10 @@ def test_the_demo_shows_two_dns_sources_behaving_differently(client):
     blocks = {b["id"]: b for b in client.get("/api/blocks").json()["rows"]}
     assert blocks["block-print"]["risk_score"] is None and blocks["block-fonts"]["risk_score"] == 16
     assert "does not say" in blocks["block-print"]["risk_factors"][0]["label"]
-    opened = client.post("/api/requests", headers=headers, json={
-        "block_id": "block-fonts", "reason": "Fonts for a client deck", "duration_minutes": 60}).json()
-    waiting = client.post("/api/requests", headers=headers, json={
-        "block_id": "block-print", "reason": "Ordering prints", "duration_minutes": 60}).json()
+    opened = settled(client, headers, client.post("/api/requests", headers=headers, json={
+        "block_id": "block-fonts", "reason": "Fonts for a client deck", "duration_minutes": 60}))
+    waiting = settled(client, headers, client.post("/api/requests", headers=headers, json={
+        "block_id": "block-print", "reason": "Ordering prints", "duration_minutes": 60}))
     assert opened["status"] == "auto_approved" and waiting["status"] == "pending"
     assert waiting["integration_id"] == "demo-pihole"
     admin = client.post("/api/auth/login", json={"email": "admin@nyctr.demo", "password": "nyctr-demo"}).json()

@@ -6,7 +6,7 @@ import pytest
 from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from test_access import put_rule
+from test_access import put_rule, settled
 from test_guests import live_guest
 
 from nyctr.integrations import registry
@@ -68,8 +68,9 @@ def change(client, headers, kind):
     if kind in ("approval", "rule"):
         if kind == "rule":
             put_rule(client, headers)
-        row = client.post("/api/requests", headers=live_signin(client, LIVE_MEMBER), json={
-            "block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
+        member = live_signin(client, LIVE_MEMBER)
+        row = settled(client, member, client.post("/api/requests", headers=member, json={
+            "block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}))
         if kind == "rule":
             return row["status"], row["decision_note"]
         response = client.post(f"/api/requests/{row['id']}/review", headers=live_signin(client),

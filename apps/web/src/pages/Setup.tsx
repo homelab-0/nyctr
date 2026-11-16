@@ -88,6 +88,11 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
     const max_minutes = Math.min(threats.max_minutes, next.max_minutes);
     return void save({ ...rule, ad_tracker: next, threat_feed: { ...threats, max_minutes } });
   };
+  const saveThreats = (change: Partial<AccessRule['threat_feed']>) => {
+    const next = { ...threats, ...change };
+    const max_minutes = Math.min(next.max_minutes, ads.max_minutes);
+    return void save({ ...rule, threat_feed: { ...next, max_minutes } });
+  };
   return (
     <Panel
       title="Access rule"
@@ -163,19 +168,35 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             <span>0 to {ads.max_score}: Nyctr may open it</span>
             <span>{ads.max_score + 1} to 100, or no score: a person decides</span>
           </div>
+          <div className="bar">
+            <Switch
+              label="Require a check of the address"
+              checked={ads.analysis_required}
+              onChange={(analysis_required) => saveAds({ analysis_required })}
+            />
+          </div>
           <p className="aside">
+            {ads.analysis_required
+              ? 'Nyctr opens one of these only when the check says the block does not look justified ' +
+                'and the risk looks low.'
+              : 'A check can only stop an opening. It cannot open one by itself.'}{' '}
             {MODE_MEANS[ads.mode]} An address you said no to before always waits for you.
           </p>
         </section>
         <section className="tier" aria-label="Threat feeds">
           <div className="bar">
             <b>Threat feeds</b>
-            <span className="tag">Needs the risk analysis</span>
+            <Seg
+              label="Threat feeds"
+              value={threats.mode}
+              options={MODES}
+              onChange={(mode) => saveThreats({ mode })}
+            />
           </div>
           <p className="aside">
-            A feed of addresses reported as dangerous blocked it. This stays off for now: Nyctr will
-            open one of these only after it has analysed the address, and the risk analysis comes in
-            a later release. These are the conditions it will then also have to meet:
+            A feed of addresses reported as dangerous blocked it. Nyctr opens one of these only when
+            the check says the block does not look justified and the risk looks low, and these are
+            also true:
           </p>
           <ul className="aside">
             <li>the name does not look machine-made or disguised</li>

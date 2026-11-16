@@ -18,6 +18,7 @@ import { bringIntoView } from '../lib/links';
 import type { AccessRequest, Lease, Person, Rules } from '../types';
 
 const STATUS: Record<string, { text: string; tone: string }> = {
+  analysing: { text: 'Checking', tone: '' },
   pending: { text: 'Waiting', tone: 'yellow' },
   auto_approved: { text: 'Opened by the rule', tone: 'green' },
   approved: { text: 'Approved', tone: 'green' },
@@ -49,9 +50,9 @@ export default function Requests({
   const now = useNow();
   const all = requests.data || [];
   const waiting = all
-    .filter((row) => row.status === 'pending')
+    .filter((row) => row.status === 'pending' || row.status === 'analysing')
     .sort((a, b) => (b.risk_score ?? 101) - (a.risk_score ?? 101));
-  const decided = all.filter((row) => row.status !== 'pending');
+  const decided = all.filter((row) => row.status !== 'pending' && row.status !== 'analysing');
   const list = tab === 'waiting' ? waiting : decided;
   const row = all.find((item) => item.id === selected) || list[0] || null;
   const names = new Map((people.data || []).map((person) => [person.id, person.name]));
@@ -64,7 +65,7 @@ export default function Requests({
     const wanted = all.find((item) => item.id === params.get('id'));
     if (wanted) {
       setSelected(wanted.id);
-      setTab(wanted.status === 'pending' ? 'waiting' : 'decided');
+      setTab(wanted.status === 'pending' || wanted.status === 'analysing' ? 'waiting' : 'decided');
     }
   }, [requests.data, params]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -195,6 +196,31 @@ export default function Requests({
                 />
                 {row.risk_factors && <Factors items={row.risk_factors} />}
                 {row.decision_note && <p className="aside">{row.decision_note}</p>}
+                {row.status === 'analysing' && (
+                  <p className="aside">Nyctr is still checking this request.</p>
+                )}
+                {row.analysis && (
+                  <div>
+                    <h3>Check of this address</h3>
+                    <KV
+                      items={[
+                        ['Verdict', row.analysis.verdict || 'None'],
+                        ['Risk', row.analysis.risk || 'None'],
+                        ['Uncertainty', row.analysis.uncertainty || 'None'],
+                      ]}
+                    />
+                    <ul className="aside">
+                      {(row.analysis.facts?.facts || []).map((fact) => (
+                        <li key={fact.id || fact.kind}>
+                          {fact.kind}: {fact.state}
+                        </li>
+                      ))}
+                    </ul>
+                    {row.analysis.reasons.map((reason) => (
+                      <p key={reason.fact}>{reason.text}</p>
+                    ))}
+                  </div>
+                )}
                 <KV
                   items={[
                     ['Who', names.get(row.requester_id) || 'Unknown'],

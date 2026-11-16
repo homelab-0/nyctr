@@ -40,8 +40,11 @@ interface text in plain words a non-technical member can read.
   write anywhere else, and do not add a new kind of write while implementing an
   unrelated feature.
 - Nyctr acts on its own only under an administrator-written rule in
-  `nyctr/policy.py`. A risk score alone never opens access, and nothing a model
-  returns can trigger a change, edit a rule or cut a device off.
+  `nyctr/policy.py`. A risk score alone never opens access. A model's Analysis
+  may be one condition of the Administrator's Access rule, in the tiers the
+  Administrator switched on; by itself it opens nothing. No model output edits
+  a rule, cuts a device off, lengthens or widens access, or opens a deliberate
+  Block.
 - Record what happened at the provider (`simulated`, `applied`, `not_applied`,
   `failed`) separately from the decision. Never display a decision as restored or
   removed connectivity unless it was applied.

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
+from test_access import read_request
 from test_crossing import DOMAIN, Source, ask, claims, console, started
 from test_tiers import BOTH, postgres_database
 from test_unconfirmed import Failing, rows, trail
@@ -149,9 +150,12 @@ def test_a_source_removed_while_an_opening_waits_is_refused_as_removed_and_leave
                     access.release_entry(db, held)
                 answer = await waiting
                 made = answer.json()["id"] if by_rule else made
-                assert answer.status_code == (201 if by_rule else 409)
-                assert "was removed from Nyctr while" in (answer.json().get("detail") or answer.json()["decision_note"])
                 status, why = note(app, made)
+                assert answer.status_code == (201 if by_rule else 409)
+                # The answer itself is analysing. The sentence is on that answer for an approval, and on the
+                # stored request once the rule has decided.
+                told = answer.json().get("detail") or (why if by_rule else answer.json().get("decision_note"))
+                assert "was removed from Nyctr while" in told
                 assert status == "pending" and (
                     "was removed from Nyctr while" in why if by_rule else why == access.NOT_OPENED)
                 if by_rule == "turn":  # Removed while the rule waited for the person's turn: that exit records waits.
@@ -321,7 +325,7 @@ def test_the_daily_limit_holds_for_requests_sent_at_the_same_moment(tmp_path, mo
                 await asyncio.wait_for(source.reached.wait(), 5)
                 await asyncio.sleep(0.6)  # The other seven are past the first count and waiting their turn.
                 source.go.set()
-                return [answer.json() for answer in await asking]
+                return [await read_request(sam, answer) for answer in await asking]
 
         made = asyncio.run(scenario())
         assert sorted(row["status"] for row in made) == ["auto_approved"] * 4 + ["pending"] * 4
@@ -417,10 +421,10 @@ def test_a_persons_decision_while_the_rule_is_opening_is_refused_and_never_overw
                 await asyncio.wait_for(source.reached.wait(), 5)
                 made = (await owner.get("/api/requests")).json()[0]
                 refused = await review(owner, made["id"], "denied")
-                assert made["status"] == "pending" and refused.status_code == 409
-                assert refused.json()["detail"] == access.REVIEWING
+                assert made["status"] == "analysing" and refused.status_code == 409
+                assert refused.json()["detail"] == "Nyctr is still checking this request."
                 source.go.set()
-                assert (await asking).json()["status"] == "auto_approved"
+                assert (await read_request(sam, await asking))["status"] == "auto_approved"
 
         asyncio.run(scenario())
         assert rows(app) == [("active", None, True)] and gates(app) == [] and claims(app) == []
@@ -442,7 +446,7 @@ def test_a_decision_stored_just_before_the_requests_claim_is_taken_is_left_alone
             async with console(app, member) as sam, console(app, admin) as owner:
                 if by_rule:
                     monkeypatch.setattr(access, "hold_review", decided_first)
-                    return (await sam.post("/api/requests", json=ask("one"))).json()["status"]
+                    return (await read_request(sam, await sam.post("/api/requests", json=ask("one"))))["status"]
                 made = (await sam.post("/api/requests", json=ask("one"))).json()["id"]
                 monkeypatch.setattr(access, "hold_review", decided_first)
                 answer = await review(owner, made)
@@ -582,7 +586,7 @@ def test_a_decision_by_a_copy_that_does_not_know_the_claim_while_the_opening_is_
                     db.commit()
                 source.go.set()
                 answer = await opening
-                assert (answer.json()["status"] == "denied") if by_rule else (
+                assert ((await read_request(sam, answer))["status"] == "denied") if by_rule else (
                     answer.status_code == 409 and "already been reviewed" in answer.json()["detail"])
                 assert rows(app) == [("unconfirmed", None, True)] and source.listed == [DOMAIN]
                 with app.state.session_factory() as db:
@@ -605,7 +609,7 @@ def test_a_turn_that_does_not_come_is_said_as_that_and_not_as_a_failure_of_the_s
 
         async def scenario():
             async with console(app, member) as sam:
-                return (await sam.post("/api/requests", json=ask("one"))).json()
+                return await read_request(sam, await sam.post("/api/requests", json=ask("one")))
 
         made = asyncio.run(scenario())
         assert made["status"] == "pending" and made["risk_score"] is not None
@@ -631,7 +635,7 @@ def test_a_request_already_being_decided_stays_waiting_and_the_rule_records_that
 
         async def scenario():
             async with console(app, member) as sam:
-                return (await sam.post("/api/requests", json=ask("one"))).json()
+                return await read_request(sam, await sam.post("/api/requests", json=ask("one")))
 
         made = asyncio.run(scenario())
         assert made["status"] == "pending"
@@ -666,7 +670,7 @@ def test_a_decision_taken_after_the_refresh_keeps_its_note(tmp_path, monkeypatch
             self.expire_on_commit = previous
         with app.state.session_factory() as other:
             changed = other.execute(update(AccessRequest).where(AccessRequest.id == instance.id,
-                                                                AccessRequest.status == "pending")
+                                                                AccessRequest.status == "analysing")
                                     .values(status="denied", decision_note="Not this one.", decided_by="someone"))
             assert changed.rowcount == 1
             other.commit()
@@ -684,7 +688,7 @@ def test_a_decision_taken_after_the_refresh_keeps_its_note(tmp_path, monkeypatch
 
         async def scenario():
             async with console(app, member) as sam:
-                return (await sam.post("/api/requests", json=ask("one"))).json()
+                return await read_request(sam, await sam.post("/api/requests", json=ask("one")))
 
         try:
             made = asyncio.run(scenario())
@@ -759,7 +763,7 @@ def test_the_tick_leaves_a_claim_on_a_request_that_another_copy_took_over_in_tha
 
         async def scenario():
             async with console(app, member) as sam:
-                return (await sam.post("/api/requests", json=ask("one"))).json()
+                return await read_request(sam, await sam.post("/api/requests", json=ask("one")))
 
         made = asyncio.run(scenario())
         with app.state.session_factory() as db, app.state.session_factory() as other:
@@ -850,7 +854,7 @@ def test_no_record_is_kept_when_the_add_itself_says_nothing_was_sent(tmp_path, m
 
         async def scenario():
             async with console(app, member) as sam, console(app, admin) as owner:
-                made = (await sam.post("/api/requests", json=ask("one"))).json()
+                made = await read_request(sam, await sam.post("/api/requests", json=ask("one")))
                 assert made["status"] == "pending" and ("POST" in source.calls) == (add == "sent")
                 if add == "never sent":
                     assert rows(app) == [] and source.calls == ["GET", "GET"] and trail(app) == []
@@ -927,7 +931,7 @@ def test_a_source_without_the_first_read_leaves_no_record_when_its_add_says_noth
 
         async def scenario():
             async with console(app, member) as sam:
-                return (await sam.post("/api/requests", json=ask("one"))).json()["status"]
+                return (await read_request(sam, await sam.post("/api/requests", json=ask("one"))))["status"]
 
         assert asyncio.run(scenario()) == "pending" and claims(app) == []
         assert rows(app) == ([] if says is False else [("unconfirmed", None, False)])
@@ -1088,7 +1092,7 @@ def test_an_automatic_opening_whose_turn_was_taken_over_stores_nothing_and_its_e
                     theirs = access._claim(other, turn)
                     assert theirs
                     source.go.set()
-                    made = (await asking).json()
+                    made = await read_request(sam, await asking)
                     access.release_entry(other, theirs)
                 assert made["status"] == "pending" and "took too long" in made["decision_note"]
                 assert rows(app) == [("unconfirmed", None, True)] and source.listed == [DOMAIN]

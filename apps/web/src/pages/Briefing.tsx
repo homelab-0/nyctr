@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Sparkles } from 'lucide-react';
-import { useApi } from '../api';
+import { post, useApi } from '../api';
 import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { counted, lookupSpan, namedCounts, notSeen } from '../lib/counts';
 import { failing, uncollected, waitingText, whyEmpty } from '../lib/coverage';
@@ -185,6 +185,28 @@ export default function Briefing({
             <div className="rows">
               {attention.map((item) => {
                 const href = needHref(item);
+                if (item.action === 'end') {
+                  return (
+                    <div className="row" key={`${item.kind}:${href}:${item.id}`}>
+                      <i className={`dot ${item.severity}`} />
+                      <span>
+                        <a href={href}>
+                          <span className="t">{item.title}</span>
+                        </a>
+                        <span className="d">{item.detail}</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="button small"
+                        onClick={() =>
+                          void post(`/leases/${item.id}/end`, {}).then(() => retry?.())
+                        }
+                      >
+                        End
+                      </button>
+                    </div>
+                  );
+                }
                 return (
                   <a className="row" key={`${item.kind}:${href}:${item.id}`} href={href}>
                     <i className={`dot ${item.severity}`} />

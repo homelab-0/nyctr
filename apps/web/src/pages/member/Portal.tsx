@@ -92,6 +92,7 @@ const RECONNECT: Record<DeviceOs, { name: string; steps: string[] }> = {
 };
 
 const STATUS: Record<string, { text: string; tone: string }> = {
+  analysing: { text: 'Checking', tone: '' },
   pending: { text: 'Waiting for a person', tone: 'yellow' },
   auto_approved: { text: 'Opened', tone: 'green' },
   approved: { text: 'Approved', tone: 'green' },
@@ -775,6 +776,14 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
             Check back in a little while.
           </p>
         </header>
+      ) : row.status === 'analysing' ? (
+        <header className="m-result wait">
+          <span className="m-badge">
+            <Hourglass size={24} />
+          </span>
+          <h1 className="display d1">Nyctr is checking this.</h1>
+          <p className="lede">The answer will show up here.</p>
+        </header>
       ) : row.status === 'pending' ? (
         <header className="m-result wait">
           <span className="m-badge">
@@ -845,6 +854,7 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
           <Score value={row.risk_score} big />
           <div>
             <h2>What Nyctr found when it checked {row.domain}</h2>
+            {row.check && <p>{row.check}</p>}
             <p>
               {row.status !== 'auto_approved'
                 ? 'This is the score the administrator will see too.'
@@ -977,7 +987,9 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   // requests is still undecided, so the answer shows up where they are already looking.
   // After that decision, a failed lease read would leave the previous list on screen, so
   // reading continues until the lease list has been read successfully as well.
-  const undecided = (data.requests.data ?? []).some((row) => row.status === 'pending');
+  const undecided = (data.requests.data ?? []).some(
+    (row) => row.status === 'pending' || row.status === 'analysing',
+  );
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
     (undecided || (data.requests.data !== null && Boolean(data.leases.error)));

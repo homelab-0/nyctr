@@ -142,7 +142,11 @@ until switched on:
   provider failure all leave the request waiting for a person.
 - The guest cut-off rule unauthorises a guest device after a written number of
   threat-list lookups within a written number of minutes. It counts stored
-  observations. No model output is an input to either rule.
+  observations and does not read a model output.
+- A risk score alone never opens access. A model's Analysis may be one
+  condition of the Administrator's Access rule, in the tiers the Administrator
+  switched on; by itself it opens nothing. No model output edits a rule, cuts
+  a device off, lengthens or widens access, or opens a deliberate Block.
 
 ## The access rule in tiers
 
@@ -162,7 +166,7 @@ by a fixed table in `nyctr/policy.py`:
 | Tier | What blocked it | Can it open by itself |
 | --- | --- | --- |
 | Advertising and tracker lists | A list of advert or tracker addresses, a third party's or the source maker's | Yes, when switched on |
-| Threat feeds | A feed of addresses reported as threats, a third party's or the source maker's | Not yet: this tier cannot be switched on until Nyctr can analyse an address. Its conditions are stored and shown |
+| Threat feeds | A feed of addresses reported as threats, a third party's or the source maker's | Yes, when switched to record only or on. An analysis is required: present, saying the block is not justified, and the risk low |
 | Categories | A kind of site, safe search, or a class of address (newly registered, for one) that someone chose to block | Never: deliberate |
 | Deny entries | An address someone put on a deny list | Never: deliberate |
 | Firewall policies | Anything at the firewall, region blocking included | Never |
@@ -180,10 +184,12 @@ strictest tier of all of them, because opening the address lifts every reason
 at once, and one reason that is not recognised makes the whole block unknown.
 
 The rule that is stored names only the two tiers that can ever be automatic. A
-rule that sets anything for another tier, or any mode but off for threat
-feeds, does not validate and is not stored. The advertising tier has three
-positions: off, record only (nothing is opened; the request waits for a person
-and its record says the rule would have opened it) and on. A rule stored by an
+rule that sets anything for another tier does not validate and is not stored.
+The threat tier may be off, record only, or on. An analysis is required for it.
+The advertising tier has three positions: off, record only (nothing is opened;
+the request waits for a person and its record says the rule would have opened
+it) and on. The administrator chooses whether that tier requires an analysis.
+When it does not, an analysis can only stop an opening. A rule stored by an
 earlier version is read as the advertising tier on with its old limits and
 everything else off. That version had no daily total. The total it is read
 with is its old limit for each person multiplied by the number of active
@@ -215,9 +221,12 @@ audit record (`rule.access_checked`):
 6. The tier's own conditions hold: for advertising lists, a score at or below
    the written limit (never above 60). An unknown score fails.
 7. No administrator said no to that address before.
-8. The analysis of the address, once there is one. For advertising lists it
-   will only ever be able to stop an opening. No analysis exists yet, so this
-   check always passes and no model output reaches the rule.
+8. The analysis of the address. A threat feed always requires one that is
+   present, says the block is not justified, and says the risk is low.
+   Advertising requires that only when the administrator set it; otherwise an
+   analysis can only stop an opening. A model output reaches the rule only as
+   whether an analysis is present and its verdict and risk, and only as this
+   one condition. It opens nothing by itself.
 9. The person's openings in the last day are under the limit for each person,
    and everyone's are under the daily total. Both are counted again when the
    person's turn is held. As the opening is stored, the rule's row is locked and
@@ -463,4 +472,5 @@ into a broad shared-CDN IP allow rule.
 
 No block reason, no reputation hit, or a low numeric risk score is insufficient
 to prove safety. An automatic temporary grant must satisfy the explicit
-administrator rule and fails closed on missing evidence.
+administrator rule and fails closed on missing evidence. An analysis may be one
+condition of a tier the administrator switched on.

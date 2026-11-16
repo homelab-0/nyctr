@@ -26,13 +26,24 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import model, notices, presence
-from .access import checking_until, suggestions
+from .access import checking_until, plain_check, suggestions
 from .analysis import cut_title
 from .collection import LEAVING, last_gaps
 from .config import Settings
 from .deps import admin, get_db
 from .guests import guest_devices, guest_json
-from .models import AccessRequest, Finding, GuestPass, Insight, Integration, Lease, User, utc, utcnow
+from .models import (
+    AccessRequest,
+    Analysis,
+    Finding,
+    GuestPass,
+    Insight,
+    Integration,
+    Lease,
+    User,
+    utc,
+    utcnow,
+)
 from .redact import clean as _clean
 from .security import audit
 
@@ -113,6 +124,16 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
     for lease in db.scalars(select(Lease).where(Lease.status == "active", Lease.last_error.is_not(None))):
         items.append({"kind": "lease", "id": lease.id, "severity": "high", "at": utc(lease.created_at).isoformat(),
                       "title": f"{lease.domain} could not be closed", "detail": lease.last_error})
+    # An opening the rule made is listed with its check and one press to end it. An error is already listed above.
+    opened = db.scalars(select(Lease).where(Lease.status == "active", Lease.decided_by == "rule",
+                                            Lease.last_error.is_(None)))
+    for lease in opened:
+        request = db.get(AccessRequest, lease.request_id) if lease.request_id else None
+        analysis = db.get(Analysis, request.analysis_id) if request is not None and request.analysis_id else None
+        items.append({"kind": "lease", "id": lease.id, "severity": "low", "action": "end",
+                      "at": utc(lease.created_at).isoformat(),
+                      "title": f"{lease.domain} was opened by the access rule",
+                      "detail": plain_check(analysis) if analysis is not None else "Opened by the access rule."})
     pending = list(db.scalars(select(AccessRequest).where(AccessRequest.status == "pending")))
     pending.sort(key=lambda r: (-(r.risk_score if r.risk_score is not None else 101), utc(r.created_at)))
     for row in pending:

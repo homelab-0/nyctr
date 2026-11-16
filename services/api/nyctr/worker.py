@@ -199,6 +199,7 @@ class Upkeep:
         self.ending: dict[str | None, asyncio.Task] = {}
         self.clearing: asyncio.Task | None = None
         self.notifying: asyncio.Task | None = None
+        self.checking: asyncio.Task | None = None
         self.dropped: dict = {}  # When each source was last gone through for what has left it.
 
     def _release(self) -> None:
@@ -254,6 +255,9 @@ class Upkeep:
             self.clearing = asyncio.create_task(self._clear(self.clock()))
         if self.notifying is None or self.notifying.done():
             self.notifying = asyncio.create_task(self._notify())
+        # A request left analysing is finished here. This is not a start, so a live claim is left alone.
+        if self.checking is None or self.checking.done():
+            self.checking = asyncio.create_task(self._finish_analyses())
 
     async def _notify(self) -> None:
         """Send notices that are due. The call runs off this loop and holds no database lock while it is open."""
@@ -279,6 +283,14 @@ class Upkeep:
         except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
             log.warning("Background upkeep failed: %s", type(error).__name__)
 
+    async def _finish_analyses(self) -> None:
+        """Finish requests still being analysed. A failure is logged without its cause text."""
+        try:
+            from .access import finish_due
+            await finish_due(self.factory, self.settings)
+        except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
+            log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+
     async def _collect(self) -> None:
         """Run one collection pass. A failure is logged without its cause text; the next tick starts another."""
         try:
@@ -288,7 +300,8 @@ class Upkeep:
 
     async def stop(self) -> None:
         """Cancel whatever is still going and wait until it has stopped."""
-        tasks = [task for task in (self.collecting, self.clearing, self.notifying, *self.ending.values()) if task]
+        tasks = [task for task in (
+            self.collecting, self.clearing, self.notifying, self.checking, *self.ending.values()) if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

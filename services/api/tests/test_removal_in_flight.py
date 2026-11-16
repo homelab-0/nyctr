@@ -8,7 +8,7 @@ import pytest
 from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from test_access import put_rule
+from test_access import put_rule, settled
 from test_guests import live_guest, run_rule
 
 from nyctr.integrations import IntegrationError, registry
@@ -209,8 +209,9 @@ def test_the_approval_and_the_access_rule_take_back_and_say_so(tmp_path, monkeyp
         stand_in = StandIn(lambda: None, False)
         monkeypatch.setattr("nyctr.access._opener", lambda integration: stand_in)
         monkeypatch.setattr("nyctr.access.source_held", lambda db, integration_id: False)
-        row = client.post("/api/requests", headers=live_signin(client, LIVE_MEMBER), json={
-            "block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
+        member = live_signin(client, LIVE_MEMBER)
+        row = settled(client, member, client.post("/api/requests", headers=member, json={
+            "block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}))
         if path == "approval":
             response = client.post(f"/api/requests/{row['id']}/review", headers=live_signin(client),
                                    json={"decision": "approved", "note": "Fine for work"})

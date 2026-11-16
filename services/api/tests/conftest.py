@@ -92,6 +92,34 @@ def seed_live_member(app, *, reason="HaGeZi Multi PRO++", codes=("blocklist:hage
         db.commit()
 
 
+@pytest.fixture(autouse=True)
+def analysis_does_not_call_out(monkeypatch):
+    """A live request's analysis uses stored facts only. The demonstration still gathers as it does.
+
+    Tests that replace `_gather` themselves run after this and keep their own stand-in.
+    """
+    from sqlalchemy.orm import Session
+
+    from nyctr import block_analysis, facts
+
+    real = block_analysis._gather
+
+    def gather(bind, domain):
+        with Session(bind) as own:
+            if facts._demonstration(own):
+                return real(bind, domain)
+            name = facts._name(domain)
+            wall = facts._wall()
+            rows = facts._observations(own, name)
+            found = [facts._block(rows, wall), facts._score(name, rows, wall), facts._seen(rows, wall),
+                     facts._unavailable("registration", "registry", "Not asked in a test.", wall),
+                     facts._unavailable("resolution", "resolver", "Not asked in a test.", wall),
+                     facts._not_asked("certificate", wall), facts._not_asked("reputation", wall)]
+            return name, facts._number(found)
+
+    monkeypatch.setattr(block_analysis, "_gather", gather)
+
+
 def pytest_collection_modifyitems(items):
     """Write `postgres` into each marked case's JUnit record, so CI can count and check exactly those."""
     for item in items:

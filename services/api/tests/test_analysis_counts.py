@@ -1,0 +1,566 @@
+"""A request is analysed, and the access rule may count that analysis.
+
+The answer is stored as analysing and returned before the job decides. The job is a claim with a
+two-minute takeover. The threat tier opens only when an analysis is present, says the block is not
+justified, and the risk is low.
+"""
+
+import asyncio
+import threading
+import time
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+from conftest import signin
+from fastapi.testclient import TestClient
+from sqlalchemy import event, select
+from test_access import settled
+from test_tiers import BOTH, engine_for, postgres_database
+
+from nyctr import access, block_analysis
+from nyctr.collection import holder_id
+from nyctr.config import Settings
+from nyctr.database import migrate, session_factory
+from nyctr.main import create_app
+from nyctr.models import AccessRequest, Analysis, Audit, Lease, Notice, Observation, User, utcnow
+from nyctr.security import hash_password
+
+ROOT = Path(__file__).resolve().parents[3]
+# How long the second writer is given before the test asks whether it is still waiting, as the
+# sign-in tests do. SQLite gives up on a lock after five seconds, so that bound stays inside it.
+WAIT = {"sqlite": 0.5, "postgresql": 5.0}
+COPY = ("integration_id", "device_id", "device_name", "domain", "source", "reason", "reason_codes",
+        "observed_at", "expires_at", "evidence_kind", "attribution", "risk_score", "risk_explanation")
+LEAD = "Nyctr checked this site: "
+WAITS = "The analysis of this address does not support opening it, so a person decides."
+SAFETY = "This was blocked for safety or by an administrator's rule, so a person decides."
+# Present only for ok plus a decided verdict. The one opening is not_justified and low.
+CASES = [
+    ("missing", None, None, False), ("failed", None, None, False), ("invalid", None, None, False),
+    ("timed_out", None, None, False), ("cannot_tell", "cannot_tell", None, False),
+    ("ok", "cannot_tell", None, False), ("ok", "justified", "low", False),
+    ("ok", "justified", "medium", False), ("ok", "justified", "high", False),
+    ("ok", "justified", "unknown", False), ("ok", "not_justified", "medium", False),
+    ("ok", "not_justified", "high", False), ("ok", "not_justified", "unknown", False),
+    ("ok", "not_justified", "low", True),
+]
+SENTENCES = (
+    "A risk score alone never opens access.",
+    "A model's Analysis may be one condition of the Administrator's Access rule, in the tiers the "
+    "Administrator switched on; by itself it opens nothing.",
+    "No model output edits a rule, cuts a device off, lengthens or widens access, or opens a deliberate Block.",
+)
+
+
+def facts():
+    """A registration old enough for the threat tier, and nothing the member is shown raw."""
+    registered = (utcnow() - timedelta(days=400)).isoformat()
+    return {"facts": [{"kind": "registration", "state": "known", "value": {"registered": registered},
+                       "secret": "not for the member"}]}
+
+
+def rule_body(**changes):
+    """Advertising on, threats off, unless a test says otherwise. Threat minutes stay within advertising."""
+    body = {"enabled": True, "per_day": 20, "daily_total": 100,
+            "ad_tracker": {"mode": "on", "max_score": 25, "max_minutes": 60, "analysis_required": False},
+            "threat_feed": {"mode": "off", "max_minutes": 30, "min_registered_days": 180}}
+    for name, values in changes.items():
+        body[name] = {**body[name], **values}
+    return body
+
+
+def database_url(database, tmp_path, request):
+    """This case's database. PostgreSQL is skipped until a server is named, as the other two-engine tests do."""
+    if database == "sqlite":
+        return f"sqlite:///{tmp_path}/once.db"
+    url = postgres_database(request)
+    if not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+    return url
+
+
+def demo(tmp_path, url=None):
+    """A demonstration with the upkeep tick left off, so only the request's own job analyses it."""
+    return create_app(Settings(mode="demo", database_url=url or f"sqlite:///{tmp_path}/demo.db",
+                               public_url="http://testserver", cookie_secure=False, worker_enabled=False))
+
+
+def plant(db, block_id, **changes):
+    """A fresh copy of the gallery block, assigned to the member, with whatever a test changes."""
+    one = db.get(Observation, "block-gallery")
+    values = {name: getattr(one, name) for name in COPY}
+    values.update(changes)
+    db.add(Observation(id=block_id, **values))
+
+
+def store_analysis(db, domain, block_id, state, verdict, risk):
+    """The analysis the stand-in stores. The request's job reads it back from its id."""
+    row = Analysis(domain=domain[:253], block_id=block_id, facts=facts(), model_state=state, verdict=verdict,
+                   risk=risk, reasons=[{"text": "The feed is broader than this site."}],
+                   uncertainty="The registry date is several years old.", prompt_version="t", duration_ms=1)
+    db.add(row)
+    db.commit()
+    return row
+
+
+def one_notice(db, request_id, *, opened):
+    """The one notice stored for this request. An opening and a wait use the same kind."""
+    found = db.scalars(select(Notice).where(Notice.subject == request_id)).all()
+    assert len(found) == 1 and found[0].kind == "request_waiting"
+    title = found[0].payload["title"]
+    if opened:
+        assert title.startswith("Nyctr opened ")
+    else:
+        assert "is waiting on " in title
+    return found[0]
+
+
+@BOTH
+def test_a_request_is_answered_while_it_is_analysing_and_a_restart_finishes_it_once(
+        tmp_path, database, request, monkeypatch):
+    """The answer is analysing, with no score yet, while the job is still in the check. A later start finishes
+    a claim from before that start once, and a tick leaves a fresh claim of this start alone."""
+    url = database_url(database, tmp_path, request)
+    release, calls, mode = threading.Event(), [], {"wait": True}
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        calls.append(block_id)
+        if mode["wait"]:
+            await asyncio.to_thread(release.wait)
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path, url)
+    try:
+        with TestClient(app) as client:
+            admin = signin(client)
+            assert client.put("/api/rules/access", headers=admin, json=rule_body()).status_code == 200
+            member = signin(client, member=True)
+            box = {}
+
+            def post():
+                try:
+                    box["response"] = client.post(
+                        "/api/requests", headers=member,
+                        json={"block_id": "block-gallery", "reason": "Need the gallery", "duration_minutes": 60})
+                except Exception as error:  # the thread would hide it; the join below raises it
+                    box["error"] = error
+
+            poster = threading.Thread(target=post)
+            poster.start()
+            found = None
+            deadline = time.monotonic() + 30
+            try:
+                while time.monotonic() < deadline and found is None:
+                    with app.state.session_factory() as db:
+                        row = db.scalar(select(AccessRequest).where(AccessRequest.block_id == "block-gallery"))
+                        if row is not None and row.status == "analysing" and row.analysis_id is None:
+                            assert poster.is_alive()
+                            found = row.id
+                    if found is None:
+                        time.sleep(0.01)
+                assert found
+            finally:
+                release.set()
+                poster.join(30)
+            assert not poster.is_alive()
+            if "error" in box:
+                raise box["error"]
+            body = box["response"].json()
+            assert body["status"] == "analysing" and body["risk_score"] is None and body["duration_minutes"] == 60
+            stored = settled(client, member, box["response"])
+            assert stored["status"] == "auto_approved" and stored["risk_score"] == 16 and calls == ["block-gallery"]
+            asyncio.run(access.finish_due(app.state.session_factory, app.state.settings))
+            assert calls == ["block-gallery"]
+
+            mode["wait"] = False
+            holder = holder_id(app.state.engine)
+            with app.state.session_factory() as db:
+                plant(db, "block-held")
+                db.add(AccessRequest(id="still-checking", block_id="block-held", domain="shop.example",
+                                     device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                                     duration_minutes=30, status="analysing", analysis_holder=holder,
+                                     analysis_claimed_at=utcnow()))
+                db.commit()
+            admin = signin(client)
+            refused = client.post("/api/requests/still-checking/review", headers=admin,
+                                 json={"decision": "approved", "note": "Now"})
+            assert refused.status_code == 409 and refused.json()["detail"] == "Nyctr is still checking this request."
+
+            def leave(request_id, block_id, **fields):
+                with app.state.session_factory() as db:
+                    plant(db, block_id)
+                    db.add(AccessRequest(id=request_id, block_id=block_id, domain="shop.example",
+                                         device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                                         duration_minutes=30, status="analysing", **fields))
+                    db.commit()
+
+            def finish(**kwargs):
+                asyncio.run(access.finish_due(app.state.session_factory, app.state.settings, **kwargs))
+
+            def still(request_id):
+                with app.state.session_factory() as db:
+                    return db.get(AccessRequest, request_id).status
+
+            leave("fresh", "block-fresh", analysis_holder=holder, analysis_claimed_at=utcnow())
+            finish()
+            assert calls == ["block-gallery"] and still("fresh") == "analysing"
+            leave("young", "block-young", analysis_holder="previous",
+                  analysis_claimed_at=utcnow() - timedelta(seconds=30))
+            finish()
+            assert calls == ["block-gallery"] and still("young") == "analysing"
+            started = utcnow() - timedelta(minutes=5)
+            leave("after-start", "block-after", analysis_holder="previous", analysis_claimed_at=utcnow())
+            finish(restart_of=holder, started_at=started)
+            assert calls == ["block-gallery"] and still("after-start") == "analysing"
+            leave("stale", "block-stale", analysis_holder="previous",
+                  analysis_claimed_at=utcnow() - timedelta(minutes=3))
+            finish()
+            assert calls == ["block-gallery", "block-stale"] and still("stale") == "auto_approved"
+            leave("restarted", "block-restarted", analysis_holder="previous",
+                  analysis_claimed_at=utcnow() - timedelta(seconds=30))
+            finish(restart_of=holder, started_at=utcnow())
+            assert calls[-1] == "block-restarted" and still("restarted") == "auto_approved"
+            with app.state.session_factory() as db:
+                kept = store_analysis(db, "shop.example", "block-kept", "missing", None, None)
+            leave("kept", "block-kept", analysis_holder="previous", analysis_id=kept.id,
+                  analysis_claimed_at=utcnow() - timedelta(minutes=3))
+            before = len(calls)
+            finish()
+            assert len(calls) == before and still("kept") != "analysing"
+            assert still("still-checking") == "analysing" and still("fresh") == "analysing"
+    finally:
+        app.state.engine.dispose()
+
+
+class Second:
+    """Starts the other writer on the first update of a request, and records whether that writer is still waiting."""
+
+    def __init__(self, engine, database):
+        self.wait, self.second, self.entered = WAIT[database], None, None
+        self.waiting, self.threads, self.armed = [], [], False
+        event.listen(engine, "after_cursor_execute", self.watch)
+
+    def watch(self, _conn, _cursor, statement, _parameters, _context, _executemany):
+        text = statement.lower()
+        if not self.armed or "access_requests" not in text or not text.lstrip().startswith("update"):
+            return
+        self.armed = False
+        thread = threading.Thread(target=self.second)
+        self.threads.append(thread)
+        thread.start()
+        assert self.entered.wait(30)
+        thread.join(self.wait)
+        self.waiting.append(thread.is_alive())
+
+    def arm(self, second):
+        self.second, self.entered, self.armed = second, threading.Event(), True
+
+    def close(self, engine):
+        event.remove(engine, "after_cursor_execute", self.watch)
+        for thread in self.threads:
+            thread.join(30)
+        assert not any(thread.is_alive() for thread in self.threads)
+
+
+@BOTH
+def test_a_second_writer_is_stopped_at_the_claim_the_analysis_and_the_decision(tmp_path, database, request):
+    """Each check locks the request, re-reads it, and writes only when it still holds the claim."""
+    engine = engine_for(database, tmp_path, request)
+
+    def limits(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        if engine.dialect.name == "postgresql":
+            cursor.execute("SET lock_timeout = '20s'")
+        else:
+            cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+
+    event.listen(engine, "connect", limits)
+    migrate(engine)
+    factory, gate, results = session_factory(engine), Second(engine, database), {}
+    try:
+        with factory() as db:
+            db.add(User(id="sam", email="sam@example.net", name="Sam"))
+            db.commit()
+            for request_id in ("req-claim", "req-keep", "req-decide"):
+                db.add(AccessRequest(id=request_id, block_id=request_id, domain="shop.example",
+                                     device_name="Laptop", requester_id="sam", reason="Need it",
+                                     duration_minutes=30, status="analysing"))
+            db.commit()
+            for request_id in ("req-keep", "req-decide"):
+                row = db.get(AccessRequest, request_id)
+                row.analysis_holder, row.analysis_claimed_at = "one", utcnow()
+            db.commit()
+
+        def other(name, call):
+            def run():
+                gate.entered.set()
+                with factory() as db:
+                    results[name] = call(db)
+                    if results[name]:
+                        db.commit()
+            gate.arm(run)
+
+        other("claim", lambda db: access.claim_analysis(db, "req-claim", "two"))
+        with factory() as db:
+            assert access.claim_analysis(db, "req-claim", "one") is True
+            assert gate.waiting == [True]
+            db.commit()
+        gate.threads[-1].join(30)
+        assert results["claim"] is False
+        with factory() as db:
+            assert db.get(AccessRequest, "req-claim").analysis_holder == "one"
+
+        other("keep", lambda db: access.keep_analysis(db, "req-keep", "two", "analysis-two"))
+        with factory() as db:
+            assert access.keep_analysis(db, "req-keep", "one", "analysis-one") is True
+            assert gate.waiting == [True, True]
+            db.commit()
+        gate.threads[-1].join(30)
+        assert results["keep"] is False
+        with factory() as db:
+            assert db.get(AccessRequest, "req-keep").analysis_id == "analysis-one"
+
+        other("decide", lambda db: access.keep_decision(
+            db, "req-decide", "two", status="auto_approved", decision_note="second"))
+        with factory() as db:
+            assert access.keep_decision(db, "req-decide", "one", status="pending", decision_note="first") is True
+            assert gate.waiting == [True, True, True]
+            db.commit()
+        gate.threads[-1].join(30)
+        assert results["decide"] is False
+        with factory() as db:
+            row = db.get(AccessRequest, "req-decide")
+            assert (row.status, row.decision_note, row.analysis_holder) == ("pending", "first", None)
+    finally:
+        gate.close(engine)
+        engine.dispose()
+
+
+def test_the_member_reads_one_sentence_and_not_the_facts():
+    """Every stored state has one sentence. The facts never appear in it."""
+    raw = facts()
+
+    def made(**kwargs):
+        return Analysis(domain="shop.example", facts=raw, reasons=[], prompt_version="t", duration_ms=1, **kwargs)
+
+    expected = {
+        ("missing", None, None): "no model is connected, so there is no verdict.",
+        ("failed", None, None): "the check did not finish.",
+        ("invalid", None, None): "the check's answer could not be used.",
+        ("timed_out", None, None): "the check took too long.",
+        ("cannot_tell", "cannot_tell", None): "the check could not say either way.",
+        ("ok", "justified", "low"): "the block looks justified.",
+        ("ok", "not_justified", "medium"): "the block does not look justified.",
+        ("ok", "not_justified", "low"): "the block does not look justified, and the risk looks low.",
+    }
+    assert access.plain_check(None) == LEAD + expected[("missing", None, None)]
+    for (state, verdict, risk), sentence in expected.items():
+        words = access.plain_check(made(model_state=state, verdict=verdict, risk=risk))
+        assert words == LEAD + sentence and "not for the member" not in words and "registration" not in words
+
+
+def test_the_threat_tier_opens_only_when_the_check_vouches_and_the_member_reads_the_sentence(
+        tmp_path, monkeypatch):
+    """On, with the other conditions met: only a present, not justified, low analysis opens. Anything else waits,
+    and the note says so. The member reads the sentence; another member reads nothing; an administrator reads it all."""
+    spec = {}
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        state, verdict, risk = spec["case"]
+        return store_analysis(db, domain, block_id, state, verdict, risk)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            admin = signin(client)
+            assert client.put("/api/rules/access", headers=admin, json=rule_body(
+                threat_feed={"mode": "on"})).status_code == 200
+            with app.state.session_factory() as db:
+                db.add(User(id="user-alex", email="alex@nyctr.demo", name="Alex", role="member",
+                            password_hash=hash_password("nyctr-demo")))
+                for number, _case in enumerate(CASES):
+                    plant(db, f"block-t{number}", domain="shop.example", reason="ai-threat-detection",
+                          reason_codes=["ai-threat-detection"], risk_score=None, risk_explanation="")
+                db.commit()
+            member = signin(client, member=True)
+            member_cookies = dict(client.cookies)
+            opened = None
+            waited = []
+            for number, case in enumerate(CASES):
+                spec["case"] = case[:3]
+                response = client.post("/api/requests", headers=member, json={
+                    "block_id": f"block-t{number}", "reason": "Need the site", "duration_minutes": 60})
+                assert response.status_code == 201 and response.json()["status"] == "analysing"
+                row = settled(client, member, response)
+                if case[3]:
+                    assert row["status"] == "auto_approved" and row["duration_minutes"] == 30
+                    assert row["check"] == LEAD + "the block does not look justified, and the risk looks low."
+                    assert "analysis" not in row and "not for the member" not in str(row)
+                    opened = row
+                else:
+                    assert row["status"] == "pending" and row["decision_note"] == WAITS
+                    assert row["decided_by"] is None
+                    waited.append(row["id"])
+            assert opened and len(waited) == len(CASES) - 1
+            with app.state.session_factory() as db:
+                one_notice(db, opened["id"], opened=True)
+                for request_id in waited:
+                    one_notice(db, request_id, opened=False)
+            client.cookies.clear()
+            admin = signin(client)
+            full = next(row for row in client.get("/api/requests").json() if row["id"] == opened["id"])
+            assert full["analysis"]["verdict"] == "not_justified" and full["analysis"]["risk"] == "low"
+            assert full["analysis"]["facts"]["facts"][0]["kind"] == "registration"
+            assert full["analysis"]["reasons"][0]["text"] and full["analysis"]["uncertainty"]
+            assert "check" not in full
+            attention = [item for item in client.get("/api/attention").json() if item.get("action") == "end"
+                         and "shop.example" in item["title"]]
+            assert len(attention) == 1 and attention[0]["detail"] == opened["check"]
+            lease_id = attention[0]["id"]
+            assert client.post(f"/api/leases/{lease_id}/end", headers=admin).status_code == 200
+            assert next(row["status"] for row in client.get("/api/leases").json() if row["id"] == lease_id) == "ended"
+            client.cookies.clear()
+            client.cookies.update(member_cookies)
+            again = next(row for row in client.get("/api/requests").json() if row["id"] == opened["id"])
+            assert again["check"] == opened["check"] and "analysis" not in again
+            client.cookies.clear()
+            alex = client.post("/api/auth/login", json={"email": "alex@nyctr.demo", "password": "nyctr-demo"})
+            assert alex.status_code == 200
+            listed = client.get("/api/requests").json()
+            assert opened["id"] not in [row["id"] for row in listed] and "shop.example" not in str(listed)
+    finally:
+        app.state.engine.dispose()
+
+
+def test_shadow_records_what_would_have_opened_and_opens_nothing(tmp_path, monkeypatch):
+    """The check runs. The record says the rule would have opened it. Nothing is opened."""
+    async def analyse(db, domain, block_id=None, *, settings):
+        return store_analysis(db, domain, block_id, "ok", "not_justified", "low")
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            admin = signin(client)
+            assert client.put("/api/rules/access", headers=admin, json=rule_body(
+                threat_feed={"mode": "shadow"})).status_code == 200
+            with app.state.session_factory() as db:
+                plant(db, "block-shadow", domain="shop.example", reason="ai-threat-detection",
+                      reason_codes=["ai-threat-detection"], risk_score=None, risk_explanation="")
+                db.commit()
+            member = signin(client, member=True)
+            row = settled(client, member, client.post("/api/requests", headers=member, json={
+                "block_id": "block-shadow", "reason": "Need the site", "duration_minutes": 60}))
+            assert row["status"] == "pending" and row["decided_by"] is None
+            assert row["decision_note"] == ("The access rule would have opened this for 30 minutes. "
+                                            "It is set to record only, so a person decides.")
+            with app.state.session_factory() as db:
+                assert db.scalar(select(Lease.id).where(Lease.request_id == row["id"])) is None
+                event_row = db.scalar(select(Audit).where(Audit.action == "rule.access_checked",
+                                                          Audit.target_id == row["id"]))
+                assert event_row.details["outcome"] == "would_open" and event_row.details["minutes"] == 30
+                one_notice(db, row["id"], opened=False)
+    finally:
+        app.state.engine.dispose()
+
+
+def test_a_block_that_is_never_automatic_stays_closed_whatever_the_check_says(tmp_path, monkeypatch):
+    """A category is a deliberate block. A vouched analysis is stored and opens nothing."""
+    async def analyse(db, domain, block_id=None, *, settings):
+        return store_analysis(db, domain, block_id, "ok", "not_justified", "low")
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            admin = signin(client)
+            assert client.put("/api/rules/access", headers=admin, json=rule_body(
+                threat_feed={"mode": "on"})).status_code == 200
+            with app.state.session_factory() as db:
+                plant(db, "block-never", domain="shop.example", reason="parental control",
+                      reason_codes=["parental"], risk_score=None, risk_explanation="")
+                db.commit()
+            member = signin(client, member=True)
+            row = settled(client, member, client.post("/api/requests", headers=member, json={
+                "block_id": "block-never", "reason": "Need the site", "duration_minutes": 60}))
+            assert row["status"] == "pending" and row["decision_note"] == SAFETY
+            # The analysis is on the administrator's copy. The member is not given its facts.
+            assert "analysis" not in row and row["check"].startswith(LEAD)
+            client.cookies.clear()
+            signin(client)
+            full = client.get("/api/requests").json()
+            admin_row = next(item for item in full if item["id"] == row["id"])
+            assert admin_row["analysis"]["verdict"] == "not_justified"
+            with app.state.session_factory() as db:
+                assert db.scalar(select(Lease.id).where(Lease.request_id == row["id"])) is None
+    finally:
+        app.state.engine.dispose()
+
+
+def test_advertising_counts_an_analysis_only_when_the_administrator_requires_one(tmp_path, monkeypatch):
+    """Required: the same vouch as a threat feed. Not required: a vouch is not needed, and a justified block stops."""
+    spec = {}
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        return store_analysis(db, domain, block_id, *spec["case"])
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            admin = signin(client)
+            with app.state.session_factory() as db:
+                plant(db, "block-stop", domain="fonts.partner-metrics.example")
+                plant(db, "block-need", domain="cdn.example")
+                plant(db, "block-vouched", domain="img.example")
+                db.commit()
+            cases = [
+                ("block-gallery", False, ("missing", None, None), "auto_approved"),
+                ("block-stop", False, ("ok", "justified", "low"), "pending"),
+                ("block-need", True, ("missing", None, None), "pending"),
+                ("block-vouched", True, ("ok", "not_justified", "low"), "auto_approved"),
+            ]
+            for block_id, required, case, status in cases:
+                assert client.put("/api/rules/access", headers=admin, json=rule_body(
+                    ad_tracker={"analysis_required": required})).status_code == 200
+                spec["case"] = case
+                client.cookies.clear()
+                member = signin(client, member=True)
+                row = settled(client, member, client.post("/api/requests", headers=member, json={
+                    "block_id": block_id, "reason": "Need the pictures", "duration_minutes": 60}))
+                assert row["status"] == status
+                if status == "pending":
+                    assert row["decision_note"] == WAITS
+                client.cookies.clear()
+                admin = signin(client)
+    finally:
+        app.state.engine.dispose()
+
+
+def test_no_model_stores_the_facts_and_marks_the_verdict_missing(tmp_path):
+    """The check still runs. With no model connected its verdict is missing, which the rule treats as absent."""
+    app = create_app(Settings(mode="live", database_url=f"sqlite:///{tmp_path}/live.db",
+                              public_url="http://testserver", cookie_secure=False, worker_enabled=False,
+                              bootstrap_admin_email="owner@example.net",
+                              bootstrap_admin_password="secure password for tests"))
+    with TestClient(app):
+        async def once():
+            with app.state.session_factory() as db:
+                return await block_analysis.analyse(db, "shop.example", "block-1", settings=app.state.settings)
+
+        row = asyncio.run(once())
+        assert row.model_state == "missing" and row.verdict is None and row.risk is None
+        assert row.facts.get("facts") and block_analysis.analysis_input(row).present is False
+    app.state.engine.dispose()
+
+
+def test_the_guardrail_is_written_in_the_two_places_the_amendment_names():
+    """The same three sentences, in the contributor notes and the security model."""
+    for name in ("AGENTS.md", "docs/security-model.md"):
+        collapsed = " ".join((ROOT / name).read_text().split())
+        for sentence in SENTENCES:
+            assert sentence in collapsed, name

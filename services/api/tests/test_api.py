@@ -4,6 +4,7 @@ import pytest
 from conftest import signin
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from test_access import settled
 
 from nyctr import analysis
 from nyctr.config import Settings
@@ -162,9 +163,9 @@ def test_request_idempotence_and_review_never_grant_access(client, app, member_h
     """Duplicate submissions share one request and a `reviewed` decision never becomes a grant."""
     body = {"block_id": "block-tablet", "reason": "Need to open a picture gallery", "duration_minutes": 60}
     first = client.post("/api/requests", headers=member_headers, json=body)
-    assert first.status_code == 201
+    assert first.status_code == 201 and first.json()["status"] == "analysing"
     request_id = first.json()["id"]
-    assert first.json()["status"] == "pending"
+    assert settled(client, member_headers, first)["status"] == "pending"
     duplicate = client.post("/api/requests", headers=member_headers, json=body)
     assert duplicate.json()["id"] == request_id
     assert client.post(f"/api/requests/{request_id}/review", headers=member_headers,
