@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, api, dateTime, put, useApi } from '../api';
 import { ModelPanel } from '../components/ModelPanel';
+import { NoticesPanel } from '../components/NoticesPanel';
 import {
   ErrorState,
   InlineError,
@@ -804,6 +805,7 @@ export default function Setup({ params }: { params: URLSearchParams }) {
         <div className="stack">
           <SchedulePanel />
           <ModelPanel />
+          <NoticesPanel />
           <SystemPanel rules={rules.data} />
           <RecognitionPanel />
           <AddressPanel />

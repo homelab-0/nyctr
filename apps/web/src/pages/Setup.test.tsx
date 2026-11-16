@@ -44,6 +44,7 @@ function open(first: CollectionSchedule, mode: 'live' | 'demo' = 'live') {
     'GET /model': modelFixture(),
     'GET /me/address': seen,
     'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
+    'GET /notices': notices,
     'GET /collection': () => current,
     'PUT /collection': (body: unknown) => {
       const sent = body as { enabled: boolean; minutes: number };
@@ -63,12 +64,25 @@ function open(first: CollectionSchedule, mode: 'live' | 'demo' = 'live') {
 const toggle = () => screen.findByRole('switch', { name: 'Scheduled collection' });
 const interval = () => screen.getByLabelText('How often to collect') as HTMLSelectElement;
 
+/** A notice setting with nothing saved, so the installation tab's notice card stays quiet. */
+const notices = {
+  target: '',
+  secret_ref: '',
+  unsigned: true,
+  signing: 'Notices are sent without a signature. Name a secret to sign them.',
+  problem: null,
+  editable: true,
+  hosts: [],
+  recent: [],
+};
+
 const system = {
   'GET /rules': rules,
   'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
   'GET /model': modelFixture(),
   'GET /me/address': seen,
   'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
+  'GET /notices': notices,
 };
 
 /** Holds back every later request of one kind until `release` is called. */
@@ -225,6 +239,9 @@ describe('collection schedule in Setup', () => {
       'GET /rules': rules,
       'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
       'GET /model': modelFixture(),
+      'GET /me/address': seen,
+      'GET /presence': { items: [], enabled: false, reach_back_hours: 2 },
+      'GET /notices': notices,
       'GET /collection': scheduleFixture(),
       'PUT /collection': { __status: 403, detail: 'Administrator access required' },
     });
