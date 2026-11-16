@@ -170,7 +170,11 @@ feeds, does not validate and is not stored. The advertising tier has three
 positions: off, record only (nothing is opened; the request waits for a person
 and its record says the rule would have opened it) and on. A rule stored by an
 earlier version is read as the advertising tier on with its old limits and
-everything else off, so it opens exactly what it opened before.
+everything else off. That version had no daily total. The total it is read
+with is its old limit for each person multiplied by the number of active
+accounts, and no less than 1 and no more than 100, which is all a rule may
+name. A rule written now starts at 10 for everyone. Up to that cap of 100,
+nothing that opened before stops opening.
 
 Whether one request may be opened is decided by one function,
 `policy.may_open`, from the stored rule and plain facts. It reads no database,

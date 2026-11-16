@@ -14,10 +14,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .layers import Descriptor
-from .models import Setting, utcnow
+from .models import Setting, User, utcnow
 
 
 class AdTier(BaseModel):
@@ -69,13 +70,21 @@ class _FlatRule(BaseModel):
     per_day: int = Field(default=4, ge=1, le=20)
 
 
-def _from_flat(value: dict) -> AccessRule:
+def _accounts(db: Session) -> int:
+    """Active accounts. Each of them could be opened for, up to the old limit for one person."""
+    return db.scalar(select(func.count()).select_from(User).where(User.active.is_(True))) or 0
+
+
+def _from_flat(value: dict, accounts: int) -> AccessRule:
     """Read an older stored rule: advertising and tracker lists on with its limits, everything else off.
 
-    That rule opened privacy-list blocks and nothing else, so it opens what it opened before and nothing more.
+    That rule opened privacy-list blocks and nothing else, and it had no daily total. The total it is
+    read with is its limit for one person, for every active account, and never outside 1 to 100, which
+    is all a rule may name. A rule written now still starts at 10.
     """
     old = _FlatRule(**value)
-    return AccessRule(enabled=old.enabled, per_day=old.per_day,
+    total = min(100, max(1, old.per_day * accounts))
+    return AccessRule(enabled=old.enabled, per_day=old.per_day, daily_total=total,
                       ad_tracker=AdTier(mode="on", max_score=old.max_score, max_minutes=old.max_minutes),
                       threat_feed=ThreatTier(max_minutes=min(ThreatTier().max_minutes, old.max_minutes)))
 
@@ -214,7 +223,7 @@ def get_rule(db: Session, key: str):
     except ValueError:
         pass
     try:
-        return OLDER[key](row.value) if key in OLDER else model()
+        return OLDER[key](row.value, _accounts(db)) if key in OLDER else model()
     except (ValueError, TypeError):
         return model()
 

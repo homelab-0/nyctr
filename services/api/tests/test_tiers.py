@@ -6,6 +6,7 @@ Denial paths first: what can never open, what the rule refuses to become, then w
 import ast
 import asyncio
 import os
+import secrets
 from dataclasses import fields, replace
 from datetime import timedelta
 from itertools import product
@@ -15,7 +16,7 @@ import pytest
 from conftest import LIVE_MEMBER, live_signin, signin
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import create_engine, delete, select, text
 from test_access import GALLERY, put_rule
 from test_crossing import DOMAIN, Source, ask, console, started
 
@@ -23,7 +24,7 @@ from nyctr import access, layers, policy, risk
 from nyctr.config import Settings
 from nyctr.database import make_engine, migrate, session_factory
 from nyctr.main import create_app
-from nyctr.models import Audit, DeviceGrant, Lease, Observation, Resource, Setting, User
+from nyctr.models import AccessRequest, Audit, DeviceGrant, Lease, Observation, Resource, Setting, User
 from nyctr.policy import AccessRule, AdTier, AnalysisInput, Facts, ThreatTier, may_open
 from nyctr.security import hash_password
 
@@ -203,10 +204,11 @@ def test_the_decision_and_the_layers_reach_no_database_network_or_model():
 
     assert imports(ast.parse((ROOT / "layers.py").read_text())) == {"__future__", "dataclasses"}
     tree = ast.parse((ROOT / "policy.py").read_text())
-    assert imports(tree) == {"__future__", "dataclasses", "typing", "pydantic", "sqlalchemy.orm", "layers", "models"}
+    assert imports(tree) == {"__future__", "dataclasses", "typing", "pydantic", "sqlalchemy", "sqlalchemy.orm",
+                             "layers", "models"}
     stored = {alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom)
               and node.module in ("sqlalchemy.orm", "models") for alias in node.names}
-    assert stored == {"Session", "Setting", "utcnow"}
+    assert stored == {"Session", "Setting", "User", "utcnow"}
     defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef | ast.ClassDef)}
     reached, queue = set(), ["may_open"]
     while queue:
@@ -228,7 +230,11 @@ def test_the_decision_and_the_layers_reach_no_database_network_or_model():
     ("nextdns", "google-safe-browsing", "feed", "third_party", "threat_feed"),
     ("nextdns", "ai-threat-detection", "feed", "vendor", "threat_feed"),
     ("nextdns", "AI-Driven Threat Detection", "feed", "vendor", "threat_feed"),
+    ("nextdns", "AI Driven Threat Intelligence", "feed", "vendor", "threat_feed"),
     ("nextdns", "cryptojacking", "feed", "vendor", "threat_feed"),
+    ("nextdns", "Email Threat", "unknown", "vendor", "unknown"),
+    ("nextdns", "Suspicious Domain Threat", "unknown", "vendor", "unknown"),
+    ("nextdns", "Daily Threat Report", "unknown", "vendor", "unknown"),
     ("nextdns", "some-other-threat", "unknown", "vendor", "unknown"),
     ("nextdns", "dns-rebinding", "unknown", "vendor", "unknown"),
     ("nextdns", "idn-homograph", "unknown", "vendor", "unknown"),
@@ -335,24 +341,57 @@ def test_only_an_administrator_on_the_console_address_writes_the_rule():
 
 
 OLD = {"enabled": True, "max_score": 40, "max_minutes": 120, "per_day": 7}
-POSTGRES = os.environ.get("NYCTR_TEST_POSTGRES_URL", "")
+# Both engines. The PostgreSQL case needs a server named in NYCTR_TEST_POSTGRES (its address, ending in /)
+# and makes and drops a database of its own. CI fails if a case marked postgres skips.
+BOTH = pytest.mark.parametrize("database", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 
 
-@pytest.mark.parametrize("database", ["sqlite", pytest.param("postgresql", marks=pytest.mark.skipif(
-    not POSTGRES, reason="set NYCTR_TEST_POSTGRES_URL to an empty PostgreSQL database to run this"))])
-def test_a_rule_stored_before_tiers_reads_as_it_acted_and_a_broken_one_as_everything_off(tmp_path, database):
-    """Advertising and tracker lists on with the old limits, everything else off, the new total at its default."""
-    engine = make_engine(POSTGRES if database == "postgresql" else f"sqlite:///{tmp_path}/old.db")
+def postgres_database(request) -> str | None:
+    """An empty database of this test's own on the server named in NYCTR_TEST_POSTGRES, or None if unset."""
+    server = os.environ.get("NYCTR_TEST_POSTGRES", "")
+    if not server:
+        return None
+    name, admin = f"t_{secrets.token_hex(8)}", create_engine(server + "postgres", isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:
+        connection.execute(text(f"create database {name}"))
+
+    def drop():
+        with admin.connect() as connection:
+            connection.execute(text(f"drop database if exists {name} with (force)"))
+        admin.dispose()
+
+    request.addfinalizer(drop)
+    return server + name
+
+
+def engine_for(database: str, tmp_path, request):
+    """This case's database: a SQLite file, or a database of its own on PostgreSQL."""
+    if database == "sqlite":
+        return make_engine(f"sqlite:///{tmp_path}/rule.db")
+    url = postgres_database(request)
+    if not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+    return make_engine(url)
+
+
+@BOTH
+def test_a_rule_stored_before_tiers_reads_as_it_acted_and_a_broken_one_as_everything_off(tmp_path, database, request):
+    """Advertising and tracker lists on with the old limits, everything else off.
+
+    No account is stored here, so the daily total, which that version did not have, is 1, the least a rule may name.
+    """
+    engine = engine_for(database, tmp_path, request)
     migrate(engine)
     cases = [
-        (OLD, AccessRule(enabled=True, per_day=7, ad_tracker=AdTier(mode="on", max_score=40, max_minutes=120))),
-        ({**OLD, "enabled": False}, AccessRule(enabled=False, per_day=7, ad_tracker=AdTier(
+        (OLD, AccessRule(enabled=True, per_day=7, daily_total=1,
+                         ad_tracker=AdTier(mode="on", max_score=40, max_minutes=120))),
+        ({**OLD, "enabled": False}, AccessRule(enabled=False, per_day=7, daily_total=1, ad_tracker=AdTier(
             mode="on", max_score=40, max_minutes=120))),
         ({"enabled": True, "max_score": 0, "max_minutes": 15, "per_day": 1}, AccessRule(
-            enabled=True, per_day=1, ad_tracker=AdTier(mode="on", max_score=0, max_minutes=15),
+            enabled=True, per_day=1, daily_total=1, ad_tracker=AdTier(mode="on", max_score=0, max_minutes=15),
             threat_feed=ThreatTier(max_minutes=15))),
         ({"enabled": True, "max_score": 60, "max_minutes": 240, "per_day": 20}, AccessRule(
-            enabled=True, per_day=20, ad_tracker=AdTier(mode="on", max_score=60, max_minutes=240))),
+            enabled=True, per_day=20, daily_total=1, ad_tracker=AdTier(mode="on", max_score=60, max_minutes=240))),
         # No longer valid in either form: the safe default, as before.
         ({**OLD, "max_score": 61}, AccessRule()), ({**OLD, "per_day": 0}, AccessRule()),
         ({**OLD, "ad_tracker": {"mode": "on"}}, AccessRule()),
@@ -370,7 +409,7 @@ def test_a_rule_stored_before_tiers_reads_as_it_acted_and_a_broken_one_as_everyt
                 db.expire_all()
                 read = policy.get_rule(db, "access_rule")
                 assert read == expected, stored
-                assert (read.daily_total, read.threat_feed.mode) == (10, "off")
+                assert read.threat_feed.mode == "off"
             assert not AccessRule().enabled and AccessRule().ad_tracker.mode == "off"
             policy.put_rule(db, "access_rule", cases[0][1], "someone")  # Stored again, it is in the new form.
             db.commit()
@@ -397,7 +436,7 @@ def test_after_the_upgrade_the_same_requests_open_and_the_same_wait(client, app)
         assert waits["status"] == "pending"
     signin(client)
     assert client.get("/api/rules").json()["access"] == {
-        "enabled": True, "per_day": 4, "daily_total": 10,
+        "enabled": True, "per_day": 4, "daily_total": 8,  # Two active accounts, four openings each.
         "ad_tracker": {"mode": "on", "max_score": 25, "max_minutes": 45},
         "threat_feed": {"mode": "off", "max_minutes": 30, "min_registered_days": 180}}
 
@@ -529,3 +568,162 @@ def test_two_people_at_one_instant_cannot_both_pass_the_daily_total(tmp_path, mo
             leases = {lease.domain: (lease.status, lease.owned) for lease in db.scalars(select(Lease))}
             assert leases == {"fonts.example": ("active", True), DOMAIN: ("unconfirmed", True)}
             assert held(db) == []
+
+
+@pytest.mark.parametrize("text,kind,tier", [
+    ("ai-threat-detection", "feed", "threat_feed"),
+    ("AI-Driven Threat Detection", "feed", "threat_feed"),
+    ("AI Driven Threat Intelligence", "feed", "threat_feed"),
+    ("Email Threat", "unknown", "unknown"),
+    ("Suspicious Domain Threat", "unknown", "unknown"),
+    ("Daily Threat Report", "unknown", "unknown"),
+])
+def test_only_the_vendors_own_names_for_its_ai_threat_detection_are_a_threat_feed(text, kind, tier):
+    """Those three names are the vendor's own detection. Anything else that only says "threat" stays unknown."""
+    stated = risk.assess("shop.example", "", [text], "nextdns").policies
+    assert [(item.kind, item.origin) for item in stated] == [(kind, "vendor")]
+    assert policy.block_tier(stated) == tier
+
+
+@BOTH
+def test_an_upgraded_rule_keeps_room_for_every_account_and_a_new_rule_starts_at_ten(tmp_path, database, request):
+    """The old per-person limit, for every active account, capped at 100. A rule written now starts at 10.
+
+    With the total left at 10, a limit of 20 for one person, or three people at 4 each, would stop opening
+    inside the day. An inactive account is not someone who can be opened for.
+    """
+    engine = engine_for(database, tmp_path, request)
+    migrate(engine)
+    flat = {"enabled": True, "max_score": 25, "max_minutes": 60, "per_day": 4}
+
+    def read(value, active, inactive=0):
+        with session_factory(engine)() as db:
+            db.execute(delete(User))
+            db.execute(delete(Setting).where(Setting.key == "access_rule"))
+            for number in range(active):
+                db.add(User(id=f"p{number}", email=f"p{number}@example.net", name=f"Person {number}", active=True))
+            for number in range(inactive):
+                db.add(User(id=f"x{number}", email=f"x{number}@example.net", name=f"Left {number}", active=False))
+            if value is not None:
+                db.add(Setting(key="access_rule", value=value))
+            db.commit()
+            return policy.get_rule(db, "access_rule")
+
+    try:
+        three = read(flat, 3)
+        assert three.daily_total == 12 and three.enabled  # 3 people at 4 each, so the tenth of the day still opens.
+        assert may_open(three, facts(AD, opened_today_all=10)).allow
+        assert may_open(three, facts(AD, opened_today_all=12)).failed == "daily_total"
+        one = read({**flat, "per_day": 20}, 1)
+        assert one.daily_total == 20 and may_open(one, facts(AD, opened_today_all=10)).allow
+        assert may_open(one, facts(AD, opened_today_all=20)).failed == "daily_total"
+        capped = read({**flat, "per_day": 20}, 6)  # 120 would not validate, so the total stops at the most allowed.
+        assert capped.daily_total == 100 and capped.enabled
+        assert may_open(capped, facts(AD, opened_today_all=99)).allow
+        assert may_open(capped, facts(AD, opened_today_all=100)).failed == "daily_total"
+        assert read(flat, 3, inactive=1).daily_total == 12
+        fresh = read(None, 6)
+        assert fresh == AccessRule() and fresh.daily_total == 10
+        written = AccessRule(enabled=True, per_day=4, ad_tracker=AdTier(mode="on"))
+        assert written.daily_total == 10
+        with session_factory(engine)() as db:
+            policy.put_rule(db, "access_rule", written, "someone")
+            db.commit()
+            assert policy.get_rule(db, "access_rule") == written
+    finally:
+        engine.dispose()
+
+
+def _outcomes(app, user_id: str) -> list:
+    """What the rule recorded about this person's request, as another connection reads it."""
+    with app.state.session_factory() as db:
+        row = db.scalar(select(AccessRequest).where(AccessRequest.requester_id == user_id))
+        if row is None:
+            return []
+        return [event.details.get("outcome") for event in db.scalars(
+            select(Audit).where(Audit.action == "rule.access_checked", Audit.target_id == row.id))]
+
+
+@BOTH
+def test_two_people_opening_one_address_each_keep_the_rules_record(tmp_path, monkeypatch, database, request):
+    """The second person is stopped at each step of the claim. The rule's record is already stored at every one.
+
+    The first holds the entry's claim while its add is unanswered. The second is opened by the rule too, and
+    trying that claim rolls the session back. The record has to survive that, and every step after it.
+    """
+    source = Source(monkeypatch, hold=(2, "after"))
+    arm, held_once = {"on": False}, {"done": False}
+    found, proceed = asyncio.Queue(), asyncio.Event()
+    real_hold, real_pause = access.hold_entry, access._pause
+
+    async def stop(name):
+        await found.put(name)
+        await proceed.wait()
+        proceed.clear()
+
+    async def hold(db, settings, integration, domain):
+        if arm["on"]:
+            await stop("before the claim")
+        claim = await real_hold(db, settings, integration, domain)
+        if arm["on"]:
+            await stop("the claim is taken")
+        return claim
+
+    async def pause(seconds):
+        if arm["on"] and not held_once["done"]:
+            held_once["done"] = True
+            await stop("the claim is held")
+            return
+        await real_pause(seconds)
+
+    monkeypatch.setattr(access, "hold_entry", hold)
+    monkeypatch.setattr(access, "_pause", pause)
+    url = None if database == "sqlite" else postgres_database(request)
+    if database == "postgresql" and not url:
+        pytest.skip("No PostgreSQL server is named in NYCTR_TEST_POSTGRES")
+
+    async def scenario(app, sam, other):
+        async with console(app, sam) as first_person, console(app, other) as second_person:
+            first = asyncio.create_task(first_person.post("/api/requests", json=ask("one")))
+            await asyncio.wait_for(source.reached.wait(), 30)
+            arm["on"] = True
+            second = asyncio.create_task(second_person.post("/api/requests", json=ask("robin")))
+            for name in ("before the claim", "the claim is held"):
+                assert await asyncio.wait_for(found.get(), 30) == name
+                assert _outcomes(app, "robin") == ["may_open"], name
+                if name == "the claim is held":
+                    source.go.set()
+                    sam_row = (await first).json()
+                proceed.set()
+            assert await asyncio.wait_for(found.get(), 30) == "the claim is taken"
+            assert _outcomes(app, "robin") == ["may_open"], "the claim is taken"
+            proceed.set()
+            return sam_row, (await second).json()
+
+    with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, client, member, _admin):
+        robin = ("robin@example.net", "a third secure password")
+        with app.state.session_factory() as db:
+            one, laptop = db.get(Observation, "dns:block:one"), db.get(Resource, "unifi:client:laptop")
+            db.add(User(id="robin", email=robin[0], name="Robin", role="member", password_hash=hash_password(robin[1])))
+            db.flush()
+            db.add(Resource(id="unifi:client:phone", name="Robin's phone", owner_id="robin", source_id="phone", **{
+                name: getattr(laptop, name) for name in ("integration_id", "kind", "provider", "site_id",
+                                                         "observed_at", "evidence_kind", "classification")}))
+            db.flush()
+            db.add(DeviceGrant(device_id="unifi:client:phone", user_id="robin",
+                               valid_from=one.observed_at - timedelta(days=1)))
+            db.add(Observation(id="dns:block:robin", device_id="unifi:client:phone", **{
+                name: getattr(one, name) for name in (
+                    "integration_id", "device_name", "domain", "source", "reason", "reason_codes", "observed_at",
+                    "expires_at", "evidence_kind", "attribution", "risk_explanation")}))
+            db.commit()
+        client.cookies.clear()
+        other = {"headers": live_signin(client, robin), "cookies": dict(client.cookies)}
+        try:
+            sam_row, robin_row = asyncio.run(scenario(app, member, other))
+            assert (sam_row["status"], robin_row["status"]) == ("auto_approved", "auto_approved")
+            assert _outcomes(app, "robin") == ["may_open"] and _outcomes(app, "sam") == ["may_open"]
+            with app.state.session_factory() as db:
+                assert held(db) == []
+        finally:
+            app.state.engine.dispose()

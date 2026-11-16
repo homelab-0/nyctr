@@ -153,7 +153,10 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   off, shadow (record only) or on for `ad_tracker`, and only off for
   `threat_feed`, whose `max_minutes` cannot be above `ad_tracker`'s. No other
   tier can be named. The form before tiers (`{enabled,max_score,max_minutes,
-  per_day}`) is read from storage and refused here. Each request the rule looks
+  per_day}`) is read from storage and refused here. Read back, its daily total
+  is the old limit for each person times the number of active accounts, from
+  1 to 100. A rule written with this route starts at 10 when the total is left
+  out. Each request the rule looks
   at leaves an audit record `rule.access_checked` with
   `{domain,tier,outcome: may_open|would_open|waits,checks,limits,minutes?,why?}`.
 - `PUT /api/rules/guest` with `{enabled,hits 1–50,minutes 1–120}`.

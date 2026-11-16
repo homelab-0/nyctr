@@ -484,6 +484,11 @@ def clear_stale_reviews(db: Session) -> None:
     db.commit()
 
 
+async def _pause(seconds: float) -> None:
+    """Wait before trying again for a claim another opening holds."""
+    await asyncio.sleep(seconds)
+
+
 async def hold_entry(db: Session, settings: Settings, integration: Integration | None, domain: str) -> Claim | None:
     """Take the claim an opening needs, waiting a short while for whoever holds it. None if nothing is sent.
 
@@ -517,7 +522,7 @@ async def hold_entry(db: Session, settings: Settings, integration: Integration |
             if waited >= OPENING_WAITS:
                 raise EntryBusy(f"Nyctr is already changing {domain} at {name}. Nothing was opened. Try again in a "
                                 "moment.", category="configuration")
-            await asyncio.sleep(0.25)
+            await _pause(0.25)
             waited += 0.25
         # With the claim held, a record still there is no opening in flight: it is left over. Settle it first.
         if db.get(Integration, entry.integration_id) is None:  # A wait reads the source again: it may be gone.
@@ -803,6 +808,9 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             elif integration is None:
                 why = f"{name} was removed from Nyctr while this request waited, so a person decides."
             elif (why := ask(final=True)[1]) is None:  # Asked again with the turn held: the counts are right now.
+                # The entry's claim commits, and rolls this session back when that claim is already held.
+                # The rule's record is stored first, so the rollback cannot take it, whatever then happens.
+                db.commit()
                 claim = await hold_entry(db, settings, integration, row.domain)
                 await open_lease(db, settings, integration=integration, domain=row.domain,
                                  device_name=row.device_name, requester_id=row.requester_id, request_id=row.id,

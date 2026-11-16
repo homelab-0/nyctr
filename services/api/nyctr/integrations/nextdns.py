@@ -28,8 +28,11 @@ READS = (
 # (pattern, category, base score, plain explanation, kind, origin). The core adds name-shape factors.
 # Kind and origin are facts about what refused the address (see `nyctr/layers.py`):
 # - a subscribed advertising or tracker list is a third party's list, and native tracking is NextDNS's own;
-# - threat intelligence feeds and safe browsing are a third party's feed; NextDNS's own threat detection
-#   and its cryptojacking protection are its own feed of addresses it reports as threats;
+# - NextDNS's own AI threat detection, named by its identifier or by the two names it gives that
+#   protection, is matched first: one of those names contains "threat intelligence", which on its own
+#   is a third party's feed, as are safe browsing and a name with malware or phish. Cryptojacking
+#   protection is the vendor's own feed too. A word boundary keeps the AI names from catching some
+#   other reason that only says "threat", which stays unstated;
 # - newly registered, dynamic DNS and parked addresses are each a class of address NextDNS draws up and an
 #   administrator chose to block, like a content category;
 # - a check NextDNS computes on the name itself (rebinding, look-alike names, typosquatting, generated
@@ -39,8 +42,10 @@ _FEED, _CHECK, _CLASS = "A security feed lists this address as a threat", (None,
 _REASONS: tuple[tuple[re.Pattern[str], str, int, str, str | None, str | None], ...] = tuple(
     (re.compile(pattern, re.I), category, score, text, kind, origin)
     for pattern, category, score, text, (kind, origin) in (
+        (r"\bai-threat-detection\b|\bai-driven threat detection\b|\bai driven threat intelligence\b",
+         "security", 92, _FEED, ("feed", "vendor")),
+        (r"cryptojack", "security", 92, _FEED, ("feed", "vendor")),
         (r"threat.?intelligence|safe.?browsing|malware|phish", "security", 92, _FEED, ("feed", "third_party")),
-        (r"ai.{0,10}threat|threat.?detect|cryptojack", "security", 92, _FEED, ("feed", "vendor")),
         (r"threat|rebind|homograph|typosquat|\bdga\b", "security", 92, _FEED, _CHECK),
         (r"csam", "security", 92, _FEED, (None, "third_party")),
         (r"\bnrd\b|newly.registered", "security", 72, "The address was registered very recently", _CLASS),
