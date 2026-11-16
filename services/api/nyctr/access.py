@@ -812,8 +812,20 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
         return verdict, words
 
     def leave(verdict: policy.Decision, words: str) -> None:
-        """The checks passed and the request still waits. The record says waits, not that it opened."""
+        """The checks passed and the request still waits. The record says waits, not that it opened.
+
+        The note is written only while the request is still pending. If that write changes nothing, a
+        decision has landed since the request was read, and this one records nothing over it.
+        """
+        changed = db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
+                                                         AccessRequest.status == "pending")
+                             .values(decision_note=words)
+                             .execution_options(synchronize_session=False)).rowcount == 1
+        if not changed:  # The answer reads the row again: a decision since the last read keeps its note.
+            db.expire(row)
+            return
         record(policy.Decision(False, False, verdict.tier, verdict.minutes, None, verdict.checks), words)
+        row.decision_note = words
 
     verdict, why = ask(final=False)
     if why is None:
@@ -824,12 +836,10 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
         gate = hold_review(db, row.id)
         db.refresh(row)
         if gate is None or row.status != "pending":
-            # The claim is already held, so this request waits. A status that is no longer pending was
-            # decided already: that decision stands, and this one adds no second record.
+            # No claim, or the request was decided while this waited for one. The note below matches
+            # pending, so a decision that landed after the refresh keeps its own note and no waits record.
             if gate is None:
-                why = "This request is already being decided, so a person decides."
-                leave(verdict, why)
-                row.decision_note = why
+                leave(verdict, "This request is already being decided, so a person decides.")
             return end_review(db, gate) if gate else None
         try:
             # One automatic opening at a time for each person, so the day's count is right when it is read.
@@ -842,7 +852,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                 why = "Nyctr was still opening your earlier requests, so a person decides this one."
                 leave(verdict, why)
             elif integration is None:
-                why = f"{name} was removed from Nyctr while this request waited, so a person decides."
+                leave(verdict, f"{name} was removed from Nyctr while this request waited, so a person decides.")
+                why = None  # leave wrote the note while the request was pending. It commits with the claim.
             else:
                 answered, why = ask(final=True)  # Asked again with the turn held: the counts are right now.
                 if why is None:
@@ -910,7 +921,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             release_entry(db, turn)
             if gate:
                 end_review(db, gate)
-    row.decision_note = why
+    if why is not None:
+        row.decision_note = why
 
 
 def suggestions(db: Session) -> list[dict]:
