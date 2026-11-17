@@ -750,7 +750,7 @@ def _reread_rule(db: Session) -> AccessRule:
 
 
 def _left_to_a_person(verdict: policy.Decision, rule: AccessRule, assessment: risk.Assessment,
-                      integration: Integration | None) -> str:
+                      integration: Integration | None, match: str = "") -> str:
     """Say in plain words why the rule did not open a request: the first check that failed."""
     name, check, tier = integration.name if integration else "", verdict.failed, verdict.tier
     if verdict.would:
@@ -770,7 +770,8 @@ def _left_to_a_person(verdict: policy.Decision, rule: AccessRule, assessment: ri
         "can_open": f"Nyctr cannot open addresses at {name}, so a person decides." if integration
                     else "This block did not come from a connected source, so a person decides.",
         "changes_on": f"Nyctr is not allowed to change {name}, so a person decides.",
-        "match": "Nyctr cannot be sure which device this block belongs to, so a person decides.",
+        "match": "A site a member named is not opened on its own, so a person decides." if match == "statement"
+                 else "Nyctr cannot be sure which device this block belongs to, so a person decides.",
         "conditions": "This address does not meet the rule's conditions for this kind of block, so a person decides.",
         "declined": "An administrator said no to this address before, so a person decides.",
         "analysis": "The analysis of this address does not support opening it, so a person decides.",
@@ -1188,8 +1189,9 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     row.integration_id = observation.integration_id
     rule: AccessRule = get_rule(db, "access_rule")
     integration = db.get(Integration, observation.integration_id)
+    # A statement keeps that basis even when the lookup itself is assigned to a device.
     # An assignment or an administrator's link is what `assigned` records; anything else is not a match.
-    match = "assignment" if observation.attribution == "assigned" else "none"
+    match = "statement" if row.basis == "statement" else "assignment" if observation.attribution == "assigned" else "none"
 
     def record(verdict: policy.Decision, words: str | None) -> None:
         """Keep what the rule said about this request: its tier and limits, and every check with its result."""
@@ -1223,7 +1225,7 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
         if final:
             rule = _reread_rule(db)
         verdict = policy.may_open(rule, facts_now())
-        words = None if verdict.allow else _left_to_a_person(verdict, rule, assessment, integration)
+        words = None if verdict.allow else _left_to_a_person(verdict, rule, assessment, integration, match)
         if words or final:
             record(verdict, words)
         return verdict, words
@@ -1291,7 +1293,7 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                     if not late.allow:  # Nothing is stored, and what was added stays on record to be removed.
                         db.rollback()
                         release_entry(db, claim, unstored=True)
-                        why = _left_to_a_person(late, rule, assessment, integration)
+                        why = _left_to_a_person(late, rule, assessment, integration, match)
                         record(late, why)
                     else:
                         # Last allowing decision. A lower limit while the add was unanswered must not leave

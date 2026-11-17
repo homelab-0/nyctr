@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
@@ -16,6 +16,8 @@ _V4_TABLES = ("fact_cache", "own_lookups")
 _V6_TABLES = ("analyses",)
 # Schema 7 adds the outbound notice outbox.
 _V7_TABLES = ("notices",)
+# Schema 9 adds the hourly statement quota. The request basis is a column, not a table.
+_V9_TABLES = ("statement_quotas",)
 _V2_COLUMNS = {
     "observations": ("reason_codes", "source_device_id"),
     "access_requests": ("risk_score", "risk_category", "risk_factors", "decided_by", "decision_note",
@@ -93,6 +95,18 @@ def _upgrade_to_8(connection):
     connection.execute(SchemaVersion.__table__.insert().values(version=8))
 
 
+def _upgrade_to_9(connection):
+    """Add the request basis and the statement quota. Existing rows gain an empty basis and stay as they were."""
+    present = {column["name"] for column in inspect(connection).get_columns("access_requests")}
+    if "basis" not in present:
+        column = Base.metadata.tables["access_requests"].columns["basis"]
+        kind = column.type.compile(dialect=connection.dialect)
+        connection.execute(text(f"ALTER TABLE access_requests ADD COLUMN basis {kind}"))
+    if "statement_quotas" not in inspect(connection).get_table_names():
+        Base.metadata.create_all(connection, tables=[Base.metadata.tables["statement_quotas"]])
+    connection.execute(SchemaVersion.__table__.insert().values(version=9))
+
+
 def make_engine(database_url: str):
     """Create a pooled database engine with SQLite settings suitable for API tests.
 
@@ -152,6 +166,9 @@ def migrate(engine):
         if version == 7:
             _upgrade_to_8(connection)
             version = 8
+        if version == 8:
+            _upgrade_to_9(connection)
+            version = 9
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

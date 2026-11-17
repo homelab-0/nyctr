@@ -167,6 +167,15 @@ describe('access rule in Setup', () => {
     expect(never.querySelectorAll('button, input, select')).toHaveLength(0);
   });
 
+  it('saves the switch for a site a member named, and leaves it off until then', async () => {
+    const { saved, user } = openRule();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText(/a site someone on their own device names/)).toBeDefined();
+    await user.click(named);
+    await waitFor(() => expect(saved()).toEqual([{ ...rules.access, allow_statement: true }]));
+  });
+
   it('saves record only for advertising lists and says that nothing is opened', async () => {
     const { saved, user } = openRule();
     const ads = await tier('Advertising and tracker lists');

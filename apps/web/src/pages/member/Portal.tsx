@@ -288,6 +288,9 @@ function Home({ data }: { data: Data }) {
   const [found, setFound] = useState<Block[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [site, setSite] = useState('');
+  const [askError, setAskError] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
   const now = useNow();
   // How soon a new block can show up here. No wait is promised unless a schedule is on.
   const { user } = useAuth();
@@ -365,6 +368,28 @@ function Home({ data }: { data: Data }) {
       setPending(false);
     }
   };
+  /** Says which site did not open. The typed name stays put while Nyctr checks it. */
+  const stateSite = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!site.trim()) return;
+    setAsking(true);
+    setAskError(null);
+    try {
+      const answer = await post<{
+        matched: boolean;
+        message: string;
+        request?: AccessRequest;
+      }>('/statements', { domain: site });
+      if (answer.request) {
+        await Promise.all([data.requests.reload(), data.leases.reload()]);
+        window.location.hash = `/portal?request=${answer.request.id}`;
+      } else setAskError(answer.message);
+    } catch (e) {
+      setAskError((e as Error).message);
+    } finally {
+      setAsking(false);
+    }
+  };
   return (
     <div className="m-col">
       <header className="stack tight">
@@ -418,6 +443,36 @@ function Home({ data }: { data: Data }) {
         </button>
       </form>
       <InlineError message={error} />
+      {here?.device_id && (
+        <form className="m-card pad form-stack" onSubmit={stateSite}>
+          <h2>A site did not open</h2>
+          <p className="aside">
+            Type the site's name. Nyctr checks whether that name was blocked in the last few
+            minutes, then files a request for this device.
+          </p>
+          <label className="field">
+            <span>Site name</span>
+            <input
+              type="text"
+              value={site}
+              onChange={(e) => setSite(e.target.value)}
+              placeholder="example.com"
+              aria-label="Site that did not open"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </label>
+          <InlineError message={askError} />
+          <button
+            className="button primary large full"
+            type="submit"
+            disabled={asking || !site.trim()}
+          >
+            {asking ? 'Asking…' : 'Ask about this site'}
+          </button>
+        </form>
+      )}
       {/* Without the list of requests, a site already asked about looks like one that was not. */}
       {data.requests.error && (
         <p className="aside" role="status">

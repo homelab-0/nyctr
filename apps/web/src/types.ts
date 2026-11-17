@@ -305,6 +305,8 @@ export interface AccessRule {
   enabled: boolean;
   per_day: number;
   daily_total: number;
+  /** Off until an administrator turns it on. A site a member named then follows the same rule. */
+  allow_statement?: boolean;
   ad_tracker: {
     mode: TierMode;
     max_score: number;

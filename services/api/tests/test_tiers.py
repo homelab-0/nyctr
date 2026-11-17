@@ -174,6 +174,10 @@ def test_the_checks_run_in_one_order_and_the_first_failure_ends_them():
         assert verdict.checks == (*((earlier, "passed") for earlier in ORDER[:index]), (name, "failed"))
     assert may_open(ON, facts(AD, score=None)).failed == "conditions"  # Unknown is not low.
     assert may_open(ON, facts(AD, match="statement")).failed == "match"
+    named = AccessRule(enabled=True, allow_statement=True, ad_tracker=AdTier(mode="on"))
+    assert may_open(named, facts(AD, match="statement")).allow
+    deliberate = layers.Descriptor("dns_upstream", "deny_entry", "administrator")
+    assert may_open(named, facts(deliberate, match="statement")).failed == "tier"
     shadow = AccessRule(enabled=True, ad_tracker=AdTier(mode="shadow"))
     would = may_open(shadow, facts(AD))
     assert would.would and not would.allow and would.checks == passed.checks
@@ -311,7 +315,6 @@ def test_a_csam_block_or_a_class_of_address_someone_chose_to_block_never_opens_w
     {"ad_tracker": {"mode": "always"}}, {"ad_tracker": {"max_score": 61}}, {"ad_tracker": {"max_minutes": 241}},
     {"threat_feed": {"min_registered_days": 29}}, {"threat_feed": {"min_registered_days": 3651}},
     {"enabled": True, "max_score": 25, "max_minutes": 60, "per_day": 4},  # The older form is only ever read.
-    {"enabled": True, "allow_statement": True},
 ])
 def test_the_rule_cannot_be_written_wider_than_the_tiers_allow(client, admin_headers, body):
     """A mode on a never tier, or a limit out of bounds: refused, and nothing stored."""
@@ -440,7 +443,8 @@ def test_after_the_upgrade_the_same_requests_open_and_the_same_wait(client, app)
     assert client.get("/api/rules").json()["access"] == {
         "enabled": True, "per_day": 4, "daily_total": 8,  # Two active accounts, four openings each.
         "ad_tracker": {"mode": "on", "max_score": 25, "max_minutes": 45, "analysis_required": False},
-        "threat_feed": {"mode": "off", "max_minutes": 30, "min_registered_days": 180}}
+        "threat_feed": {"mode": "off", "max_minutes": 30, "min_registered_days": 180},
+        "allow_statement": False}
 
 
 def test_a_request_is_told_which_new_check_left_it_to_a_person(client, app):

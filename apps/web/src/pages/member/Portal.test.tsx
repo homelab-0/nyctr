@@ -1808,3 +1808,92 @@ describe('independent confirmation: stop and retry boundaries', () => {
     },
   );
 });
+
+describe('a site the member names', () => {
+  it('does not offer the form when this device is not recognised', async () => {
+    open({ 'GET /me/device': { device_id: null, name: null, simulated: false } });
+    await screen.findByRole('heading', { name: 'What got blocked?' });
+    expect(screen.queryByRole('heading', { name: 'A site did not open' })).toBeNull();
+    expect(screen.queryByLabelText('Site that did not open')).toBeNull();
+  });
+
+  it('says there was no recent block and keeps what was typed', async () => {
+    open({
+      'POST /statements': {
+        matched: false,
+        message:
+          'Nyctr saw no recent block of that name. Open the page once more on this device, then try again in a few minutes.',
+      },
+    });
+    const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'missing.example' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(await screen.findByText(/saw no recent block/)).toBeDefined();
+    expect((screen.getByLabelText('Site that did not open') as HTMLInputElement).value).toBe(
+      'missing.example',
+    );
+    expect(screen.getByRole('heading', { name: 'A site did not open' })).toBeDefined();
+  });
+
+  it('keeps the typed name while asking, then follows the request through to an opening', async () => {
+    clock();
+    let release: (value?: unknown) => void = () => {};
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    let phase: 'empty' | 'checking' | 'open' = 'empty';
+    const filed = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'analysing',
+      reason: 'The page did not open.',
+      decided_by: null,
+      decision_note: null,
+      risk_score: null,
+      risk_category: null,
+      risk_factors: null,
+    });
+    const opened = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'auto_approved',
+      reason: 'The page did not open.',
+      decision_note: 'Opened for 60 minutes by the access rule.',
+    });
+    const { calls } = open({
+      'POST /statements': () =>
+        gate.then(() => {
+          phase = 'checking';
+          return {
+            matched: true,
+            message: 'That name was blocked recently. Nyctr has filed your request.',
+            request: filed,
+          };
+        }),
+      'GET /requests': () => (phase === 'empty' ? [] : phase === 'checking' ? [filed] : [opened]),
+      'GET /leases': () =>
+        phase === 'open'
+          ? [lease({ request_id: 'r-ask', domain: 'ads.example', execution: 'applied' })]
+          : [],
+    });
+    await paint();
+    const input = screen.getByLabelText('Site that did not open') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'HTTPS://Ads.Example/path' } });
+    fireEvent.submit(input.closest('form')!);
+    await paint();
+    expect(input.value).toBe('HTTPS://Ads.Example/path');
+    expect(input.disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Asking…' })).toBeDefined();
+    await act(async () => {
+      release();
+    });
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    phase = 'open';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).toContain('ads.example');
+    const posted = calls.filter((call) => call.method === 'POST' && call.path === '/statements');
+    expect(posted.map((call) => call.body)).toEqual([{ domain: 'HTTPS://Ads.Example/path' }]);
+  });
+});

@@ -12,6 +12,7 @@ const WORDS: Record<string, string> = {
   'auth.login_failed': 'Failed sign-in',
   'auth.sent_to_portal': 'Was sent to the member portal to sign in',
   'access.requested': 'Asked for access',
+  'access.statement': 'Asked about a site by name',
   'access.opened': 'Access opened',
   'access.open_undone': 'Access opened while its source was being removed or changed',
   'access.open_unconfirmed': 'Access could not be confirmed open',
