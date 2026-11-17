@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Sparkles } from 'lucide-react';
 import { post, useApi } from '../api';
-import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
+import { ErrorState, InlineError, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { counted, lookupSpan, namedCounts, notSeen } from '../lib/counts';
 import { failing, uncollected, waitingText, whyEmpty } from '../lib/coverage';
 import { ago, atSource, isOpen, left, useNow, word } from '../lib/format';
@@ -117,6 +117,7 @@ export default function Briefing({
   const missing = notCollected(sources.data || [], catalog.data);
   const careful = cautions(sources.data || [], catalog.data);
   const [question, setQuestion] = useState('');
+  const [endError, setEndError] = useState<string | null>(null);
   const now = useNow();
   // A schedule read again means a collection was due, so "Collected ... ago" is read again too.
   const { reads } = schedule;
@@ -183,6 +184,7 @@ export default function Briefing({
             </p>
           ) : (
             <div className="rows">
+              {endError ? <InlineError message={endError} /> : null}
               {attention.map((item) => {
                 const href = needHref(item);
                 if (item.action === 'end') {
@@ -198,9 +200,12 @@ export default function Briefing({
                       <button
                         type="button"
                         className="button small"
-                        onClick={() =>
-                          void post(`/leases/${item.id}/end`, {}).then(() => retry?.())
-                        }
+                        onClick={() => {
+                          setEndError(null);
+                          void post(`/leases/${item.id}/end`, {})
+                            .then(() => retry?.())
+                            .catch((reason: Error) => setEndError(reason.message));
+                        }}
                       >
                         End
                       </button>

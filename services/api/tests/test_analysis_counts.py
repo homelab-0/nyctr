@@ -18,8 +18,8 @@ from sqlalchemy import event, select
 from test_access import settled
 from test_tiers import BOTH, engine_for, postgres_database
 
-from nyctr import access, block_analysis
-from nyctr.collection import holder_id
+from nyctr import access, assistant, block_analysis
+from nyctr.collection import begin_holder, holder_id, previous_holder
 from nyctr.config import Settings
 from nyctr.database import migrate, session_factory
 from nyctr.main import create_app
@@ -119,8 +119,8 @@ def one_notice(db, request_id, *, opened):
 @BOTH
 def test_a_request_is_answered_while_it_is_analysing_and_a_restart_finishes_it_once(
         tmp_path, database, request, monkeypatch):
-    """The answer is analysing, with no score yet, while the job is still in the check. A later start finishes
-    a claim from before that start once, and a tick leaves a fresh claim of this start alone."""
+    """The answer is analysing, with no score yet, while the job is still in the check. A tick leaves a fresh
+    claim alone. A start leaves another holder's fresh claim alone. A claim older than two minutes is finished."""
     url = database_url(database, tmp_path, request)
     release, calls, mode = threading.Event(), [], {"wait": True}
 
@@ -210,9 +210,8 @@ def test_a_request_is_answered_while_it_is_analysing_and_a_restart_finishes_it_o
                   analysis_claimed_at=utcnow() - timedelta(seconds=30))
             finish()
             assert calls == ["block-gallery"] and still("young") == "analysing"
-            started = utcnow() - timedelta(minutes=5)
             leave("after-start", "block-after", analysis_holder="previous", analysis_claimed_at=utcnow())
-            finish(restart_of=holder, started_at=started)
+            finish(restart_of=holder, previous=None)
             assert calls == ["block-gallery"] and still("after-start") == "analysing"
             leave("stale", "block-stale", analysis_holder="previous",
                   analysis_claimed_at=utcnow() - timedelta(minutes=3))
@@ -220,8 +219,8 @@ def test_a_request_is_answered_while_it_is_analysing_and_a_restart_finishes_it_o
             assert calls == ["block-gallery", "block-stale"] and still("stale") == "auto_approved"
             leave("restarted", "block-restarted", analysis_holder="previous",
                   analysis_claimed_at=utcnow() - timedelta(seconds=30))
-            finish(restart_of=holder, started_at=utcnow())
-            assert calls[-1] == "block-restarted" and still("restarted") == "auto_approved"
+            finish(restart_of=holder, previous=None)
+            assert "block-restarted" not in calls and still("restarted") == "analysing"
             with app.state.session_factory() as db:
                 kept = store_analysis(db, "shop.example", "block-kept", "missing", None, None)
             leave("kept", "block-kept", analysis_holder="previous", analysis_id=kept.id,
@@ -606,5 +605,238 @@ def test_a_lookup_removed_during_the_check_still_records_one_notice(
             with app.state.session_factory() as db:
                 assert len(db.scalars(select(Notice)).all()) == 1
                 one_notice(db, request_id, opened=False)
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_an_expired_lookup_during_the_check_still_records_one_notice(
+        tmp_path, database, request, monkeypatch):
+    """A lookup that expires while the check runs is treated as missing: the request waits, with one notice."""
+    url = database_url(database, tmp_path, request)
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        with session_factory(db.get_bind())() as other:
+            row = other.get(Observation, block_id)
+            assert row is not None
+            row.expires_at = utcnow() - timedelta(seconds=1)
+            other.commit()
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path, url)
+    try:
+        with TestClient(app) as client:
+            member = signin(client, member=True)
+            response = client.post("/api/requests", headers=member, json={
+                "block_id": "block-gallery", "reason": "Need the gallery", "duration_minutes": 60})
+            assert response.status_code == 201 and response.json()["status"] == "analysing"
+            request_id = response.json()["id"]
+            with app.state.session_factory() as db:
+                row = db.get(AccessRequest, request_id)
+                assert row.status == "pending" and row.decision_note == GONE
+                assert db.get(Observation, "block-gallery") is not None
+                one_notice(db, request_id, opened=False)
+            asyncio.run(access.finish_one(
+                app.state.session_factory, app.state.settings, request_id, holder_id(app.state.engine)))
+            with app.state.session_factory() as db:
+                assert len(db.scalars(select(Notice)).all()) == 1
+                one_notice(db, request_id, opened=False)
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_fresh_claim_held_by_someone_else_survives_a_second_start(
+        tmp_path, database, request, monkeypatch):
+    """A claim a few seconds old, held by someone else, stays theirs when this process starts again.
+
+    A claim held by this process's own previous start is finished. A tick still leaves a fresh claim alone.
+    """
+    url = database_url(database, tmp_path, request)
+    calls = []
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        calls.append(block_id)
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path, url)
+    try:
+        with TestClient(app) as client:
+            signin(client)
+            factory = app.state.session_factory
+
+            def leave(request_id, block_id, **fields):
+                with factory() as db:
+                    plant(db, block_id)
+                    db.add(AccessRequest(id=request_id, block_id=block_id, domain="shop.example",
+                                         device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                                         duration_minutes=30, status="analysing", **fields))
+                    db.commit()
+
+            def row(request_id):
+                with factory() as db:
+                    return db.get(AccessRequest, request_id)
+
+            holder = holder_id(app.state.engine)
+            claimed = utcnow() - timedelta(seconds=5)
+            leave("theirs", "block-theirs", analysis_holder="someone-else", analysis_claimed_at=claimed)
+            asyncio.run(access.finish_due(
+                factory, app.state.settings, restart_of=holder, previous=previous_holder(app.state.engine)))
+            kept = row("theirs")
+            assert kept.status == "analysing" and kept.analysis_holder == "someone-else"
+            assert calls == []
+
+            old = holder
+            new = begin_holder(app.state.engine)
+            assert previous_holder(app.state.engine) == old and new != old
+            leave("own", "block-own", analysis_holder=old, analysis_claimed_at=utcnow() - timedelta(seconds=5))
+            asyncio.run(access.finish_due(
+                factory, app.state.settings, restart_of=new, previous=previous_holder(app.state.engine)))
+            kept = row("theirs")
+            assert kept.status == "analysing" and kept.analysis_holder == "someone-else"
+            own = row("own")
+            assert own.status == "auto_approved" and own.analysis_holder is None
+            assert calls == ["block-own"]
+    finally:
+        app.state.engine.dispose()
+
+
+def test_a_failed_startup_recovery_still_serves(tmp_path, monkeypatch):
+    """A failure while finishing leftover checks does not stop the API from serving."""
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("recovery")
+
+    monkeypatch.setattr(access, "finish_due", boom)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/health").status_code == 200
+            assert client.get("/api/health").json()["status"] == "ok"
+    finally:
+        app.state.engine.dispose()
+
+
+def test_startup_recovery_finishes_a_request_left_analysing(tmp_path, monkeypatch):
+    """A request left being checked is finished by the background recovery, after the API is serving."""
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    planted = {"done": False}
+
+    def plant_left(db, **kwargs):
+        from nyctr.collection import release_abandoned
+        release_abandoned(db, **kwargs)
+        if planted["done"]:
+            return
+        planted["done"] = True
+        db.add(AccessRequest(id="left-behind", block_id="block-gallery", domain="shop.example",
+                             device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                             duration_minutes=30, status="analysing"))
+
+    monkeypatch.setattr("nyctr.main.release_abandoned", plant_left)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            status = "missing"
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                assert client.get("/api/health").status_code == 200
+                with app.state.session_factory() as db:
+                    row = db.get(AccessRequest, "left-behind")
+                    status = row.status if row is not None else "missing"
+                if status != "analysing":
+                    break
+                time.sleep(0.02)
+            assert status == "auto_approved"
+    finally:
+        app.state.engine.dispose()
+
+
+def test_two_checks_are_not_both_inside_the_model_call_when_the_limit_is_one(tmp_path, monkeypatch):
+    """Automatic checks share the explicit analysis endpoint's in-flight limit."""
+    monkeypatch.setattr(assistant, "MODEL_CALLS", 1)
+    monkeypatch.setattr(assistant, "_room", None)
+    monkeypatch.setattr(assistant, "_room_bound", 0)
+    flying = {"n": 0, "peak": 0}
+    entered, release = asyncio.Event(), asyncio.Event()
+    # The start finishes its own recovery before this test plants the two checks, so that recovery
+    # does not take the in-flight limit on the server's loop.
+    startup = threading.Event()
+    real_finish = access.finish_due
+
+    async def finish_due(*args, **kwargs):
+        try:
+            await real_finish(*args, **kwargs)
+        finally:
+            startup.set()
+
+    monkeypatch.setattr(access, "finish_due", finish_due)
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        flying["n"] += 1
+        flying["peak"] = max(flying["peak"], flying["n"])
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        flying["n"] -= 1
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            assert startup.wait(10)
+            signin(client)
+            factory = app.state.session_factory
+            with factory() as db:
+                for block_id in ("block-one", "block-two"):
+                    plant(db, block_id)
+                    db.add(AccessRequest(id=block_id, block_id=block_id, domain="shop.example",
+                                         device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                                         duration_minutes=30, status="analysing"))
+                db.commit()
+            holder = holder_id(app.state.engine)
+
+            async def both():
+                first = asyncio.create_task(access.finish_one(factory, app.state.settings, "block-one", holder))
+                await entered.wait()
+                second = asyncio.create_task(access.finish_one(factory, app.state.settings, "block-two", holder))
+                _done, pending = await asyncio.wait([second], timeout=1)
+                assert second in pending and flying["n"] == 1 and flying["peak"] == 1
+                release.set()
+                await first
+                await second
+
+            asyncio.run(both())
+            assert flying["peak"] == 1
+            with factory() as db:
+                assert db.get(AccessRequest, "block-one").status != "analysing"
+                assert db.get(AccessRequest, "block-two").status != "analysing"
+    finally:
+        app.state.engine.dispose()
+
+
+def test_a_simulated_opening_is_not_described_as_opened_at_the_source(tmp_path):
+    """The attention title uses the lease's execution, so a simulated opening is not called an opening."""
+    from nyctr.assistant import attention
+    app = demo(tmp_path)
+    try:
+        with TestClient(app):
+            with app.state.session_factory() as db:
+                db.add(Lease(domain="shop.example", status="active", execution="simulated", decided_by="rule",
+                             owned=True))
+                db.add(Lease(domain="applied.example", status="active", execution="applied", decided_by="rule",
+                             owned=True))
+                db.commit()
+                titles = [item["title"] for item in attention(db, app.state.settings)
+                          if item.get("action") == "end"]
+        assert "Simulated: shop.example was not opened at the source" in titles
+        assert "applied.example was opened by the access rule" in titles
+        assert all("shop.example was opened" not in title for title in titles)
     finally:
         app.state.engine.dispose()

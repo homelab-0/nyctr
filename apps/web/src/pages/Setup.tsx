@@ -65,18 +65,43 @@ const MODE_MEANS: Record<TierMode, string> = {
 function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   const [rule, setRule] = useState<AccessRule>(rules.access);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => setRule(rules.access), [rules.access]);
-  /** Saves immediately so the sentence on screen is always the rule in force. */
-  const save = async (next: AccessRule) => {
+  // The rule the next save sends. A change updates it at once, so a second change is built on
+  // the first even before the page paints again.
+  const latest = useRef(rules.access);
+  const tail = useRef(Promise.resolve());
+  const pending = useRef(0);
+  useEffect(() => {
+    // A save that has not settled yet is newer than the rule just read back.
+    if (pending.current > 0) return;
+    latest.current = rules.access;
+    setRule(rules.access);
+  }, [rules.access]);
+  /** Sends the whole rule, one save at a time, from the latest rule on the page. */
+  const save = (apply: (current: AccessRule) => AccessRule) => {
+    const next = apply(latest.current);
+    latest.current = next;
     setRule(next);
     setError(null);
-    try {
-      await put('/rules/access', next);
-      reload();
-    } catch (e) {
-      setError((e as Error).message);
-      setRule(rules.access);
-    }
+    pending.current += 1;
+    const run = tail.current.then(async () => {
+      const body = latest.current;
+      try {
+        await put('/rules/access', body);
+        reload();
+      } catch (e) {
+        setError((e as Error).message);
+        if (latest.current === body) {
+          latest.current = rules.access;
+          setRule(rules.access);
+        }
+      } finally {
+        pending.current -= 1;
+      }
+    });
+    tail.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
   };
   const writes = rules.writes.access;
   const openers = rules.sources.filter((source) => source.changes.length > 0);
@@ -84,14 +109,18 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   const threats = rule.threat_feed;
   /** A threat-feed block is never open longer than an advertising one, so its limit follows down. */
   const saveAds = (change: Partial<AccessRule['ad_tracker']>) => {
-    const next = { ...ads, ...change };
-    const max_minutes = Math.min(threats.max_minutes, next.max_minutes);
-    return void save({ ...rule, ad_tracker: next, threat_feed: { ...threats, max_minutes } });
+    save((current) => {
+      const next = { ...current.ad_tracker, ...change };
+      const max_minutes = Math.min(current.threat_feed.max_minutes, next.max_minutes);
+      return { ...current, ad_tracker: next, threat_feed: { ...current.threat_feed, max_minutes } };
+    });
   };
   const saveThreats = (change: Partial<AccessRule['threat_feed']>) => {
-    const next = { ...threats, ...change };
-    const max_minutes = Math.min(next.max_minutes, ads.max_minutes);
-    return void save({ ...rule, threat_feed: { ...next, max_minutes } });
+    save((current) => {
+      const next = { ...current.threat_feed, ...change };
+      const max_minutes = Math.min(next.max_minutes, current.ad_tracker.max_minutes);
+      return { ...current, threat_feed: { ...next, max_minutes } };
+    });
   };
   return (
     <Panel
@@ -103,7 +132,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
           <Switch
             label="Automatic access"
             checked={rule.enabled}
-            onChange={(enabled) => void save({ ...rule, enabled })}
+            onChange={(enabled) => save((current) => ({ ...current, enabled }))}
           />
           <span className="aside">
             With this off, every request waits for you, whatever is set below.
@@ -116,7 +145,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             min={1}
             max={20}
             value={rule.per_day}
-            onChange={(per_day) => void save({ ...rule, per_day })}
+            onChange={(per_day) => save((current) => ({ ...current, per_day }))}
           />
           requests a day for each person, and
           <Stepper
@@ -124,7 +153,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             min={1}
             max={100}
             value={rule.daily_total}
-            onChange={(daily_total) => void save({ ...rule, daily_total })}
+            onChange={(daily_total) => save((current) => ({ ...current, daily_total }))}
           />
           a day for everyone together.
         </p>
@@ -169,6 +198,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             <span>{ads.max_score + 1} to 100, or no score: a person decides</span>
           </div>
           <div className="bar">
+            <span>Require a check of the address</span>
             <Switch
               label="Require a check of the address"
               checked={ads.analysis_required}

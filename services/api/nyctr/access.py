@@ -865,23 +865,25 @@ def _lock_request(db: Session, request_id: str) -> bool:
     return locked.rowcount == 1
 
 
-def _analysis_free(row: AccessRequest, now: datetime, restart_of: str | None, started_at: datetime | None) -> bool:
+def _analysis_free(row: AccessRequest, now: datetime, restart_of: str | None,
+                   previous: str | None = None) -> bool:
     """Whether this call may take the analysis claim. A fresh claim of another holder stays theirs.
 
-    A start of Nyctr may take a claim another holder took before this start. A tick passes no
-    `restart_of`, so two live copies do not steal a claim that is still inside its two minutes.
+    Anyone may take a claim older than the two-minute hold. A start may also take a claim that
+    belongs to this process's own previous start. A tick passes no `previous`, so a live copy's
+    fresh claim stays where it is, including when that copy started only a few seconds earlier.
     """
     if row.status != "analysing":
         return False
     claimed = utc(row.analysis_claimed_at) if row.analysis_claimed_at else None
     if row.analysis_holder is None or claimed is None or claimed < now - ANALYSIS_HOLD:
         return True
-    return bool(restart_of and row.analysis_holder != restart_of and started_at is not None
-                and claimed < utc(started_at))
+    return bool(previous and restart_of and row.analysis_holder == previous
+                and row.analysis_holder != restart_of)
 
 
 def claim_analysis(db: Session, request_id: str, holder: str, *, restart_of: str | None = None,
-                   started_at: datetime | None = None, now: datetime | None = None) -> bool:
+                   previous: str | None = None, now: datetime | None = None) -> bool:
     """Claim the analysis job, after locking and reading the row again. The caller commits.
 
     False leaves the transaction rolled back. A second writer stopped on the lock reads what this
@@ -893,7 +895,7 @@ def claim_analysis(db: Session, request_id: str, holder: str, *, restart_of: str
         return False
     row = db.get(AccessRequest, request_id)
     db.refresh(row)
-    if not _analysis_free(row, now, restart_of, started_at):
+    if not _analysis_free(row, now, restart_of, previous):
         db.rollback()
         return False
     row.analysis_holder, row.analysis_claimed_at = holder, now
@@ -954,25 +956,28 @@ def _drop_unlinked(factory, analysis_id: str) -> None:
 
 
 async def finish_one(factory, settings: Settings, request_id: str, holder: str, *,
-                     restart_of: str | None = None, started_at: datetime | None = None) -> None:
+                     restart_of: str | None = None, previous: str | None = None) -> None:
     """Claim one analysing request, store its analysis, then let the rule decide.
 
-    The model call holds no transaction. If the claim is lost after the analysis is stored, that
-    analysis is kept only when a request points at it. An unexpected failure leaves the claim: the
-    two-minute takeover, or a restart, finishes the request once. Clearing it at once would let the
+    The model call holds no transaction. It also waits for the same in-flight limit the explicit
+    analysis endpoint uses, so two checks are not both inside a model call when that limit is one.
+    If the claim is lost after the analysis is stored, that analysis is kept only when a request
+    points at it. An unexpected failure leaves the claim: the two-minute takeover, or this
+    process's own previous start, finishes the request once. Clearing it at once would let the
     next tick open the address again while the failed attempt's record is still being put right.
     """
-    from . import block_analysis
+    from . import assistant, block_analysis
     try:
         with factory() as db:
-            if not claim_analysis(db, request_id, holder, restart_of=restart_of, started_at=started_at):
+            if not claim_analysis(db, request_id, holder, restart_of=restart_of, previous=previous):
                 return
             db.commit()
             row = db.get(AccessRequest, request_id)
             domain, block_id, already = row.domain, row.block_id, row.analysis_id
         if not already:
-            with factory() as db:
-                made = await block_analysis.analyse(db, domain, block_id, settings=settings)
+            async with assistant.model_turn():
+                with factory() as db:
+                    made = await block_analysis.analyse(db, domain, block_id, settings=settings)
             with factory() as db:
                 if not keep_analysis(db, request_id, holder, made.id):
                     _drop_unlinked(factory, made.id)
@@ -983,6 +988,8 @@ async def finish_one(factory, settings: Settings, request_id: str, holder: str, 
             if row is None or row.status != "analysing" or row.analysis_holder != holder:
                 return
             observation = db.get(Observation, row.block_id)
+            if observation is not None and utc(observation.expires_at) <= utcnow():
+                observation = None
             stored = db.get(Analysis, row.analysis_id) if row.analysis_id else None
             if observation is None:
                 if keep_decision(db, request_id, holder, status="pending", decision_note=(
@@ -999,15 +1006,15 @@ async def finish_one(factory, settings: Settings, request_id: str, holder: str, 
 
 
 async def finish_due(factory, settings: Settings, *, restart_of: str | None = None,
-                     started_at: datetime | None = None) -> None:
-    """Finish every request that is still being analysed. A tick passes no `restart_of`."""
+                     previous: str | None = None) -> None:
+    """Finish every request that is still being analysed. A tick passes no `previous`."""
     from .collection import holder_id
     with factory() as db:
         ids = list(db.scalars(select(AccessRequest.id).where(AccessRequest.status == "analysing")
                               .order_by(AccessRequest.created_at, AccessRequest.id)))
     holder = holder_id(factory)
     for request_id in ids:
-        await finish_one(factory, settings, request_id, holder, restart_of=restart_of, started_at=started_at)
+        await finish_one(factory, settings, request_id, holder, restart_of=restart_of, previous=previous)
 
 
 async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation, *,

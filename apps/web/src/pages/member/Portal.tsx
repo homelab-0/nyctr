@@ -985,17 +985,24 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
   // My requests and a request's own page keep reading while one of this member's
   // requests is still undecided, so the answer shows up where they are already looking.
-  // After that decision, a failed lease read would leave the previous list on screen, so
-  // reading continues until the lease list has been read successfully as well.
+  // After that decision, the leases are read once more before reading stops, so a lease
+  // written with the decision is not missed. A failed lease read keeps reading too.
   const undecided = (data.requests.data ?? []).some(
     (row) => row.status === 'pending' || row.status === 'analysing',
   );
+  const follow = useRef({ saw: false, extra: false });
+  if (undecided) follow.current = { saw: true, extra: false };
+  const needExtra =
+    follow.current.saw && !undecided && !follow.current.extra && data.requests.data !== null;
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
-    (undecided || (data.requests.data !== null && Boolean(data.leases.error)));
-  const again = useRefreshWhile(waiting, () =>
-    Promise.all([data.requests.reload(), data.leases.reload()]),
-  );
+    (undecided || (data.requests.data !== null && Boolean(data.leases.error)) || needExtra);
+  const again = useRefreshWhile(waiting, () => {
+    const finishing = needExtra;
+    return Promise.all([data.requests.reload(), data.leases.reload()]).finally(() => {
+      if (finishing) follow.current.extra = true;
+    });
+  });
   useEffect(() => {
     document.title = 'Blocked sites · Nyctr';
     window.scrollTo?.(0, 0);

@@ -1053,9 +1053,15 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/requests')).toBe(2);
     expect(reads(calls, '/leases')).toBe(2);
     onlyOwn(calls);
-    await advance(60_000);
+    await advance(4_999);
     expect(reads(calls, '/requests')).toBe(2);
     expect(reads(calls, '/leases')).toBe(2);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
   });
 
   it('shows a decision in My requests within five seconds, in the same row', async () => {
@@ -1083,8 +1089,10 @@ describe('an answer while the member page stays open', () => {
     expect(row?.textContent).not.toContain('Waiting for a person');
     expect(reads(calls, '/requests')).toBe(2);
     onlyOwn(calls);
+    await advance(5_000);
+    expect(reads(calls, '/requests')).toBe(3);
     await advance(60_000);
-    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/requests')).toBe(3);
   });
 
   it('reads every five seconds for two minutes, then every thirty', async () => {
@@ -1127,6 +1135,10 @@ describe('an answer while the member page stays open', () => {
     expect(document.getElementById('main-content')).toBe(main);
     expect(moved).not.toHaveBeenCalled();
     const blocks = reads(calls, '/blocks');
+    await advance(30_000);
+    expected += 1;
+    expect(reads(calls, '/requests')).toBe(expected);
+    expect(reads(calls, '/leases')).toBe(expected);
     await advance(60_000);
     expect(reads(calls, '/requests')).toBe(expected);
     expect(reads(calls, '/blocks')).toBe(blocks);
@@ -1395,6 +1407,39 @@ describe('an answer while the member page stays open', () => {
     expect(document.body.textContent).not.toContain('The latest check failed');
     const settled = reads(calls, '/leases');
     await advance(30_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+    expect(reads(calls, '/requests')).toBe(settled);
+  });
+
+  it('reads the leases once more after a decision, then stops', async () => {
+    clock();
+    let phase: 'pending' | 'approved' | 'open' = 'pending';
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(phase === 'pending' ? pending : { status: 'approved', decided_by: 'admin' }),
+        ],
+        'GET /leases': () => (phase === 'open' ? [lease()] : []),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    phase = 'approved';
+    await advance(5_000);
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    phase = 'open';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
+    const settled = reads(calls, '/leases');
+    await advance(60_000);
     expect(reads(calls, '/leases')).toBe(settled);
     expect(reads(calls, '/requests')).toBe(settled);
   });

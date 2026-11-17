@@ -15,6 +15,7 @@ import {
 } from '../components/ui';
 import { ago, atSource, span, useNow, writtenNote } from '../lib/format';
 import { bringIntoView } from '../lib/links';
+import { useRefreshWhile } from '../lib/refresh';
 import type { AccessRequest, Lease, Person, Rules } from '../types';
 
 const STATUS: Record<string, { text: string; tone: string }> = {
@@ -74,6 +75,10 @@ export default function Requests({
   useEffect(() => {
     if (selected && row?.id === selected) bringIntoView(panel.current);
   }, [selected, row?.id]);
+  // While a request is still being checked, read the list again so a finished check shows up
+  // without a reload. Reading stops when none are left, and when this page is left.
+  const checking = all.some((item) => item.status === 'analysing');
+  useRefreshWhile(requests.data !== null && checking, () => requests.reload());
 
   /** Records the decision. Approval opens a lease; the server reports what really happened. */
   const decide = async (decision: 'approved' | 'denied') => {

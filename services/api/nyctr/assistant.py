@@ -14,10 +14,12 @@ Three providers:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -51,6 +53,11 @@ router = APIRouter(prefix="/api")
 _REF = re.compile(r"\[\[([a-z]+):([A-Za-z0-9_-]{1,12})\]\]")
 _SEVERITY = {"high": 0, "medium": 1, "low": 2, "informational": 3}
 _calls: dict[str, list[float]] = {}
+# How many model calls one administrator may make in ten minutes, and how many analysis calls may
+# be in flight in this process at once. The explicit analysis endpoint and an automatic check share it.
+MODEL_CALLS = 30
+_room: asyncio.Semaphore | None = None
+_room_bound = 0
 # A guest's state and what happened at a source, in the words an answer may use.
 _GUEST = {"online": "online", "waiting": "waiting on the sign-in page", "cut": "cut off", "locked": "locked out",
           "offline": "gone"}
@@ -130,10 +137,18 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
     for lease in opened:
         request = db.get(AccessRequest, lease.request_id) if lease.request_id else None
         analysis = db.get(Analysis, request.analysis_id) if request is not None and request.analysis_id else None
+        simulated = lease.execution == "simulated"
+        # A simulated opening never reached a source. The title says so, instead of saying it was opened.
+        title = (f"Simulated: {lease.domain} was not opened at the source" if simulated
+                 else f"{lease.domain} was opened by the access rule")
+        if analysis is not None:
+            detail = plain_check(analysis)
+        elif simulated:
+            detail = "Demo mode never contacts a source, so nothing changed there."
+        else:
+            detail = "Opened by the access rule."
         items.append({"kind": "lease", "id": lease.id, "severity": "low", "action": "end",
-                      "at": utc(lease.created_at).isoformat(),
-                      "title": f"{lease.domain} was opened by the access rule",
-                      "detail": plain_check(analysis) if analysis is not None else "Opened by the access rule."})
+                      "at": utc(lease.created_at).isoformat(), "title": title, "detail": detail})
     pending = list(db.scalars(select(AccessRequest).where(AccessRequest.status == "pending")))
     pending.sort(key=lambda r: (-(r.risk_score if r.risk_score is not None else 101), utc(r.created_at)))
     for row in pending:
@@ -295,9 +310,36 @@ def _throttle(user_id: str) -> None:
     """Allow each administrator 30 model calls per 10 minutes in this process."""
     now = time.monotonic()
     recent = [t for t in _calls.get(user_id, []) if now - t < 600]
-    if len(recent) >= 30:
+    if len(recent) >= MODEL_CALLS:
         raise HTTPException(429, "Too many questions in a short time. Try again in a few minutes.")
     _calls[user_id] = recent + [now]
+
+
+def _room_for() -> asyncio.Semaphore:
+    """The shared in-flight limit. Recreated when the bound changes, which tests do."""
+    global _room, _room_bound
+    if _room is None or _room_bound != MODEL_CALLS:
+        _room = asyncio.Semaphore(MODEL_CALLS)
+        _room_bound = MODEL_CALLS
+    return _room
+
+
+@asynccontextmanager
+async def model_turn(user_id: str | None = None):
+    """One analysis call inside the limit the explicit analysis endpoint uses.
+
+    A named caller is also counted toward that caller's ten-minute limit. The same number of
+    analysis calls may be in flight at once. A call waits here for a free place, so it is not
+    inside the model call while it waits. This is that limit, not a separate queue of requests.
+    """
+    if user_id is not None:
+        _throttle(user_id)
+    room = _room_for()
+    await room.acquire()
+    try:
+        yield
+    finally:
+        room.release()
 
 
 def _sample_answer(question: str, pack: dict[str, Any]) -> str:

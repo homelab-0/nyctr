@@ -140,6 +140,35 @@ describe('an opening the rule made', () => {
       ).toBe(true),
     );
   });
+
+  it('shows the message when the opening has already ended', async () => {
+    const detail = 'This access has already ended';
+    mockApi({
+      'GET /overview': overview,
+      'GET /leases': [],
+      'GET /integrations': [source('fine', 'connected')],
+      'GET /collection': scheduleOff(),
+      'POST /leases/lease-1/end': { __status: 409, detail },
+    });
+    render(
+      <Briefing
+        attention={[
+          {
+            kind: 'lease',
+            id: 'lease-1',
+            action: 'end',
+            severity: 'low',
+            title: 'shop.example was opened by the access rule',
+            detail: 'Nyctr checked this site: the risk looks low.',
+            at: null,
+          },
+        ]}
+        loading={false}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'End' }));
+    expect((await screen.findByRole('alert')).textContent).toBe(detail);
+  });
 });
 
 describe('briefing: sources that need a look', () => {

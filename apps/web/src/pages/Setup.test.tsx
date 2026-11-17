@@ -193,6 +193,30 @@ describe('access rule in Setup', () => {
     await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
     await waitFor(() => expect(saved()[1]).toEqual({ ...shorter, daily_total: 9 }));
   });
+
+  it('names the check beside On and Off', async () => {
+    openRule();
+    const ads = await tier('Advertising and tracker lists');
+    const check = ads.getByRole('switch', { name: 'Require a check of the address' });
+    const named = ads.getByText('Require a check of the address');
+    expect(named).toBeDefined();
+    expect(check.closest('.bar')).toBe(named.closest('.bar'));
+    expect(check.parentElement?.textContent).toContain('Off');
+  });
+
+  it('sends the later change after the earlier save has settled', async () => {
+    const { saved, user } = openRule();
+    await screen.findByRole('button', { name: 'Lower openings per day' });
+    const release = holdBack('PUT', '/rules/access');
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    expect(saved()[0]).toMatchObject({ per_day: 3, daily_total: 10 });
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    expect(saved()).toHaveLength(1);
+    release();
+    await waitFor(() => expect(saved()).toHaveLength(2));
+    expect(saved()[1]).toMatchObject({ per_day: 3, daily_total: 9 });
+  });
 });
 
 describe('collection schedule in Setup', () => {

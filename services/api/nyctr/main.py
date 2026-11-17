@@ -48,6 +48,7 @@ from .collection import (  # noqa: F401
     lease_free_sql,
     off_loop,
     parsed_date,
+    previous_holder,
     release_abandoned,
     settle_abandoned,
     show_log,
@@ -214,15 +215,24 @@ def create_app(settings: Settings | None = None):
         """
         show_log()
         holder = begin_holder(engine)
-        started = utcnow()
         migrate(engine)
         with factory() as db:
             bootstrap(db, settings)
             model.ensure_trace_key(db)
             release_abandoned(db, restart_of=holder)
             db.commit()
-        # A request left analysing by the previous start is finished once, before anything is served.
-        await access.finish_due(factory, settings, restart_of=holder, started_at=started)
+        # Requests left analysing are finished in the background. A slow or failed check must not
+        # stop the API from serving. The request stays claimed until a later pass finishes it.
+
+        async def recover() -> None:
+            try:
+                await access.finish_due(
+                    factory, settings, restart_of=holder, previous=previous_holder(engine))
+            except Exception as error:  # noqa: BLE001 - startup must serve even when recovery fails
+                logging.getLogger("nyctr").warning(
+                    "Finishing a request's analysis failed: %s", type(error).__name__)
+
+        recovery = asyncio.create_task(recover())
         if settings.old_proxy_name_in_use:
             logging.getLogger("nyctr").warning(
                 "The list of proxies is read from FORWARDED_ALLOW_IPS. That name will stop working in a later "
@@ -230,6 +240,9 @@ def create_app(settings: Settings | None = None):
         pulse = Heartbeat(factory).start()
         upkeep = asyncio.create_task(worker.run(app)) if settings.worker_enabled else None
         yield
+        recovery.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await recovery
         if upkeep:
             upkeep.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -785,11 +798,11 @@ def create_app(settings: Settings | None = None):
 
         Members, the portal address and a caller with no session are refused. The
         model's reply is kept only after it matches the fixed shape. The same
-        limit as the other model calls applies first.
+        limit as the other model calls applies first, including how many may be in flight.
         """
-        assistant._throttle(_user.id)
         try:
-            row = await block_analysis.analyse(db, body.name, body.block_id or None, settings=settings)
+            async with assistant.model_turn(_user.id):
+                row = await block_analysis.analyse(db, body.name, body.block_id or None, settings=settings)
         except facts.NotAName as error:
             raise HTTPException(422, str(error)) from None
         return block_analysis.view(row)
