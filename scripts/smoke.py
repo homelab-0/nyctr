@@ -76,6 +76,27 @@ def wait_for_app():
     raise RuntimeError("Application did not become healthy within 90 seconds")
 
 
+def settled(client, request_id):
+    """Read one request until it is no longer being analysed, for about 45 seconds.
+
+    Creating a request answers at once, with status analysing. The job that
+    finishes it runs after that answer, and the first upkeep tick waits 30
+    seconds. Analysing is not a success. A request still in that state when
+    the time is up means the demo did not finish it.
+    """
+    deadline = time.monotonic() + 45
+    row = None
+    while True:
+        row = next((item for item in client.request("/api/requests") if item["id"] == request_id), None)
+        if row is not None and row["status"] != "analysing":
+            return row
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    state = "missing" if row is None else row["status"]
+    raise AssertionError(f"Request {request_id} was still {state} after 45 seconds")
+
+
 def run(verify_persistence):
     """Exercise the packaged demo's HTTP, authorization, and durable-data boundaries.
 
@@ -121,11 +142,13 @@ def run(verify_persistence):
     member.request("/api/requests", payload, expected=403, csrf=False)
     created = member.request("/api/requests", payload, expected=201)
     # A risky block is scored and left for a person, whatever the access rule allows.
+    created = settled(member, created["id"])
     assert created["status"] == "pending" and created["risk_score"] > 60
     STATE.write_text(json.dumps({"request_id": created["id"]}))
     # A low-risk privacy-list block opens under the demo's written rule, and demo
     # mode records the provider change as simulated rather than applied.
     opened = member.request("/api/requests", {**payload, "block_id": safe["id"]}, expected=201)
+    opened = settled(member, opened["id"])
     assert opened["status"] == "auto_approved" and opened["decided_by"] == "rule"
     lease = next(row for row in member.request("/api/leases") if row["request_id"] == opened["id"])
     assert lease["status"] == "active" and lease["execution"] == "simulated"
