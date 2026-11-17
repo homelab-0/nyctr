@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from . import access, facts, peer, presence
 from .deps import device_permitted, get_db, identity
 from .integrations import registry
-from .models import AccessRequest, Integration, Observation, Resource, StatementQuota, utc, utcnow
+from .models import AccessRequest, Integration, Observation, StatementQuota, utc, utcnow
 from .security import audit
 from .sites import PORTAL, site_of
 
@@ -36,7 +36,7 @@ FILED = "That name was blocked recently. Nyctr has filed your request."
 DUPLICATE = "Nyctr already has your request for that name."
 MISSED = ("Nyctr saw no recent block of that name. Open the page once more on this device, "
           "then try again in a few minutes.")
-LIMITED = "You have asked about five sites in the last hour. Try again later."
+LIMITED = "You have asked about five sites since the first one in this hour. Try again when that hour resets."
 CONSOLE = "Ask from the address members use, not this one."
 NO_DEVICE = "Nyctr does not recognise this device as yours, so it cannot take this request."
 
@@ -74,33 +74,39 @@ def one_domain(value: str) -> str:
     return facts._name(lowered)
 
 
+def _denial(why: str) -> str:
+    """The sentence for a refusal. Console wording is this route's. The rest are the presence sentences."""
+    if why == "console":
+        return CONSOLE
+    if why == "off":
+        return presence.WHY["off"]
+    return presence.WHY.get(why, NO_DEVICE)
+
+
 def _device(request: Request, db: Session, user, session):
     """The device this member is on, or why a statement cannot be taken.
 
-    Recognition has to be on, and the device has to be one they hold a live tie
-    on or one assigned to them. An address on its own is never enough. When a
-    member address is configured, the console address is refused before any of
-    that, including before a name is looked up.
+    Recognition has to be on. Outside the demonstration the presence contract
+    names the current device or refuses. A refusal stands: a stored address is
+    not a second guess. Assignment or a live tie is checked only after that
+    device is known. The demonstration has no gateway, so it uses the same
+    stand-in as the member's own device page. When a member address is
+    configured, the console address is refused before any of that, including
+    before a name is looked up.
     """
     settings = request.app.state.settings
     if settings.portal_url and site_of(request) != PORTAL:
         return None, "console"
     if not presence.settings(db).enabled:
         return None, "off"
-    found = presence.Found()
     if settings.mode != "demo":
         # Recognising commits. It runs before the quota transaction for that reason.
         found = presence.recognise(db, settings, user, session, peer.seen(request), site_of(request))
-        if found.why in {"off", "console"}:
-            return None, found.why
-    match = found.device if found.device is not None and device_permitted(db, found.device, user) else None
-    seen = peer.seen(request)
-    if match is None and seen.address:
-        match = next((row for row in db.scalars(select(Resource).where(Resource.kind == "client"))
-                      if seen.address == row.attributes.get("ip") and device_permitted(db, row, user)), None)
-    if match is None and settings.mode == "demo":
-        match = next((row for row in db.scalars(select(Resource).where(Resource.kind == "client"))
-                      if row.classification == "personal" and device_permitted(db, row, user)), None)
+        if found.why or found.device is None or not device_permitted(db, found.device, user):
+            return None, found.why or "no_device"
+        return found.device, None
+    # The same stand-in the member page uses. A recognition refusal never reaches this branch.
+    match, _simulated = access.stand_in_device(db, user, peer.seen(request))
     return (match, None) if match is not None else (None, "no_device")
 
 
@@ -133,8 +139,9 @@ def _take(db: Session, user_id: str) -> bool:
 
 
 def _fresh(row: Observation, now, window) -> bool:
-    """A block observed inside the window that the inbox has not expired."""
-    return utc(row.observed_at) >= window and utc(row.expires_at) > now
+    """A block observed in the window, not after now, that the inbox has not expired."""
+    observed = utc(row.observed_at)
+    return window <= observed <= now and utc(row.expires_at) > now
 
 
 def _candidates(db: Session, name: str) -> list[Observation]:
@@ -171,15 +178,33 @@ def _match(rows: list[Observation], name: str):
     return None, "not_exact" if related else "miss"
 
 
-def _open_request(db: Session, user_id: str, name: str, block_id: str) -> AccessRequest | None:
-    """An open request for this name, or any request already filed for this same block."""
+def _open_request(db: Session, user_id: str, device_id: str, name: str,
+                  block_id: str | None = None) -> AccessRequest | None:
+    """This member's request on this device: an open one for the name, or any for this block.
+
+    Another device's row is not a match. A display name is not the device.
+    """
     same_name = db.scalar(select(AccessRequest).where(
-        AccessRequest.requester_id == user_id, AccessRequest.domain == name,
-        AccessRequest.status.in_(OPEN)).order_by(AccessRequest.created_at.desc()).limit(1))
+        AccessRequest.requester_id == user_id, AccessRequest.device_id == device_id,
+        AccessRequest.domain == name, AccessRequest.status.in_(OPEN),
+    ).order_by(AccessRequest.created_at.desc()).limit(1))
     if same_name is not None:
         return same_name
+    if block_id is None:
+        return None
     return db.scalar(select(AccessRequest).where(
-        AccessRequest.requester_id == user_id, AccessRequest.block_id == block_id))
+        AccessRequest.requester_id == user_id, AccessRequest.device_id == device_id,
+        AccessRequest.block_id == block_id).limit(1))
+
+
+def _duplicate(db: Session, user_id: str, device_id: str, device_name: str, name: str, existing):
+    """Return this device's request. None when the row is not this member's on this device."""
+    if existing is None or existing.requester_id != user_id or existing.device_id != device_id:
+        return None
+    shown = access.shown(db, existing, admin=False)
+    _record(db, user_id, device_id, device_name, name, "duplicate", existing.id)
+    db.commit()
+    return _answer(200, DUPLICATE, shown, matched=True)
 
 
 def _answer(status: int, message: str, request: dict | None = None, *, matched: bool):
@@ -195,16 +220,16 @@ def state_a_site(body: StatementInput, background: BackgroundTasks, request: Req
     """File one statement for the device the member is on, or say the name was not blocked recently.
 
     Five attempts an hour for each member, including a name that matches nothing.
-    Repeating a name that already has an open request returns that request.
+    After the attempt is counted, this device's open request is returned even when
+    the block has left the window. A new request still needs a block from that window.
     """
     user, session = auth
     device, why = _device(request, db, user, session)
     typed = _typed(body.domain)
     if device is None:
-        message = {"console": CONSOLE, "off": presence.WHY["off"], "no_device": NO_DEVICE}[why]
         _record(db, user.id, "", "", typed, why)
         db.commit()
-        raise HTTPException(403, message)
+        raise HTTPException(403, _denial(why))
     user_id, device_id, device_name = user.id, device.id, device.name
     try:
         name = one_domain(body.domain)
@@ -217,21 +242,22 @@ def state_a_site(body: StatementInput, background: BackgroundTasks, request: Req
         _record(db, user_id, device_id, device_name, name, "limited")
         db.commit()
         raise HTTPException(429, LIMITED)
+    # The open request is this member's on this device. Fresh evidence is required only for a new one.
+    existing = _open_request(db, user_id, device_id, name)
+    if (answer := _duplicate(db, user_id, device_id, device_name, name, existing)) is not None:
+        return answer
     chosen, outcome = _match(_candidates(db, name), name)
     if chosen is None:
         _record(db, user_id, device_id, device_name, name, outcome)
         db.commit()
         return _answer(200, MISSED, matched=False)
     block_id = chosen.id
-    existing = _open_request(db, user_id, name, block_id)
-    if existing is not None:
-        shown = access.shown(db, existing, admin=False)
-        _record(db, user_id, device_id, device_name, name, "duplicate", existing.id)
-        db.commit()
-        return _answer(200, DUPLICATE, shown, matched=True)
-    row = AccessRequest(block_id=block_id, domain=name, device_name=device_name, requester_id=user_id,
-                        reason="The page did not open.", duration_minutes=60, status="analysing",
-                        basis="statement")
+    existing = _open_request(db, user_id, device_id, name, block_id)
+    if (answer := _duplicate(db, user_id, device_id, device_name, name, existing)) is not None:
+        return answer
+    row = AccessRequest(block_id=block_id, domain=name, device_name=device_name, device_id=device_id,
+                        requester_id=user_id, reason="The page did not open.", duration_minutes=60,
+                        status="analysing", basis="statement")
     db.add(row)
     try:
         db.flush()
@@ -241,14 +267,12 @@ def state_a_site(body: StatementInput, background: BackgroundTasks, request: Req
             _record(db, user_id, device_id, device_name, name, "limited")
             db.commit()
             raise HTTPException(429, LIMITED) from None
-        existing = _open_request(db, user_id, name, block_id)
-        if existing is None:
+        existing = _open_request(db, user_id, device_id, name, block_id)
+        answer = _duplicate(db, user_id, device_id, device_name, name, existing)
+        if answer is None:
             db.rollback()
             raise
-        shown = access.shown(db, existing, admin=False)
-        _record(db, user_id, device_id, device_name, name, "duplicate", existing.id)
-        db.commit()
-        return _answer(200, DUPLICATE, shown, matched=True)
+        return answer
     shown = access.shown(db, row, admin=False)
     _record(db, user_id, device_id, device_name, name, "filed", row.id)
     db.commit()

@@ -36,6 +36,7 @@ from .deps import (
     identity,
     observation_permitted,
     request_json,
+    statement_current,
 )
 from .integrations import IntegrationError, registry
 from .models import (
@@ -1119,6 +1120,12 @@ async def finish_one(factory, settings: Settings, request_id: str, holder: str, 
                         notices.waiting(db, settings, row)
                         db.commit()
                     return
+                if not statement_current(db, row):
+                    if keep_decision(db, request_id, holder, status="pending", decision_note=STATEMENT_WAITING):
+                        from . import notices
+                        notices.waiting(db, settings, row)
+                        db.commit()
+                    return
                 await decide(db, settings, row, observation, analysis=stored, holder=holder)
                 db.commit()
         except Exception as error:  # noqa: BLE001 - logged by type; the claim stays until it is taken over
@@ -1170,6 +1177,10 @@ def recovery_delay(factory, *, now: datetime | None = None) -> float | None:
         waits.append(max(0.0, (claimed + ANALYSIS_HOLD - now).total_seconds()))
     soonest = min(waits)
     return RECOVERY_RETRY if soonest <= 0.0 else soonest
+
+
+# Shown when a statement's device is no longer one this member may use. The request stays on record.
+STATEMENT_WAITING = "This device is no longer yours, so a person decides."
 
 
 async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation, *,
@@ -1271,7 +1282,13 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                 leave(verdict, f"{name} was removed from Nyctr while this request waited, so a person decides.")
                 why = None  # leave wrote the note while the request was pending. It commits with the claim.
             else:
-                answered, why = ask(final=True)  # Asked again with the turn held: the counts are right now.
+                # Read the device again. Access can have been taken away while this opening waited.
+                if statement_current(db, row):
+                    answered, why = ask(final=True)  # Asked again with the turn held: the counts are right now.
+                else:
+                    why = STATEMENT_WAITING
+                if why is None and not statement_current(db, row):
+                    why = STATEMENT_WAITING
                 if why is None:
                     # Minutes from this allowing decision, not the first look. The re-read under the lock
                     # below can still shorten them.
@@ -1290,11 +1307,16 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                     _lock_rule(db)
                     rule = _reread_rule(db)
                     late = policy.may_open(rule, facts_now(pending=1))
-                    if not late.allow:  # Nothing is stored, and what was added stays on record to be removed.
+                    # Nothing is stored, and what was added stays on record to be removed.
+                    lost_device = not statement_current(db, row)
+                    if not late.allow or lost_device:
                         db.rollback()
                         release_entry(db, claim, unstored=True)
-                        why = _left_to_a_person(late, rule, assessment, integration, match)
-                        record(late, why)
+                        if lost_device:
+                            why = STATEMENT_WAITING
+                        else:
+                            why = _left_to_a_person(late, rule, assessment, integration, match)
+                            record(late, why)
                     else:
                         # Last allowing decision. A lower limit while the add was unanswered must not leave
                         # a longer lease or request than that decision allows.
@@ -1639,6 +1661,25 @@ def put_device_link(body: LinkInput, user=Depends(admin), db: Session = Depends(
     return {"ok": True}
 
 
+def stand_in_device(db: Session, user, seen) -> tuple[Resource | None, bool]:
+    """The demonstration's device for this member, in one order the page and a statement share.
+
+    A permitted client whose stored address is this request's address comes
+    first. Otherwise the first personal device the member may see, by name
+    then id. The second value is true only for that personal stand-in. Live
+    recognition does not use this, and a recognition refusal must not either.
+    """
+    rows = list(db.scalars(
+        select(Resource).where(Resource.kind == "client").order_by(Resource.name, Resource.id)))
+    address = next((row for row in rows if seen.address and seen.address == (row.attributes or {}).get("ip")
+                    and device_permitted(db, row, user)), None)
+    if address is not None:
+        return address, False
+    personal = next((row for row in rows if row.classification == "personal"
+                     and device_permitted(db, row, user)), None)
+    return personal, personal is not None
+
+
 @router.get("/me/device")
 def this_device(request: Request, auth=Depends(identity), db: Session = Depends(get_db)):
     """Recognise the device this browser is on, only among devices the caller is allowed to see.
@@ -1657,15 +1698,15 @@ def this_device(request: Request, auth=Depends(identity), db: Session = Depends(
     if settings.mode != "demo":
         found = presence.recognise(db, settings, user, session, seen, site_of(request))
     match = found.device
-    rows = [] if match else list(db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name)))
-    # The address is compared first, so only a device that holds it is checked for the caller's access.
-    match = match or next((r for r in rows if seen.address and seen.address == r.attributes.get("ip")
-                           and device_permitted(db, r, user)), None)
     simulated = False
     if match is None and settings.mode == "demo":
-        # Demo has no real network. Pretend the browser is on the member's own device.
-        match = next((r for r in rows if r.classification == "personal" and device_permitted(db, r, user)), None)
-        simulated = match is not None
+        # Demo has no real network. The statement route uses this same stand-in.
+        match, simulated = stand_in_device(db, user, seen)
+    elif match is None:
+        rows = list(db.scalars(select(Resource).where(Resource.kind == "client").order_by(Resource.name)))
+        # The address is compared first, so only a device that holds it is checked for the caller's access.
+        match = next((r for r in rows if seen.address and seen.address == r.attributes.get("ip")
+                     and device_permitted(db, r, user)), None)
     how = None if match is None else "assigned" if device_assigned(db, match, user) else "signed_in"
     return {"device_id": match.id if match else None, "name": match.name if match else None,
             "simulated": simulated, "how": how, "reason": None if match else found.why,

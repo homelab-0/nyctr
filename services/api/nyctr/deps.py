@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.orm import Session
 
-from .models import DeviceGrant, DevicePresence, Observation, Resource, utc, utcnow
+from .models import DeviceGrant, DevicePresence, Observation, Resource, User, utc, utcnow
 from .security import authenticate
 from .sites import seen_as
 
@@ -140,6 +140,23 @@ def _tied(db, resource, user, when) -> bool:
 def device_assigned(db, resource, user) -> bool:
     """Say whether an administrator's assignment, not a sign-in tie, lets this member see the device now."""
     return resource is not None and _assigned(db, resource, user, utcnow())
+
+
+def statement_current(db, row) -> bool:
+    """Whether a statement may still be opened for the member and device it stored.
+
+    An event request is left to the path that filed it. A statement needs the
+    device id from when it was filed, and that member must still be allowed to
+    use the device by an assignment or a live tie. A sign-in session is not
+    that permission. A missing device cannot prove it.
+    """
+    if getattr(row, "basis", None) != "statement":
+        return True
+    if not row.device_id or not row.requester_id:
+        return False
+    user = db.get(User, row.requester_id)
+    device = db.get(Resource, row.device_id)
+    return user is not None and device_permitted(db, device, user)
 
 
 def device_permitted(db, resource, user, when=None):

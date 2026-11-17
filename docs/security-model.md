@@ -244,15 +244,27 @@ audit record (`rule.access_checked`):
 A member on a recognised device can name a site that did not open
 (`POST /api/statements`). Nyctr reduces the text to one plain domain and files
 a request with basis `statement` only when a source that reports blocked
-lookups has an exact block of that name from the last 15 minutes, and that
-block has not expired. A parent or a child name is not that block. The answer
-says only whether the typed name was blocked recently. It does not name
-another device, member or lookup. The device is the one the member is on, by a
-live sign-in tie or an assignment, and only while recognition is on. Without a
-portal address the one address is used. With one, the console address is
-refused. Five attempts an hour are kept for each member, including a name that
-matches nothing, and each is audited with the name, the device and the outcome.
-A sixth is refused without saying whether the name matched.
+lookups has an exact block of that name observed in the last 15 minutes, not
+after the current time, and that block has not expired. A parent or a child
+name is not that block. An open request this member already filed on this
+device is returned after that window, and a new request is not filed from a
+block that has left it. The answer says only whether the typed name was
+blocked recently. It does not name another device, member or lookup. The
+device is the one recognition names for this request. A refusal from
+recognition is a denial, and a stored address is not used in its place.
+Assignment or a live tie is checked only after that device is known. The
+demonstration uses the same device the member's page shows. The request stores
+that device's id. The device's display name is only a label. Before the rule
+opens a statement, Nyctr checks again that this member may still use that
+device. If not, the request waits for a person and nothing is opened. An
+assignment or a live tie is enough for that check. The sign-in does not have
+to still be open. A request filed from a block the member could already see
+is not part of that check. Without a portal address the one address is used.
+With one, the console address is refused. Five attempts are kept for each
+member in a fixed hour that starts at the first attempt, including a name
+that matches nothing and a repeat of an open request, and each is audited
+with the name, the device and the outcome. The refusal says when that hour
+resets. A sixth is refused without saying whether the name matched.
 
 ## Two addresses
 

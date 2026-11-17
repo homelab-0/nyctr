@@ -2,6 +2,7 @@
 
 import pytest
 from sqlalchemy import event, inspect, select, text
+from sqlalchemy.exc import IntegrityError
 from test_collection_store import POSTGRES, postgres_database
 
 from nyctr.database import (
@@ -38,7 +39,14 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
                 connection.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))
         connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_holder"))
         connection.execute(text("ALTER TABLE integrations DROP COLUMN sync_heartbeat"))
+        connection.execute(text("DROP INDEX IF EXISTS uq_access_request_event"))
+        connection.execute(text("DROP INDEX IF EXISTS uq_access_request_device_block"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_access_requests_device_id"))
         connection.execute(text("ALTER TABLE access_requests DROP COLUMN basis"))
+        connection.execute(text("ALTER TABLE access_requests DROP COLUMN device_id"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uq_access_requests_requester_block "
+            "ON access_requests (requester_id, block_id)"))
         connection.execute(SchemaVersion.__table__.insert().values(version=1))
         connection.execute(text("INSERT INTO users (id, email, name, role, active) "
                                 "VALUES ('u1', 'a@example.net', 'A', 'member', 1)"))
@@ -57,7 +65,7 @@ def test_schema_one_database_is_upgraded_in_place(tmp_path):
         assert {"sync_holder", "sync_heartbeat"} <= columns
         row = db.get(AccessRequest, "r1")
         assert row.domain == "example.com" and row.risk_score is None and row.decided_by is None
-        assert row.basis is None
+        assert row.basis is None and row.device_id is None
         assert db.get(User, "u1").name == "A"
     assert "statement_quotas" in tables
 
@@ -303,9 +311,51 @@ def test_a_schema_seven_database_gains_only_the_analysis_columns_and_keeps_every
     engine.dispose()
 
 
+def _drop_device_indexes(connection) -> None:
+    """Remove indexes that name the device, so the column can go back off as it was in schema 8."""
+    if connection.dialect.name == "postgresql":
+        names = connection.execute(text(
+            "SELECT indexrel.relname FROM pg_index idx "
+            "JOIN pg_class indexrel ON indexrel.oid = idx.indexrelid "
+            "JOIN pg_class tbl ON tbl.oid = idx.indrelid "
+            "WHERE tbl.relname = 'access_requests' "
+            "AND pg_get_indexdef(indexrel.oid) ILIKE '%device_id%'")).scalars()
+        for name in names:
+            connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        return
+    rows = connection.execute(text(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'access_requests'")).all()
+    for name, definition in rows:
+        if definition and "device_id" in definition.lower():
+            connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+
+
+def _restore_schema_eight_uniqueness(connection) -> None:
+    """Put back the one-request-per-member-and-block rule a schema 8 database had."""
+    if connection.dialect.name == "postgresql":
+        connection.execute(text(
+            "ALTER TABLE access_requests ADD CONSTRAINT uq_access_requests_requester_block "
+            "UNIQUE (requester_id, block_id)"))
+        return
+    definition = connection.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'access_requests'")).scalar()
+    rewritten = definition.rstrip().removesuffix(")") + ", UNIQUE (requester_id, block_id))"
+    connection.execute(text("ALTER TABLE access_requests RENAME TO access_requests_old"))
+    connection.execute(text(rewritten))
+    columns = [row[1] for row in connection.execute(text("PRAGMA table_info(access_requests_old)"))]
+    listed = ", ".join(columns)
+    connection.execute(text(
+        f"INSERT INTO access_requests ({listed}) SELECT {listed} FROM access_requests_old"))
+    connection.execute(text("DROP TABLE access_requests_old"))
+
+
 @pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 def test_a_schema_eight_database_gains_the_statement_quota_and_keeps_every_row(tmp_path, request, engine_kind):
-    """Schema 8 gains the request basis and the hourly quota. Existing requests keep an empty basis."""
+    """Schema 8 gains the request basis, the statement device and the hourly quota.
+
+    Existing requests keep an empty basis and an empty device id. A block stays one request
+    per member. A statement can be one request per device.
+    """
     place = postgres_database(request) if engine_kind == "postgresql" else {"database_url": f"sqlite:///{tmp_path}/s8.db"}
     if not place:
         pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
@@ -318,11 +368,15 @@ def test_a_schema_eight_database_gains_the_statement_quota_and_keeps_every_row(t
         db.commit()
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE statement_quotas"))
+        _drop_device_indexes(connection)
         connection.execute(text("ALTER TABLE access_requests DROP COLUMN basis"))
+        connection.execute(text("ALTER TABLE access_requests DROP COLUMN device_id"))
+        _restore_schema_eight_uniqueness(connection)
     with engine.connect() as connection:
         tables = set(inspect(connection).get_table_names())
         request_columns = [column["name"] for column in inspect(connection).get_columns("access_requests")]
     assert "statement_quotas" not in tables and "basis" not in request_columns
+    assert "device_id" not in request_columns
 
     def request_values():
         listed = ", ".join(request_columns)
@@ -342,7 +396,35 @@ def test_a_schema_eight_database_gains_the_statement_quota_and_keeps_every_row(t
     with engine.connect() as connection:
         columns = [column["name"] for column in inspect(connection).get_columns("statement_quotas")]
     assert columns == ["user_id", "count", "reset_at"]
+    with engine.connect() as connection:
+        names = {index["name"] for index in inspect(connection).get_indexes("access_requests")}
+    assert {"uq_access_request_event", "uq_access_request_device_block", "ix_access_requests_device_id"} <= names
     with session_factory(engine)() as db:
         assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == list(range(1, 10))
-        assert all(row.basis is None for row in db.scalars(select(AccessRequest)))
+        assert all(row.basis is None and row.device_id is None for row in db.scalars(select(AccessRequest)))
+        db.add(AccessRequest(
+            id="event-a", block_id="block-kept", domain="kept.example", device_name="Laptop",
+            requester_id="user-jamie", reason="because", duration_minutes=60, status="pending"))
+        db.commit()
+        db.add(AccessRequest(
+            id="event-b", block_id="block-kept", domain="kept.example", device_name="Laptop",
+            requester_id="user-jamie", reason="because", duration_minutes=60, status="pending"))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+        for id_, device in (("stmt-a", "laptop-jamie"), ("stmt-b", "phone-jamie")):
+            db.add(AccessRequest(
+                id=id_, block_id="block-said", domain="said.example", device_name=device, device_id=device,
+                requester_id="user-jamie", reason="because", duration_minutes=60, status="analysing",
+                basis="statement"))
+        db.commit()
+        db.add(AccessRequest(
+            id="stmt-c", block_id="block-said", domain="said.example", device_name="Laptop",
+            device_id="laptop-jamie", requester_id="user-jamie", reason="because", duration_minutes=60,
+            status="analysing", basis="statement"))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+        stored = list(db.scalars(select(AccessRequest).where(AccessRequest.block_id == "block-said")))
+        assert sorted(row.device_id for row in stored) == ["laptop-jamie", "phone-jamie"]
     engine.dispose()

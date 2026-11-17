@@ -77,12 +77,19 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 - `POST /api/statements` with `{domain}` (signed in). The server reduces `domain`
   to one plain domain. 201 files one request, basis `statement`, for the device
   the caller is on, and the same path as any other request then decides it.
-  200 returns that open request when the name was already asked, or
-  `{matched:false,message}` when no exact block of that name was seen in the
-  last 15 minutes. 403 when recognition is off, the caller is on the console
-  address while a portal address is set, or the device is not theirs. 422 when
-  the text is not one domain. 429 after five attempts in the hour, including
-  misses. The answer never includes another device, member or lookup.
+  200 returns the open request for that device when this member already asked,
+  including after the block has left the 15 minute window, or
+  `{matched:false,message}` when no exact block of that name was observed in
+  that window and none is still open. An observation dated after now is not a
+  match. 403 when recognition is off, recognition refuses the device, the
+  caller is on the console address while a portal address is set, or the
+  device is not theirs. A recognition refusal is not replaced by an address
+  match. In the demonstration the device is the same one `GET /api/me/device`
+  shows. 422 when the text is not one domain. 429 after five attempts in the
+  fixed hour that starts at the first attempt, including misses and repeats.
+  The answer never includes another device, member or lookup. The stored
+  device id is not part of the AccessRequest JSON below. A statement whose
+  member may no longer use that device waits for a person. Nothing is opened.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
   missing, expired or not visible to the caller answers the same 404.
 - `GET /api/me/device` -> `{device_id,name,simulated,how,reason,message}`; only among the
