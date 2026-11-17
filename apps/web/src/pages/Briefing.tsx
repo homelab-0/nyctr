@@ -203,8 +203,16 @@ export default function Briefing({
                         onClick={() => {
                           setEndError(null);
                           void post(`/leases/${item.id}/end`, {})
-                            .then(() => retry?.())
-                            .catch((reason: Error) => setEndError(reason.message));
+                            .then(() => {
+                              // Open right now reads its own list. Ending only the attention
+                              // list would leave this opening on screen.
+                              leases.reload();
+                              retry?.();
+                            })
+                            .catch((reason: Error) => {
+                              setEndError(reason.message);
+                              leases.reload();
+                            });
                         }}
                       >
                         End

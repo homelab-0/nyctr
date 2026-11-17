@@ -141,6 +141,62 @@ describe('an opening the rule made', () => {
     );
   });
 
+  it('drops the opening from the list on screen after End, without leaving the page', async () => {
+    let ended = false;
+    const calls = mockApi({
+      'GET /overview': overview,
+      'GET /leases': () =>
+        ended
+          ? []
+          : [
+              {
+                id: 'lease-1',
+                domain: 'shop.example',
+                kind: 'temporary',
+                status: 'active',
+                execution: 'applied',
+                owned: true,
+                risk_score: 20,
+                created_at: new Date().toISOString(),
+                expires_at: new Date(Date.now() + 58 * 60_000).toISOString(),
+                last_error: null,
+              },
+            ],
+      'GET /integrations': [source('fine', 'connected')],
+      'GET /collection': scheduleOff(),
+      'POST /leases/lease-1/end': () => {
+        ended = true;
+        return {};
+      },
+    });
+    const retry = vi.fn();
+    render(
+      <Briefing
+        attention={[
+          {
+            kind: 'lease',
+            id: 'lease-1',
+            action: 'end',
+            severity: 'low',
+            title: 'shop.example was opened by the access rule',
+            detail: 'Nyctr checked this site: the risk looks low.',
+            at: null,
+          },
+        ]}
+        loading={false}
+        retry={retry}
+      />,
+    );
+    const panel = () => screen.getByRole('heading', { name: 'Open right now' }).closest('section')!;
+    expect((await screen.findByText('58 min left')).textContent).toBeTruthy();
+    expect(panel().textContent).toContain('shop.example');
+    fireEvent.click(screen.getByRole('button', { name: 'End' }));
+    expect(await screen.findByText('Nothing is open.')).toBeTruthy();
+    expect(panel().textContent).not.toContain('58 min left');
+    expect(retry).toHaveBeenCalled();
+    expect(calls.filter((call) => call.method === 'GET' && call.path === '/leases').length).toBe(2);
+  });
+
   it('shows the message when the opening has already ended', async () => {
     const detail = 'This access has already ended';
     mockApi({
