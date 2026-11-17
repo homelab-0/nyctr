@@ -239,6 +239,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             <li>nobody said no to it before</li>
             <li>it is opened for {threats.max_minutes} minutes at most</li>
           </ul>
+          <p className="aside">{MODE_MEANS[threats.mode]}</p>
         </section>
         <h3>Always come to you</h3>
         <div className="rows boxed">

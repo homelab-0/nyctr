@@ -289,6 +289,8 @@ describe('a request that is being checked', () => {
     });
     render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
     await paint();
+    expect(screen.getByText('Nyctr is still checking this request.')).toBeTruthy();
+    expect(screen.queryByText('Nyctr has no record of a change at the source.')).toBeNull();
     expect(screen.queryByText('Changed at the source and checked.')).toBeNull();
     const before = times(calls, '/leases');
     done = true;

@@ -338,6 +338,10 @@ def source_removed(db: Session, lease: Lease) -> bool:
 ENDING_HOLD = timedelta(minutes=5)
 # How long the analysis job's claim is honoured. A later start may take a claim older than this.
 ANALYSIS_HOLD = timedelta(minutes=2)
+# How often a running check stamps that claim again. Shorter than the hold, so a check that is still
+# waiting for a model slot, or still opening, does not look idle to another process. The hold stays
+# two minutes: a check that has stopped is taken over only after that, counted from its last stamp.
+CLAIM_PULSE = 30.0
 # A pass that leaves a request it could already claim tries again after this pause.
 RECOVERY_RETRY = 1.0
 # How long an opening waits for an ending or another opening of the same address before it is refused.
@@ -884,13 +888,34 @@ def _analysis_free(row: AccessRequest, now: datetime, restart_of: str | None,
                 and row.analysis_holder != restart_of)
 
 
+# The task that is between claiming a request and storing its decision, in this process only.
+# Another process cannot see it. What that process sees is the claim's stamp, refreshed while the
+# task is alive. A task that has finished is forgotten here, and the stamp then ages as before.
+_LIVE: dict[str, asyncio.Task] = {}
+
+
+def _attempt_running(request_id: str) -> bool:
+    """Whether some other task in this process is already checking this request."""
+    owner = _LIVE.get(request_id)
+    if owner is None:
+        return False
+    if owner.done():
+        _LIVE.pop(request_id, None)
+        return False
+    return owner is not asyncio.current_task()
+
+
 def claim_analysis(db: Session, request_id: str, holder: str, *, restart_of: str | None = None,
                    previous: str | None = None, now: datetime | None = None) -> bool:
     """Claim the analysis job, after locking and reading the row again. The caller commits.
 
     False leaves the transaction rolled back. A second writer stopped on the lock reads what this
-    one stored and finds the claim taken.
+    one stored and finds the claim taken. A check this process is already running is not taken,
+    even when its stored stamp is older than the hold: that stamp can age while the check waits.
     """
+    if _attempt_running(request_id):
+        db.rollback()
+        return False
     now = now or utcnow()
     if not _lock_request(db, request_id):
         db.rollback()
@@ -901,6 +926,26 @@ def claim_analysis(db: Session, request_id: str, holder: str, *, restart_of: str
         db.rollback()
         return False
     row.analysis_holder, row.analysis_claimed_at = holder, now
+    db.flush()
+    return True
+
+
+def renew_analysis(db: Session, request_id: str, holder: str, *, now: datetime | None = None) -> bool:
+    """Move this holder's claim stamp forward while the request is still being analysed.
+
+    The caller commits. False rolls this transaction back and leaves the stamp as it was. A holder
+    that has lost the row, or a request that is no longer being analysed, is not stamped.
+    """
+    now = now or utcnow()
+    if not _lock_request(db, request_id):
+        db.rollback()
+        return False
+    row = db.get(AccessRequest, request_id)
+    db.refresh(row)
+    if row.status != "analysing" or row.analysis_holder != holder:
+        db.rollback()
+        return False
+    row.analysis_claimed_at = now
     db.flush()
     return True
 
@@ -946,6 +991,57 @@ def keep_decision(db: Session, request_id: str, holder: str | None, **values) ->
     return True
 
 
+async def _pulse_claim(factory, request_id: str, holder: str, stop: asyncio.Event) -> None:
+    """Stamp a running check's claim until it stops. The first wait is the full pause.
+
+    A check that fails at once must not look as if it had just been stamped. One missed stamp is
+    logged and the loop continues: the check itself is not abandoned because a stamp could not be stored.
+    """
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=CLAIM_PULSE)
+            return
+        except TimeoutError:
+            pass
+        try:
+            with factory() as db:
+                if not renew_analysis(db, request_id, holder):
+                    return
+                db.commit()
+        except Exception as error:  # noqa: BLE001 - a missed stamp must not abandon the check
+            log.warning("Refreshing an analysis claim failed: %s", type(error).__name__)
+
+
+async def _end_pulse(pulse: asyncio.Task | None, stop: asyncio.Event) -> None:
+    """Stop the stamp and wait for it. A cancelled check raises again after that wait.
+
+    The wait has to finish even when this task is already being cancelled, or the stamp task would
+    still be running when the process stops. Raising afterwards stops this pass from claiming the
+    next request on its way out.
+    """
+    current = asyncio.current_task()
+    shielded = 0
+    if current is not None:
+        while current.cancelling():
+            current.uncancel()
+            shielded += 1
+    if pulse is not None:
+        stop.set()
+        try:
+            await pulse
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:  # noqa: BLE001 - the check's own outcome is already decided
+            log.warning("Refreshing an analysis claim failed: %s", type(error).__name__)
+    pending = current.cancelling() if current is not None else 0
+    if not shielded and not pending:
+        return
+    if current is not None:
+        for _ in range(shielded):
+            current.cancel()
+    raise asyncio.CancelledError
+
+
 def _drop_unlinked(factory, analysis_id: str) -> None:
     """Delete an analysis no request points at. One a winner stored is left alone."""
     with factory() as db:
@@ -963,48 +1059,74 @@ async def finish_one(factory, settings: Settings, request_id: str, holder: str, 
 
     The model call holds no transaction. It also waits for the same in-flight limit the explicit
     analysis endpoint uses, so two checks are not both inside a model call when that limit is one.
+    The wait sits outside the analysis. This attempt is remembered in this process from the claim
+    until the decision, so a later pass here does not start a second one. Once a model slot is
+    free, the claim's stamp is moved forward, and it is moved again every half minute while the
+    check continues, so another process still sees a fresh claim. A claim that is actually idle
+    can still be taken after two minutes, and a fresh claim held by someone else is still left alone.
     If the claim is lost after the analysis is stored, that analysis is kept only when a request
     points at it. An unexpected failure leaves the claim: the two-minute takeover, or this
     process's own previous start, finishes the request once. Clearing it at once would let the
     next tick open the address again while the failed attempt's record is still being put right.
     """
     from . import assistant, block_analysis
+    if _attempt_running(request_id):
+        return
+    current = asyncio.current_task()
+    if current is not None:
+        _LIVE[request_id] = current
+    stop, pulse = asyncio.Event(), None
     try:
-        with factory() as db:
-            if not claim_analysis(db, request_id, holder, restart_of=restart_of, previous=previous):
-                return
-            db.commit()
-            row = db.get(AccessRequest, request_id)
-            domain, block_id, already = row.domain, row.block_id, row.analysis_id
-        if not already:
-            async with assistant.model_turn():
-                with factory() as db:
-                    made = await block_analysis.analyse(db, domain, block_id, settings=settings)
+        try:
             with factory() as db:
-                if not keep_analysis(db, request_id, holder, made.id):
-                    _drop_unlinked(factory, made.id)
+                if not claim_analysis(db, request_id, holder, restart_of=restart_of, previous=previous):
                     return
                 db.commit()
-        with factory() as db:
-            row = db.get(AccessRequest, request_id)
-            if row is None or row.status != "analysing" or row.analysis_holder != holder:
-                return
-            observation = db.get(Observation, row.block_id)
-            if observation is not None and utc(observation.expires_at) <= utcnow():
-                observation = None
-            stored = db.get(Analysis, row.analysis_id) if row.analysis_id else None
-            if observation is None:
-                if keep_decision(db, request_id, holder, status="pending", decision_note=(
-                        "The blocked lookup behind this request is no longer current, so a person decides.")):
-                    from . import notices
-                    notices.waiting(db, settings, row)
+                row = db.get(AccessRequest, request_id)
+                domain, block_id, already = row.domain, row.block_id, row.analysis_id
+            pulse = asyncio.create_task(_pulse_claim(factory, request_id, holder, stop))
+            if not already:
+                async with assistant.model_turn():
+                    # The queue can be longer than the hold. Stamp before the check, while this slot is held.
+                    with factory() as db:
+                        if not renew_analysis(db, request_id, holder):
+                            return
+                        db.commit()
+                    with factory() as db:
+                        made = await block_analysis.analyse(db, domain, block_id, settings=settings)
+                with factory() as db:
+                    if not keep_analysis(db, request_id, holder, made.id):
+                        _drop_unlinked(factory, made.id)
+                        return
                     db.commit()
-                return
-            await decide(db, settings, row, observation, analysis=stored, holder=holder)
-            db.commit()
-    except Exception as error:  # noqa: BLE001 - logged by type; the claim stays until it is taken over
-        log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
-        raise
+            with factory() as db:
+                if not renew_analysis(db, request_id, holder):
+                    return
+                db.commit()
+            with factory() as db:
+                row = db.get(AccessRequest, request_id)
+                if row is None or row.status != "analysing" or row.analysis_holder != holder:
+                    return
+                observation = db.get(Observation, row.block_id)
+                if observation is not None and utc(observation.expires_at) <= utcnow():
+                    observation = None
+                stored = db.get(Analysis, row.analysis_id) if row.analysis_id else None
+                if observation is None:
+                    if keep_decision(db, request_id, holder, status="pending", decision_note=(
+                            "The blocked lookup behind this request is no longer current, so a person decides.")):
+                        from . import notices
+                        notices.waiting(db, settings, row)
+                        db.commit()
+                    return
+                await decide(db, settings, row, observation, analysis=stored, holder=holder)
+                db.commit()
+        except Exception as error:  # noqa: BLE001 - logged by type; the claim stays until it is taken over
+            log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+            raise
+    finally:
+        if current is not None and _LIVE.get(request_id) is current:
+            _LIVE.pop(request_id, None)
+        await _end_pulse(pulse, stop)
 
 
 async def finish_due(factory, settings: Settings, *, restart_of: str | None = None,

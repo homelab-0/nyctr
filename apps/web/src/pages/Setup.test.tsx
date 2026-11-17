@@ -132,7 +132,7 @@ describe('access rule in Setup', () => {
   const tier = async (name: string) => within(await screen.findByRole('region', { name }));
 
   it('says which kinds of block can open by themselves and which always come to the administrator', async () => {
-    openRule();
+    const { user } = openRule();
     const ads = await tier('Advertising and tracker lists');
     const pressed = ads.getAllByRole('button', { pressed: true });
     expect(pressed.map((button) => button.textContent)).toEqual(['On']);
@@ -149,6 +149,9 @@ describe('access rule in Setup', () => {
       'nobody said no to it before',
       'it is opened for 30 minutes at most',
     ]);
+    expect(threats.getByText(/Off: these requests wait for you/)).toBeDefined();
+    await user.click(threats.getByRole('button', { name: 'Record only' }));
+    expect(await threats.findByText(/Record only: Nyctr opens nothing/)).toBeDefined();
     // The kinds that never open are listed with why, and nothing there can be pressed.
     const never = document.querySelector<HTMLElement>('.rows.boxed')!;
     expect([...never.querySelectorAll('.t')].map((kind) => kind.textContent)).toEqual([

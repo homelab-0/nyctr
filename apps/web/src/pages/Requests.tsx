@@ -137,7 +137,7 @@ export default function Requests({
   // never says whether anything was opened.
   const lease = (leases.data || []).find((item) => item.request_id === row?.id);
   const happened =
-    !row || row.status === 'pending'
+    !row || row.status === 'pending' || row.status === 'analysing'
       ? ''
       : lease
         ? `${atSource(lease)}${lease.status === 'ended' ? ' It has ended since.' : ''}`
