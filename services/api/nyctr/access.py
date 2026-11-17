@@ -987,6 +987,8 @@ async def finish_one(factory, settings: Settings, request_id: str, holder: str, 
             if observation is None:
                 if keep_decision(db, request_id, holder, status="pending", decision_note=(
                         "The blocked lookup behind this request is no longer current, so a person decides.")):
+                    from . import notices
+                    notices.waiting(db, settings, row)
                     db.commit()
                 return
             await decide(db, settings, row, observation, analysis=stored, holder=holder)

@@ -564,3 +564,47 @@ def test_the_guardrail_is_written_in_the_two_places_the_amendment_names():
         collapsed = " ".join((ROOT / name).read_text().split())
         for sentence in SENTENCES:
             assert sentence in collapsed, name
+
+
+GONE = "The blocked lookup behind this request is no longer current, so a person decides."
+
+
+@BOTH
+def test_a_lookup_removed_during_the_check_still_records_one_notice(
+        tmp_path, database, request, monkeypatch):
+    """A lookup removed while the check runs leaves the request waiting, with one notice in that decision.
+
+    The request is accepted while the lookup is still there. Another session then deletes it and commits.
+    A second finish does not record another notice.
+    """
+    url = database_url(database, tmp_path, request)
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        with session_factory(db.get_bind())() as other:
+            gone = other.get(Observation, block_id)
+            assert gone is not None
+            other.delete(gone)
+            other.commit()
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path, url)
+    try:
+        with TestClient(app) as client:
+            member = signin(client, member=True)
+            response = client.post("/api/requests", headers=member, json={
+                "block_id": "block-gallery", "reason": "Need the gallery", "duration_minutes": 60})
+            assert response.status_code == 201 and response.json()["status"] == "analysing"
+            request_id = response.json()["id"]
+            with app.state.session_factory() as db:
+                row = db.get(AccessRequest, request_id)
+                assert row.status == "pending" and row.decision_note == GONE
+                assert db.get(Observation, "block-gallery") is None
+                one_notice(db, request_id, opened=False)
+            asyncio.run(access.finish_one(
+                app.state.session_factory, app.state.settings, request_id, holder_id(app.state.engine)))
+            with app.state.session_factory() as db:
+                assert len(db.scalars(select(Notice)).all()) == 1
+                one_notice(db, request_id, opened=False)
+    finally:
+        app.state.engine.dispose()
