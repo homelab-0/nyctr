@@ -154,8 +154,11 @@ holds a risk word beside it. The model's raw reply is not stored.
 
 The model holds no credentials and cannot edit a rule. The only thing a later
 rule can read from a stored verdict is whether a valid answer is present, the
-verdict and the risk. A risk score alone never opens access, and nothing the
-model returns can change a rule or cut a device off.
+verdict and the risk. A risk score alone never opens access. A model's Analysis
+may be one condition of the Administrator's Access rule, in the tiers the
+Administrator switched on; by itself it opens nothing. No model output edits a
+rule, cuts a device off, lengthens or widens access, or opens a deliberate
+Block.
 
 The request's `user` field is never sent. The proxy still sees
 the request itself, which holds the redacted evidence pack and the
