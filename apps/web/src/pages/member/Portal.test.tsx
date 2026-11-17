@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App';
@@ -1603,5 +1603,51 @@ describe('an answer while the member page stays open', () => {
     await advance(60_000);
     expect(reads(calls, '/requests')).toBe(before);
     expect(reads(calls, '/leases')).toBe(before);
+  });
+
+  it('reads the openings after a submission whose first list is already a yes', async () => {
+    clock();
+    let submitted = false;
+    let leaseReads = 0;
+    let resolveRequests: (rows: AccessRequest[]) => void = () => {};
+    const deferredRequests = new Promise<AccessRequest[]>((resolve) => {
+      resolveRequests = resolve;
+    });
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /requests': () => (submitted ? deferredRequests : []),
+        'GET /leases': () => {
+          leaseReads += 1;
+          // The first two reads are the page opening and the read that races the decision.
+          return leaseReads <= 2 ? [] : [lease()];
+        },
+        'POST /requests': () => {
+          submitted = true;
+          return request({ status: 'analysing', decided_by: null });
+        },
+      },
+      '/portal?block=b1',
+    );
+    await paint();
+    fireEvent.change(screen.getByLabelText('What do you need it for?'), {
+      target: { value: 'Fabricated wedding photos' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask to open it' }));
+    await paint();
+    expect(leaseReads).toBe(2);
+    await act(async () => {
+      resolveRequests([request({})]);
+    });
+    await paint();
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    await advance(60_000);
+    await paint();
+    // A read started after the yes must replace the empty list from before the decision.
+    expect(reads(calls, '/leases')).toBeGreaterThan(2);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
   });
 });
