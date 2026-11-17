@@ -159,6 +159,22 @@ describe('briefing: sources that need a look', () => {
     expect(row.textContent).toContain('cannot be read by this version');
   });
 
+  it('sends a notice that was not delivered to Setup', async () => {
+    await open([source('complete', 'connected')], scheduleFixture(), [
+      {
+        kind: 'notice',
+        id: 'n1',
+        severity: 'medium',
+        at: null,
+        title: 'Sam is waiting on example.com',
+        detail: 'Nyctr tried five times and could not deliver this notice.',
+      },
+    ]);
+    const row = screen.getByText('Sam is waiting on example.com').closest('a')!;
+    expect(row.getAttribute('href')).toBe('#/setup?tab=system');
+    expect(row.textContent).toContain('Notice');
+  });
+
   it('says nothing needs you only when the list is empty', async () => {
     await open([source('complete', 'connected')]);
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
