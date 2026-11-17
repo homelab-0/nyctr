@@ -95,4 +95,95 @@ describe('the Notices card in Setup', () => {
     expect(item.querySelector('time')?.getAttribute('dateTime')).toBe('2026-11-16T12:00:00Z');
     expect(screen.getByText('The last few sends')).toBeDefined();
   });
+
+  it('keeps an address typed while a test is still sending', async () => {
+    let release: (value: unknown) => void = () => {};
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    const current = { ...empty, target: 'https://hooks.example' };
+    mockApi({
+      'GET /notices': () => current,
+      'POST /notices/test': () => pending,
+    });
+    const user = userEvent.setup();
+    render(<NoticesPanel />);
+    const address = await screen.findByLabelText(/^Address/);
+    await waitFor(() => expect((address as HTMLInputElement).value).toBe('https://hooks.example'));
+    const test = screen.getByRole('button', { name: 'Test' });
+    await waitFor(() => expect((test as HTMLButtonElement).disabled).toBe(false));
+    await user.click(test);
+    await user.type(address, '/more');
+    await user.type(screen.getByLabelText(/^Name of the secret/), 'NYCTR_NOTICE_SECRET_LATER');
+    release({
+      ...current,
+      recent: [{ id: 'n1', kind: 'test', state: 'sent', words: 'Sent.' }],
+    });
+    expect(await screen.findByRole('status')).toBeDefined();
+    expect((screen.getByLabelText(/^Address/) as HTMLInputElement).value).toBe(
+      'https://hooks.example/more',
+    );
+    expect((screen.getByLabelText(/^Name of the secret/) as HTMLInputElement).value).toBe(
+      'NYCTR_NOTICE_SECRET_LATER',
+    );
+  });
+
+  it('reads the test when a newer send of another kind is first', async () => {
+    const current = { ...empty, target: 'https://hooks.example' };
+    mockApi({
+      'GET /notices': () => current,
+      'POST /notices/test': () => ({
+        ...current,
+        recent: [
+          {
+            id: 'stuck',
+            kind: 'lease_stuck',
+            state: 'sent',
+            at: '2026-11-16T12:05:00Z',
+            words: 'Sent.',
+          },
+          {
+            id: 'n1',
+            kind: 'test',
+            state: 'gave_up',
+            at: '2026-11-16T12:00:00Z',
+            words: 'The server refused the notice, so Nyctr will not try again.',
+          },
+        ],
+      }),
+    });
+    const user = userEvent.setup();
+    render(<NoticesPanel />);
+    const test = await screen.findByRole('button', { name: 'Test' });
+    await waitFor(() => expect((test as HTMLButtonElement).disabled).toBe(false));
+    await user.click(test);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('refused the notice');
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('says when the test is missing from the last few sends', async () => {
+    const current = { ...empty, target: 'https://hooks.example' };
+    mockApi({
+      'GET /notices': () => current,
+      'POST /notices/test': () => ({
+        ...current,
+        recent: [
+          {
+            id: 'stuck',
+            kind: 'lease_stuck',
+            state: 'sent',
+            words: 'Sent.',
+          },
+        ],
+      }),
+    });
+    const user = userEvent.setup();
+    render(<NoticesPanel />);
+    const test = await screen.findByRole('button', { name: 'Test' });
+    await waitFor(() => expect((test as HTMLButtonElement).disabled).toBe(false));
+    await user.click(test);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('The test is not among the last few sends.');
+  });
 });

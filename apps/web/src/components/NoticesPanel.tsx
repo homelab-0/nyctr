@@ -42,11 +42,12 @@ export function NoticesPanel() {
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const now = saved ?? read.data;
+  // The first read fills the form. A later save or test must not replace a draft typed since it began.
   useEffect(() => {
-    if (!now) return;
-    setTarget(now.target);
-    setSecretRef(now.secret_ref);
-  }, [now]);
+    if (!read.data) return;
+    setTarget(read.data.target);
+    setSecretRef(read.data.secret_ref);
+  }, [read.data]);
   if (!now)
     return read.error ? (
       <ErrorState message={read.error} retry={read.reload} />
@@ -58,18 +59,26 @@ export function NoticesPanel() {
     ? `Whoever runs this server allows notices to ${now.hosts.join(', ')}.`
     : 'Only a public HTTPS address. Whoever runs this server can list another in NYCTR_NOTICE_HOSTS.';
   const run = async (kind: 'save' | 'test') => {
+    const sentTarget = target;
+    const sentSecret = secretRef;
     setBusy(kind);
     setError(null);
     setNote(null);
+    const keepDraft = (next: Notices) => {
+      setSaved(next);
+      setTarget((current) => (current === sentTarget ? next.target : current));
+      setSecretRef((current) => (current === sentSecret ? next.secret_ref : current));
+    };
     try {
       if (kind === 'test') {
         const next = await post<Notices>('/notices/test');
-        setSaved(next);
-        const latest = next.recent[0];
-        if (latest && latest.state !== 'sent') setError(latest.words);
-        else setNote(latest?.words ?? 'Sent.');
+        keepDraft(next);
+        const latest = next.recent.find((item) => item.kind === 'test');
+        if (!latest) setError('The test is not among the last few sends.');
+        else if (latest.state !== 'sent') setError(latest.words);
+        else setNote(latest.words);
       } else {
-        setSaved(await put<Notices>('/notices', { target, secret_ref: secretRef }));
+        keepDraft(await put<Notices>('/notices', { target, secret_ref: secretRef }));
         setNote('Saved.');
       }
     } catch (caught) {
