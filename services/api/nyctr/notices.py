@@ -136,15 +136,19 @@ def verify(secret: str, body: bytes, header: str) -> bool:
     return hmac.compare_digest(expected, header)
 
 
+# Written by Nyctr, not by a person. The time of day inside `at` matches an address pattern.
+_KEPT = frozenset({"link", "id", "at", "kind", "nyctr"})
+
+
 def _scrub(payload: dict, secret: str) -> dict:
-    """Scrub every string except the console link, which is the address the operator published."""
+    """Scrub text a person wrote. A time, an id, the kind, the version and the console link stay."""
     def walk(value: object, keep: bool) -> object:
         if isinstance(value, str):
             return value if keep else _clip(value, secret)
         if isinstance(value, list):
             return [walk(item, False) for item in value]
         if isinstance(value, dict):
-            return {key: walk(item, key == "link") for key, item in value.items()}
+            return {key: walk(item, key in _KEPT) for key, item in value.items()}
         return value
     walked = walk(payload, False)
     return walked if isinstance(walked, dict) else {}
@@ -336,6 +340,20 @@ def _budget(deadline: float) -> float:
     return left
 
 
+def _interrupt(sock: socket.socket | None) -> None:
+    """Stop a read that `close` cannot stop, because the reply's file still holds the socket."""
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 def _drain(response: Any, sock: socket.socket, deadline: float) -> None:
     """Read at most 64KiB, and stop at the deadline even when bytes are still arriving."""
     left = 65536
@@ -398,7 +416,8 @@ def _post(plan: Plan, body: bytes, headers: dict[str, str], deadline: float | No
 def _exchange(target: str, settings: Settings, body: bytes, headers: dict[str, str]) -> int:
     """Look up the name, connect and read the reply inside one deadline of TIMEOUT seconds.
 
-    A lookup that never returns is left behind. This stops waiting and the notice is tried again.
+    A lookup that never returns is left behind. A reply that is still arriving is cut off,
+    and that read ends before this returns, so the next try does not overlap it.
     """
     holder: dict[str, Any] = {}
     deadline = time.monotonic() + TIMEOUT
@@ -415,12 +434,9 @@ def _exchange(target: str, settings: Settings, body: bytes, headers: dict[str, s
     worker.join(max(0.0, deadline - time.monotonic()))
     if worker.is_alive():
         sock = holder.get("sock")
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
-        worker.join(2)
+        _interrupt(sock)
+        # No socket yet means the lookup has not connected. Leave that thread behind.
+        worker.join(5 if sock is not None else 2)
     if "status" in holder:
         return int(holder["status"])
     error = holder.get("error")
@@ -608,32 +624,69 @@ def _release_stale(factory, now: datetime) -> None:
         db.commit()
 
 
-def _claim(factory, now: datetime, only: frozenset[str] | None) -> list[str]:
-    """Take each due notice with one conditional update. Nothing is remembered until that update commits."""
-    claimed: list[str] = []
+def _due_ids(factory, now: datetime, only: frozenset[str] | None, skip: frozenset[str]) -> list[str]:
+    """Ids that looked due. The claim update checks the schedule again, so this list can be stale."""
     with factory() as db:
-        rows = db.execute(select(Notice.id, Notice.next_try_at).where(Notice.state == "due")).all()
-        due = [row.id for row in rows if utc(row.next_try_at) <= now and (only is None or row.id in only)]
-        for notice_id in due:
-            changed = db.execute(update(Notice).where(Notice.id == notice_id, Notice.state == "due")
-                                 .values(state="sending", claimed_by=uid(), claimed_at=now)).rowcount
-            if changed == 1:
-                claimed.append(notice_id)
-        if not claimed:
-            db.rollback()
-            return []
-        db.flush()
-        _pause("claiming")
-        db.commit()
-    return claimed
+        rows = db.execute(select(Notice.id, Notice.next_try_at).where(Notice.state == "due")
+                          .order_by(Notice.created_at, Notice.id)).all()
+        due = [row.id for row in rows if row.id not in skip and utc(row.next_try_at) <= now
+               and (only is None or row.id in only)]
+        db.rollback()
+        return due
 
 
-def _finish(factory, notice_id: str, outcome: str, status: int | None, clock: Callable[[], datetime]) -> str:
+def _claim(factory, now: datetime, only: frozenset[str] | None,
+           skip: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
+    """Take one due notice. The update itself requires that it is still due at `now`.
+
+    Nothing is remembered until that update commits. `now` is the same value stored on the claim.
+    """
+    for notice_id in _due_ids(factory, now, only, skip):
+        _pause("picking")
+        token = uid()
+        with factory() as db:
+            changed = db.execute(update(Notice).where(Notice.id == notice_id, Notice.state == "due",
+                                                      Notice.next_try_at <= now)
+                                 .values(state="sending", claimed_by=token, claimed_at=now)).rowcount
+            if changed != 1:
+                db.rollback()
+                continue
+            db.flush()
+            _pause("claiming")
+            db.commit()
+            return [(notice_id, token)]
+    return []
+
+
+def _owns(factory, notice_id: str, token: str) -> bool:
+    """True when this copy still holds the claim. A row lock is not enough."""
+    with factory() as db:
+        found = db.execute(select(Notice.state, Notice.claimed_by).where(Notice.id == notice_id)).first()
+        db.rollback()
+    return found is not None and found.state == "sending" and found.claimed_by == token
+
+
+def _left(factory, notice_id: str) -> str:
+    """The row's state, unchanged. Used when this copy no longer holds the claim."""
+    with factory() as db:
+        notice = db.get(Notice, notice_id)
+        state = notice.state if notice is not None else "missing"
+        db.rollback()
+        return state
+
+
+def _finish(factory, notice_id: str, outcome: str, status: int | None, clock: Callable[[], datetime],
+            token: str) -> str:
+    """Record the outcome only while this copy's claim is the one on the row."""
     now = utc(clock())
     with factory() as db:
         notice = db.scalar(select(Notice).where(Notice.id == notice_id).with_for_update())
         if notice is None:
             return "missing"
+        if notice.state != "sending" or notice.claimed_by != token:
+            state = notice.state
+            db.rollback()
+            return state
         notice.claimed_by = None
         notice.claimed_at = None
         if outcome == "sent":
@@ -655,7 +708,7 @@ def _finish(factory, notice_id: str, outcome: str, status: int | None, clock: Ca
         return notice.state
 
 
-def _send(factory, settings: Settings, notice_id: str, clock: Callable[[], datetime]) -> str:
+def _send(factory, settings: Settings, notice_id: str, clock: Callable[[], datetime], token: str) -> str:
     with factory() as db:
         notice = db.get(Notice, notice_id)
         if notice is None:
@@ -672,24 +725,26 @@ def _send(factory, settings: Settings, notice_id: str, clock: Callable[[], datet
         target = saved.target
     _pause("checked")
     if not target or problem:
-        return _finish(factory, notice_id, "restore", None, clock)
+        return _finish(factory, notice_id, "restore", None, clock, token)
     headers = {"Content-Type": "application/json", "X-Nyctr-Notice-Id": notice_id}
     if secret:
         headers["X-Nyctr-Signature"] = signature(secret, body, int(utc(clock()).timestamp()))
     _pause("sending")
+    if not _owns(factory, notice_id, token):
+        return _left(factory, notice_id)
     try:
         status = _exchange(target, settings, body, headers)
     except Unreachable:
-        return _finish(factory, notice_id, "retry", None, clock)
+        return _finish(factory, notice_id, "retry", None, clock, token)
     except Refused:
-        return _finish(factory, notice_id, "give_up", None, clock)
+        return _finish(factory, notice_id, "give_up", None, clock, token)
     except Exception:
-        return _finish(factory, notice_id, "retry", None, clock)
+        return _finish(factory, notice_id, "retry", None, clock, token)
     if 200 <= status < 300:
-        return _finish(factory, notice_id, "sent", status, clock)
+        return _finish(factory, notice_id, "sent", status, clock, token)
     if status in (408, 429) or status >= 500:
-        return _finish(factory, notice_id, "retry", status, clock)
-    return _finish(factory, notice_id, "give_up", status, clock)
+        return _finish(factory, notice_id, "retry", status, clock, token)
+    return _finish(factory, notice_id, "give_up", status, clock, token)
 
 
 def deliver_due(factory, settings: Settings, clock: Callable[[], datetime] | None = None,
@@ -697,22 +752,27 @@ def deliver_due(factory, settings: Settings, clock: Callable[[], datetime] | Non
     """Send every notice that is due. The network call happens with no database session open.
 
     A claim older than one minute is sent once. A claim another copy still holds
-    is not sent. With no address, or with a secret name that cannot be used,
-    nothing is claimed and no try is spent.
+    is not sent. Each notice is claimed immediately before its own send, so a slow
+    send does not let the later claims lapse. With no address, or with a secret
+    name that cannot be used, nothing is claimed and no try is spent.
     """
     clock = clock or utcnow
-    now = utc(clock())
-    _release_stale(factory, now)
+    _release_stale(factory, utc(clock()))
     with factory() as db:
         saved, problem = _load(db)
         db.rollback()
     if not saved.target or problem:
         return []
-    claimed = _claim(factory, now, only)
-    if not claimed:
-        return []
-    _pause("claimed")
-    return [_send(factory, settings, notice_id, clock) for notice_id in claimed]
+    outcomes: list[str] = []
+    done: set[str] = set()
+    while True:
+        claimed = _claim(factory, utc(clock()), only, frozenset(done))
+        if not claimed:
+            return outcomes
+        notice_id, token = claimed[0]
+        done.add(notice_id)
+        _pause("claimed")
+        outcomes.append(_send(factory, settings, notice_id, clock, token))
 
 
 @router.get("/notices")

@@ -24,7 +24,7 @@ from test_collection_store import POSTGRES, postgres_database
 from nyctr import access, assistant, notices, worker
 from nyctr.config import Settings
 from nyctr.database import make_engine, migrate, session_factory
-from nyctr.models import Lease, Notice, utcnow
+from nyctr.models import Lease, Notice, utc, utcnow
 
 SECRET = "notice-secret-VALUE-99"
 ASK = {"block_id": "dns:block:one", "reason": "Please allow this", "duration_minutes": 30}
@@ -49,6 +49,19 @@ class _Receiver(BaseHTTPRequestHandler):
         if raw is not None:
             self.connection.sendall(raw)
             self.close_connection = True
+            return
+        if getattr(self.server, "trickle_head", False):
+            blob = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+            for piece in blob:
+                end = time.monotonic() + 0.4
+                while time.monotonic() < end:
+                    if getattr(self.server, "stop", False):
+                        return
+                    time.sleep(0.05)
+                try:
+                    self.connection.sendall(bytes([piece]))
+                except OSError:
+                    return
             return
         if getattr(self.server, "trickle", False):
             self.send_response(200)
@@ -84,7 +97,8 @@ class _Receiver(BaseHTTPRequestHandler):
 def _serve(codes, location="http://127.0.0.1:9/nowhere"):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Receiver)
     server.codes, server.hits, server.location, server.touch = list(codes), [], location, None
-    server.raw, server.trickle, server.finished, server.stop = None, False, False, False
+    server.raw, server.trickle, server.trickle_head = None, False, False
+    server.finished, server.stop = False, False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -646,8 +660,8 @@ def test_a_send_does_not_hold_the_database_across_the_call(tmp_path, request, en
         server.touch = lambda: _touch(engine, notice_id)
         notices.pause = mark
         assert notices.deliver_due(factory, settings) == ["sent"]
-        assert seen == {"claiming": "locked", "claimed": "free", "checked": "free", "sending": "free",
-                        "writing": "locked"}
+        assert seen == {"picking": "free", "claiming": "locked", "claimed": "free", "checked": "free",
+                        "sending": "free", "writing": "locked"}
         assert server.hits[0]["touch"] == "ok"
     finally:
         notices.pause = None
@@ -908,3 +922,170 @@ def test_the_path_is_sent_but_only_the_server_is_shown(tmp_path, monkeypatch):
             assert audits and hidden not in shown and origin in shown
     finally:
         _close(server)
+
+
+def test_the_sent_time_is_left_as_it_was_written(tmp_path):
+    """The generated timestamp is sent whole. The same time of day in a title is still removed."""
+    server = _serve([204])
+    try:
+        origin = f"http://127.0.0.1:{server.server_address[1]}"
+        _done, factory = _engine(tmp_path)
+        settings = _settings(origin)
+        stamp = "2026-11-16T12:00:00+00:00"
+        start = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+        payload = _tiny("n-stamp")
+        payload["at"] = stamp
+        payload["title"] = stamp
+        with factory() as db:
+            notices.save(db, settings, notices.PutBody(target=f"{origin}/hook"))
+            db.add(Notice(id="n-stamp", kind="test", subject="n-stamp", state="due", attempts=0,
+                          next_try_at=start, created_at=start, payload=payload))
+            db.commit()
+        assert notices.deliver_due(factory, settings) == ["sent"]
+        body = json.loads(server.hits[0]["body"])
+        assert body["at"] == stamp
+        assert stamp not in body["title"] and "[removed]" in body["title"]
+    finally:
+        _close(server)
+
+
+def test_a_trickled_status_line_ends_the_read(tmp_path, monkeypatch):
+    """An unfinished status line does not leave the send thread running, and the try is spent."""
+    server = _serve([])
+    server.trickle_head = True
+    monkeypatch.setattr(notices, "TIMEOUT", 1)
+    try:
+        origin = f"http://127.0.0.1:{server.server_address[1]}"
+        _done, factory = _engine(tmp_path)
+        settings = _settings(origin)
+        notice_id = _arm(factory, settings, origin)
+        before = {thread.ident for thread in threading.enumerate()}
+        started = time.monotonic()
+        assert notices.deliver_due(factory, settings) == ["due"]
+        assert time.monotonic() - started < 8
+        deadline = time.monotonic() + 2
+        stuck = [thread for thread in threading.enumerate() if thread.ident not in before and thread.is_alive()]
+        while stuck and time.monotonic() < deadline:
+            time.sleep(0.05)
+            stuck = [thread for thread in threading.enumerate() if thread.ident not in before and thread.is_alive()]
+        assert stuck == []
+        with factory() as db:
+            row = db.get(Notice, notice_id)
+            assert row.state == "due" and row.attempts == 1
+    finally:
+        _close(server)
+
+
+def _queue(factory, settings, origin, names, start):
+    with factory() as db:
+        notices.save(db, settings, notices.PutBody(target=f"{origin}/hook"))
+        for offset, name in enumerate(names):
+            when = start + timedelta(seconds=offset)
+            db.add(Notice(id=name, kind="test", subject=name, state="due", attempts=0, next_try_at=start,
+                          created_at=when, payload=_tiny(name)))
+        db.commit()
+
+
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
+def test_a_rescheduled_notice_is_not_sent_before_its_next_try(tmp_path, request, engine_kind):
+    """A row given a later try after it was read, and before it is claimed, waits."""
+    server = _serve([204])
+    url = _place(tmp_path, request, engine_kind, "later")
+    engine, factory = _engine(tmp_path, url)
+    start = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+    later = start + timedelta(minutes=5)
+    try:
+        origin = f"http://127.0.0.1:{server.server_address[1]}"
+        settings = _settings(origin)
+        _queue(factory, settings, origin, ("n-later",), start)
+
+        def hold(step):
+            if step != "picking" or getattr(hold, "ran", False):
+                return
+            hold.ran = True
+            with factory() as db:
+                row = db.get(Notice, "n-later")
+                row.next_try_at = later
+                db.commit()
+
+        notices.pause = hold
+        assert notices.deliver_due(factory, settings, lambda: start) == []
+        assert server.hits == []
+        with factory() as db:
+            row = db.get(Notice, "n-later")
+            assert row.state == "due" and utc(row.next_try_at) == later
+        notices.pause = None
+        assert notices.deliver_due(factory, settings, lambda: later) == ["sent"]
+        assert len(server.hits) == 1
+    finally:
+        notices.pause = None
+        _close(server)
+        engine.dispose()
+
+
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
+def test_a_late_failure_does_not_replace_a_notice_another_copy_sent(tmp_path, request, engine_kind):
+    """After the claim lapses, a failure from the first copy does not undo the send."""
+    server = _serve([204, 500])
+    url = _place(tmp_path, request, engine_kind, "late")
+    engine, factory = _engine(tmp_path, url)
+    start = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+    box, now = _clock(start)
+    try:
+        origin = f"http://127.0.0.1:{server.server_address[1]}"
+        settings = _settings(origin)
+        _queue(factory, settings, origin, ("n-late",), start)
+
+        def during():
+            if getattr(during, "ran", False):
+                return
+            during.ran = True
+            box[0] = start + timedelta(seconds=notices.CLAIM_TTL + 1)
+            assert notices.deliver_due(factory, settings, now) == ["sent"]
+
+        server.touch = during
+        assert notices.deliver_due(factory, settings, now) == ["sent"]
+        assert len(server.hits) == 2 and {hit["touch"] for hit in server.hits} == {"ok"}
+        with factory() as db:
+            row = db.get(Notice, "n-late")
+            assert row.state == "sent" and row.attempts == 0 and row.last_status == 204
+            assert row.claimed_by is None
+    finally:
+        notices.pause = None
+        _close(server)
+        engine.dispose()
+
+
+@pytest.mark.parametrize("engine_kind", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
+def test_a_slow_send_does_not_let_another_copy_send_the_queue_twice(tmp_path, request, engine_kind):
+    """Several notices are claimed one at a time. A slow first send does not send the others twice."""
+    server = _serve([204, 204, 204, 204, 204, 204])
+    url = _place(tmp_path, request, engine_kind, "queue")
+    engine, factory = _engine(tmp_path, url)
+    start = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+    box, now = _clock(start)
+    names = ("n-one", "n-two", "n-three")
+    try:
+        origin = f"http://127.0.0.1:{server.server_address[1]}"
+        settings = _settings(origin)
+        _queue(factory, settings, origin, names, start)
+
+        def hold(step):
+            if step != "sending" or getattr(hold, "ran", False):
+                return
+            hold.ran = True
+            box[0] = start + timedelta(seconds=notices.CLAIM_TTL + 1)
+            notices.deliver_due(factory, settings, now)
+
+        notices.pause = hold
+        assert notices.deliver_due(factory, settings, now) == ["sent"]
+        sent = [json.loads(hit["body"])["id"] for hit in server.hits]
+        assert sent == list(names)
+        with factory() as db:
+            for name in names:
+                row = db.get(Notice, name)
+                assert row.state == "sent" and row.attempts == 0
+    finally:
+        notices.pause = None
+        _close(server)
+        engine.dispose()
