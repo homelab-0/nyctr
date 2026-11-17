@@ -68,12 +68,16 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   // The rule the next save sends. A change updates it at once, so a second change is built on
   // the first even before the page paints again.
   const latest = useRef(rules.access);
+  // The last rule the server accepted. A failed save returns to this one. A success counts even
+  // when its read-back is ignored because another save is still queued.
+  const confirmed = useRef(rules.access);
   const tail = useRef(Promise.resolve());
   const pending = useRef(0);
   useEffect(() => {
     // A save that has not settled yet is newer than the rule just read back.
     if (pending.current > 0) return;
     latest.current = rules.access;
+    confirmed.current = rules.access;
     setRule(rules.access);
   }, [rules.access]);
   /** Sends the whole rule, one save at a time, from the latest rule on the page. */
@@ -87,12 +91,13 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
       const body = latest.current;
       try {
         await put('/rules/access', body);
+        confirmed.current = body;
         reload();
       } catch (e) {
         setError((e as Error).message);
         if (latest.current === body) {
-          latest.current = rules.access;
-          setRule(rules.access);
+          latest.current = confirmed.current;
+          setRule(confirmed.current);
         }
       } finally {
         pending.current -= 1;

@@ -62,13 +62,29 @@ export default function Requests({
     setError(null);
     if (row) setMinutes(Math.min(240, Math.max(15, row.duration_minutes)));
   }, [row?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The link's request is chosen when the address changes, or when that request first appears.
+  // A later read of the same address leaves the choice, and any note being written, as they are.
+  const appliedUrl = useRef<string | null>(null);
+  const urlId = params.get('id');
   useEffect(() => {
-    const wanted = all.find((item) => item.id === params.get('id'));
-    if (wanted) {
-      setSelected(wanted.id);
-      setTab(wanted.status === 'pending' || wanted.status === 'analysing' ? 'waiting' : 'decided');
+    if (!urlId) {
+      appliedUrl.current = null;
+      return;
     }
-  }, [requests.data, params]); // eslint-disable-line react-hooks/exhaustive-deps
+    const wanted = all.find((item) => item.id === urlId);
+    if (appliedUrl.current === urlId) {
+      if (wanted && selected === wanted.id) {
+        setTab(
+          wanted.status === 'pending' || wanted.status === 'analysing' ? 'waiting' : 'decided',
+        );
+      }
+      return;
+    }
+    if (!wanted) return;
+    appliedUrl.current = urlId;
+    setSelected(wanted.id);
+    setTab(wanted.status === 'pending' || wanted.status === 'analysing' ? 'waiting' : 'decided');
+  }, [requests.data, urlId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // On a narrow screen the request's panel sits under the list: bring it into view when one is chosen.
   const panel = useRef<HTMLElement>(null);
@@ -79,6 +95,18 @@ export default function Requests({
   // without a reload. Reading stops when none are left, and when this page is left.
   const checking = all.some((item) => item.status === 'analysing');
   useRefreshWhile(requests.data !== null && checking, () => requests.reload());
+  // The decision can open an address. Read the openings once that decision is on the list,
+  // so the page can say what happened at the source.
+  const checkingIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const now = new Set(all.filter((item) => item.status === 'analysing').map((item) => item.id));
+    const finished = [...checkingIds.current].some((id) => {
+      const item = all.find((entry) => entry.id === id);
+      return item !== undefined && item.status !== 'analysing';
+    });
+    checkingIds.current = now;
+    if (finished) leases.reload();
+  }, [requests.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Records the decision. Approval opens a lease; the server reports what really happened. */
   const decide = async (decision: 'approved' | 'denied') => {

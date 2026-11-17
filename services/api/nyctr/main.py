@@ -222,15 +222,25 @@ def create_app(settings: Settings | None = None):
             release_abandoned(db, restart_of=holder)
             db.commit()
         # Requests left analysing are finished in the background. A slow or failed check must not
-        # stop the API from serving. The request stays claimed until a later pass finishes it.
+        # stop the API from serving. A fresh claim is left alone until its hold ends, then tried
+        # again, including when the upkeep tick is off.
 
         async def recover() -> None:
-            try:
-                await access.finish_due(
-                    factory, settings, restart_of=holder, previous=previous_holder(engine))
-            except Exception as error:  # noqa: BLE001 - startup must serve even when recovery fails
-                logging.getLogger("nyctr").warning(
-                    "Finishing a request's analysis failed: %s", type(error).__name__)
+            log = logging.getLogger("nyctr")
+            while True:
+                try:
+                    await access.finish_due(
+                        factory, settings, restart_of=holder, previous=previous_holder(engine))
+                except Exception as error:  # noqa: BLE001 - startup must serve even when recovery fails
+                    log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+                try:
+                    delay = access.recovery_delay(factory)
+                except Exception as error:  # noqa: BLE001 - a failed read is tried again, not fatal
+                    log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+                    delay = access.RECOVERY_RETRY
+                if delay is None:
+                    return
+                await asyncio.sleep(delay)
 
         recovery = asyncio.create_task(recover())
         if settings.old_proxy_name_in_use:

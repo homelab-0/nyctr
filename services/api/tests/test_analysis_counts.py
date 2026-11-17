@@ -821,6 +821,109 @@ def test_two_checks_are_not_both_inside_the_model_call_when_the_limit_is_one(tmp
         app.state.engine.dispose()
 
 
+def test_one_failed_completion_does_not_stop_the_next_request(tmp_path, monkeypatch):
+    """A request whose check raises leaves the later request in that pass to finish."""
+    real = access.finish_one
+
+    async def finish_one(factory, settings, request_id, holder, **kwargs):
+        if request_id == "block-one":
+            raise RuntimeError("one")
+        await real(factory, settings, request_id, holder, **kwargs)
+
+    monkeypatch.setattr(access, "finish_one", finish_one)
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            signin(client)
+            factory = app.state.session_factory
+            with factory() as db:
+                for block_id in ("block-one", "block-two"):
+                    plant(db, block_id)
+                    db.add(AccessRequest(id=block_id, block_id=block_id, domain="shop.example",
+                                         device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                                         duration_minutes=30, status="analysing"))
+                db.commit()
+            asyncio.run(access.finish_due(factory, app.state.settings))
+            with factory() as db:
+                failed = db.get(AccessRequest, "block-one")
+                done = db.get(AccessRequest, "block-two")
+            assert failed.status == "analysing" and failed.analysis_holder is None
+            assert done.status == "auto_approved"
+    finally:
+        app.state.engine.dispose()
+
+
+def test_a_fresh_claim_is_finished_after_its_hold_when_upkeep_is_off(tmp_path, monkeypatch):
+    """With the upkeep tick off, a fresh claim is left alone and finished once its hold ends.
+
+    A request with no claim is finished on the first pass. The API is serving the whole time.
+    """
+    monkeypatch.setattr(access, "ANALYSIS_HOLD", timedelta(seconds=1))
+    calls = []
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        calls.append(block_id)
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    passes = {"n": 0}
+    real_finish = access.finish_due
+
+    async def finish_due(*args, **kwargs):
+        try:
+            await real_finish(*args, **kwargs)
+        finally:
+            passes["n"] += 1
+
+    monkeypatch.setattr(access, "finish_due", finish_due)
+    planted = {"done": False}
+
+    def plant_left(db, **kwargs):
+        from nyctr.collection import release_abandoned
+        release_abandoned(db, **kwargs)
+        if planted["done"]:
+            return
+        planted["done"] = True
+        plant(db, "block-free")
+        plant(db, "block-theirs")
+        db.add(AccessRequest(id="free", block_id="block-free", domain="shop.example",
+                             device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                             duration_minutes=30, status="analysing"))
+        db.add(AccessRequest(id="theirs", block_id="block-theirs", domain="shop.example",
+                             device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                             duration_minutes=30, status="analysing", analysis_holder="someone-else",
+                             analysis_claimed_at=utcnow()))
+
+    monkeypatch.setattr("nyctr.main.release_abandoned", plant_left)
+    app = demo(tmp_path)
+    try:
+        with TestClient(app) as client:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and passes["n"] < 1:
+                assert client.get("/api/health").status_code == 200
+                time.sleep(0.02)
+            assert passes["n"] == 1 and calls == ["block-free"]
+            with app.state.session_factory() as db:
+                free = db.get(AccessRequest, "free")
+                kept = db.get(AccessRequest, "theirs")
+            assert free.status == "auto_approved"
+            assert kept.status == "analysing" and kept.analysis_holder == "someone-else"
+            assert client.get("/api/health").json()["status"] == "ok"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and passes["n"] < 2:
+                time.sleep(0.02)
+            assert passes["n"] >= 2 and calls == ["block-free", "block-theirs"]
+            with app.state.session_factory() as db:
+                assert db.get(AccessRequest, "theirs").status == "auto_approved"
+    finally:
+        app.state.engine.dispose()
+
+
 def test_a_simulated_opening_is_not_described_as_opened_at_the_source(tmp_path):
     """The attention title uses the lease's execution, so a simulated opening is not called an opening."""
     from nyctr.assistant import attention

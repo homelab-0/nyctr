@@ -256,4 +256,115 @@ describe('a request that is being checked', () => {
     await advance(60_000);
     expect(times(calls, '/requests')).toBe(before);
   });
+
+  const request = (id: string, domain: string, status: AccessRequest['status']) =>
+    ({
+      id,
+      block_id: 'block',
+      domain,
+      device_name: 'Laptop',
+      requester_id: 'member',
+      reason: 'Need the page',
+      duration_minutes: 30,
+      status,
+      created_at: '2026-11-16T10:00:00Z',
+      risk_score: status === 'analysing' ? null : 20,
+    }) as AccessRequest;
+
+  it('shows the opening once the check finishes, without a browser reload', async () => {
+    clock();
+    let done = false;
+    const calls = mockApi({
+      'GET /requests': () => [
+        done
+          ? request('r1', 'shop.example', 'auto_approved')
+          : request('r1', 'shop.example', 'analysing'),
+      ],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': () =>
+        done
+          ? [{ id: 'l1', request_id: 'r1', status: 'active', execution: 'applied', owned: true }]
+          : [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    expect(screen.queryByText('Changed at the source and checked.')).toBeNull();
+    const before = times(calls, '/leases');
+    done = true;
+    await advance(5_000);
+    await paint();
+    expect(screen.getByText('Changed at the source and checked.')).toBeTruthy();
+    expect(screen.queryByText('Nyctr has no record of a change at the source.')).toBeNull();
+    expect(times(calls, '/leases')).toBe(before + 1);
+  });
+
+  it('keeps the request and the note being written when the list is read again', async () => {
+    clock();
+    mockApi({
+      'GET /requests': () => [
+        request('r1', 'first.example', 'analysing'),
+        request('r2', 'second.example', 'pending'),
+      ],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    fireEvent.click(screen.getByRole('button', { name: /second\.example/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Note for the record (optional)' }), {
+      target: { value: 'Only for today' },
+    });
+    await advance(5_000);
+    await paint();
+    const chosen = screen.getByRole('button', { name: /second\.example/ });
+    expect(chosen.classList.contains('on')).toBe(true);
+    expect(screen.getByRole('button', { name: /first\.example/ }).classList.contains('on')).toBe(
+      false,
+    );
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: 'Note for the record (optional)',
+        }) as HTMLTextAreaElement
+      ).value,
+    ).toBe('Only for today');
+  });
+
+  it('follows a new address, and an address whose request arrives later', async () => {
+    clock();
+    let showFirst = false;
+    mockApi({
+      'GET /requests': () =>
+        showFirst
+          ? [
+              request('r1', 'first.example', 'pending'),
+              request('r2', 'second.example', 'analysing'),
+            ]
+          : [request('r2', 'second.example', 'analysing')],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    const view = render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByRole('button', { name: /second\.example/ }).classList.contains('on')).toBe(
+      true,
+    );
+    showFirst = true;
+    await advance(5_000);
+    await paint();
+    expect(screen.getByRole('button', { name: /first\.example/ }).classList.contains('on')).toBe(
+      true,
+    );
+    view.rerender(<Requests params={new URLSearchParams('id=r2')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByRole('button', { name: /second\.example/ }).classList.contains('on')).toBe(
+      true,
+    );
+    expect(screen.getByRole('button', { name: /first\.example/ }).classList.contains('on')).toBe(
+      false,
+    );
+  });
 });

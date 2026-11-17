@@ -217,6 +217,66 @@ describe('access rule in Setup', () => {
     await waitFor(() => expect(saved()).toHaveLength(2));
     expect(saved()[1]).toMatchObject({ per_day: 3, daily_total: 9 });
   });
+
+  it('returns to the last saved rule when a later queued save fails', async () => {
+    let current = rules;
+    let attempt = 0;
+    const calls = mockApi({
+      'GET /rules': () => current,
+      'PUT /rules/access': (body: unknown) => {
+        attempt += 1;
+        if (attempt === 2) return { __status: 500, detail: 'The access rule could not be saved.' };
+        current = { ...current, access: body as Rules['access'] };
+        return body;
+      },
+    });
+    render(<Setup params={new URLSearchParams('tab=rule')} />);
+    const user = userEvent.setup();
+    const automatic = () => screen.getByRole('switch', { name: 'Automatic access' });
+    await screen.findByRole('button', { name: 'Lower openings per day' });
+    const inner = globalThis.fetch;
+    let releaseFirst = () => {};
+    let releaseSecond = () => {};
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondHeld = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let seenPuts = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+      if ((options?.method || 'GET') === 'PUT' && String(input) === '/api/rules/access') {
+        seenPuts += 1;
+        if (seenPuts === 1) {
+          const answer = inner(input, options);
+          await firstHeld;
+          return answer;
+        }
+        if (seenPuts === 2) await secondHeld;
+      }
+      return inner(input, options);
+    });
+    const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+    const reads = () =>
+      calls.filter((call) => call.method === 'GET' && call.path === '/rules').length;
+    await user.click(automatic());
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    expect(saved()[0]).toMatchObject({ enabled: false, per_day: 4 });
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    expect(saved()).toHaveLength(1);
+    const before = reads();
+    releaseFirst();
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    expect(automatic().getAttribute('aria-checked')).toBe('false');
+    releaseSecond();
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'The access rule could not be saved.',
+    );
+    expect(automatic().getAttribute('aria-checked')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    await waitFor(() => expect(saved()).toHaveLength(3));
+    expect(saved()[2]).toMatchObject({ enabled: false, per_day: 4, daily_total: 9 });
+  });
 });
 
 describe('collection schedule in Setup', () => {

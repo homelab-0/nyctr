@@ -257,9 +257,16 @@ def test_a_schema_seven_database_gains_only_the_analysis_columns_and_keeps_every
         for name in ("analysis_id", "analysis_holder", "analysis_claimed_at"):
             connection.execute(text(f"ALTER TABLE access_requests DROP COLUMN {name}"))
     with engine.connect() as connection:
-        present = {column["name"] for column in inspect(connection).get_columns("access_requests")}
-    assert {"analysis_id", "analysis_holder", "analysis_claimed_at"}.isdisjoint(present)
+        request_columns = [column["name"] for column in inspect(connection).get_columns("access_requests")]
+    assert {"analysis_id", "analysis_holder", "analysis_claimed_at"}.isdisjoint(request_columns)
+    assert all(name.isidentifier() for name in request_columns)
 
+    def request_values():
+        listed = ", ".join(request_columns)
+        with engine.connect() as connection:
+            return sorted(map(repr, connection.execute(text(f"SELECT {listed} FROM access_requests")).all()))
+
+    before_requests = request_values()
     before = _rows(engine)
     assert sum(map(len, before.values())) > 100
     heard = []
@@ -280,6 +287,7 @@ def test_a_schema_seven_database_gains_only_the_analysis_columns_and_keeps_every
     after = _rows(engine)
     stored_before, stored_after = before.pop("access_requests"), after.pop("access_requests")
     assert after == before and len(stored_after) == len(stored_before) > 0
+    assert request_values() == before_requests
     with engine.connect() as connection:
         columns = {column["name"] for column in inspect(connection).get_columns("access_requests")}
         claims = connection.execute(

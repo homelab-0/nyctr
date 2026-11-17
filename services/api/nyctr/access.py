@@ -338,6 +338,8 @@ def source_removed(db: Session, lease: Lease) -> bool:
 ENDING_HOLD = timedelta(minutes=5)
 # How long the analysis job's claim is honoured. A later start may take a claim older than this.
 ANALYSIS_HOLD = timedelta(minutes=2)
+# A pass that leaves a request it could already claim tries again after this pause.
+RECOVERY_RETRY = 1.0
 # How long an opening waits for an ending or another opening of the same address before it is refused.
 OPENING_WAITS = 10.0
 
@@ -1007,14 +1009,44 @@ async def finish_one(factory, settings: Settings, request_id: str, holder: str, 
 
 async def finish_due(factory, settings: Settings, *, restart_of: str | None = None,
                      previous: str | None = None) -> None:
-    """Finish every request that is still being analysed. A tick passes no `previous`."""
+    """Finish every request that is still being analysed. A tick passes no `previous`.
+
+    One request's failure is logged by `finish_one` and left claimed. The next request in this
+    pass still runs.
+    """
     from .collection import holder_id
     with factory() as db:
         ids = list(db.scalars(select(AccessRequest.id).where(AccessRequest.status == "analysing")
                               .order_by(AccessRequest.created_at, AccessRequest.id)))
     holder = holder_id(factory)
     for request_id in ids:
-        await finish_one(factory, settings, request_id, holder, restart_of=restart_of, previous=previous)
+        try:
+            await finish_one(factory, settings, request_id, holder, restart_of=restart_of, previous=previous)
+        except Exception:  # noqa: BLE001 - logged by finish_one; the claim stays and the next request runs
+            continue
+
+
+def recovery_delay(factory, *, now: datetime | None = None) -> float | None:
+    """Seconds until another pass is useful, or None when no request is still being analysed.
+
+    A fresh claim stays with its holder. The wait is how long until the soonest of those claims
+    reaches the two-minute hold. A request that can be claimed now is tried again after a short
+    pause, so a failure does not spin and does not wait out a hold it does not have.
+    """
+    now = now or utcnow()
+    with factory() as db:
+        rows = list(db.scalars(select(AccessRequest).where(AccessRequest.status == "analysing")))
+    if not rows:
+        return None
+    waits: list[float] = []
+    for row in rows:
+        claimed = utc(row.analysis_claimed_at) if row.analysis_claimed_at else None
+        if row.analysis_holder is None or claimed is None:
+            waits.append(0.0)
+            continue
+        waits.append(max(0.0, (claimed + ANALYSIS_HOLD - now).total_seconds()))
+    soonest = min(waits)
+    return RECOVERY_RETRY if soonest <= 0.0 else soonest
 
 
 async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation, *,
