@@ -10,7 +10,8 @@ from the database at every pass, so a change an administrator saves applies at
 the next pass on every running copy, and it never runs in demo mode. And it
 clears out, on a worker thread, the lookups whose time is up, the sign-in ties
 whose time is up (`presence.keep`) and, once an hour for each source, what has
-left it (`retention`).
+left it (`retention`). And it sends any notice that is due, on a worker thread,
+without holding the database while that call is open.
 
 A scheduled collection that fails for a reason that may pass is retried up to
 three times before the source is shown as failed (see `schedule.plan_retry`).
@@ -197,6 +198,7 @@ class Upkeep:
         self.collecting: asyncio.Task | None = None
         self.ending: dict[str | None, asyncio.Task] = {}
         self.clearing: asyncio.Task | None = None
+        self.notifying: asyncio.Task | None = None
         self.dropped: dict = {}  # When each source was last gone through for what has left it.
 
     def _release(self) -> None:
@@ -250,6 +252,17 @@ class Upkeep:
         # Clearing out touches no source and is blocking database work, so it has its own thread.
         if self.clearing is None or self.clearing.done():
             self.clearing = asyncio.create_task(self._clear(self.clock()))
+        if self.notifying is None or self.notifying.done():
+            self.notifying = asyncio.create_task(self._notify())
+
+    async def _notify(self) -> None:
+        """Send notices that are due. The call runs off this loop and holds no database lock while it is open."""
+        from . import notices
+
+        try:
+            await off_loop(lambda: notices.deliver_due(self.factory, self.settings, self.clock))
+        except Exception as error:  # noqa: BLE001 - upkeep must survive any single failure
+            log.warning("Background upkeep failed: %s", type(error).__name__)
 
     async def _clear(self, now) -> None:
         """Remove the lookups and close the sign-in ties whose time is up, and go through each source whose hour has come.
@@ -275,7 +288,7 @@ class Upkeep:
 
     async def stop(self) -> None:
         """Cancel whatever is still going and wait until it has stopped."""
-        tasks = [task for task in (self.collecting, self.clearing, *self.ending.values()) if task]
+        tasks = [task for task in (self.collecting, self.clearing, self.notifying, *self.ending.values()) if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

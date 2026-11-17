@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import model, presence
+from . import model, notices, presence
 from .access import checking_until, suggestions
 from .analysis import cut_title
 from .collection import LEAVING, last_gaps
@@ -162,6 +162,7 @@ def attention(db: Session, settings: Settings) -> list[dict[str, Any]]:
         items.append({"kind": "model", "id": model.KEY, "severity": "medium", "at": None,
                       "title": "The assistant is off: the model's setting cannot be used", "detail": broken})
     items.extend(presence.attention(db))
+    items.extend(notices.attention_items(db))
     for item in suggestions(db):
         items.append({"kind": "suggestion", "id": item["domain"], "severity": "low",
                       "at": item["last_at"].isoformat(),
