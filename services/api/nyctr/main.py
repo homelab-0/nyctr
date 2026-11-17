@@ -194,6 +194,26 @@ class AssignmentInput(InputModel):
         return value
 
 
+async def _until(delay: float, wake: asyncio.Event) -> None:
+    """Wait out a claim's hold, or return sooner when a failed job asks for another pass."""
+    try:
+        await asyncio.wait_for(wake.wait(), timeout=delay)
+    except TimeoutError:
+        return
+
+
+async def _finish_request(app, request_id: str) -> None:
+    """Run one request's check. A failure after the claim asks recovery to look again."""
+    try:
+        await access.finish_one(
+            app.state.session_factory, app.state.settings, request_id, holder_id(app.state.engine))
+    except Exception:
+        wake = getattr(app.state, "analysis_again", None)
+        if wake is not None:
+            wake.set()
+        raise
+
+
 def create_app(settings: Settings | None = None):
     """Build the configured API, authorization dependencies, database lifecycle, and optional static host.
 
@@ -223,7 +243,10 @@ def create_app(settings: Settings | None = None):
             db.commit()
         # Requests left analysing are finished in the background. A slow or failed check must not
         # stop the API from serving. A fresh claim is left alone until its hold ends, then tried
-        # again, including when the upkeep tick is off.
+        # again, including when the upkeep tick is off. When nothing is being checked, recovery
+        # waits until a later job fails after its claim, so that job is not left until the next start.
+        again = asyncio.Event()
+        app.state.analysis_again = again
 
         async def recover() -> None:
             log = logging.getLogger("nyctr")
@@ -239,8 +262,11 @@ def create_app(settings: Settings | None = None):
                     log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
                     delay = access.RECOVERY_RETRY
                 if delay is None:
-                    return
-                await asyncio.sleep(delay)
+                    await again.wait()
+                    again.clear()
+                    continue
+                await _until(delay, again)
+                again.clear()
 
         recovery = asyncio.create_task(recover())
         if settings.old_proxy_name_in_use:
@@ -924,8 +950,7 @@ def create_app(settings: Settings | None = None):
             if not existing:
                 raise
             return access.shown(db, existing, admin=administrator)
-        background.add_task(access.finish_one, request.app.state.session_factory, settings, row.id,
-                            holder_id(request.app.state.engine))
+        background.add_task(_finish_request, request.app, row.id)
         return access.shown(db, row, admin=administrator)
 
     @app.post("/api/requests/{request_id}/review")

@@ -8,7 +8,7 @@ justified, and the risk is low.
 import asyncio
 import threading
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -858,19 +858,33 @@ def test_one_failed_completion_does_not_stop_the_next_request(tmp_path, monkeypa
         app.state.engine.dispose()
 
 
-def test_a_fresh_claim_is_finished_after_its_hold_when_upkeep_is_off(tmp_path, monkeypatch):
-    """With the upkeep tick off, a fresh claim is left alone and finished once its hold ends.
+def held_clock(monkeypatch):
+    """A frozen clock, and a gate on any recovery wait that is longer than the short retry.
 
-    A request with no claim is finished on the first pass. The API is serving the whole time.
+    The clock starts at the real time, so a seeded opening keeps its age. A clock set in the past
+    would count every seeded opening as today's. The first long wait parks until `release` is set.
+    Moving the clock does not end the wait.
     """
-    monkeypatch.setattr(access, "ANALYSIS_HOLD", timedelta(seconds=1))
-    calls = []
+    clock = {"now": datetime.now(UTC)}
+    release, parked = threading.Event(), threading.Event()
 
-    async def analyse(db, domain, block_id=None, *, settings):
-        calls.append(block_id)
-        return store_analysis(db, domain, block_id, "missing", None, None)
+    def now():
+        return clock["now"]
 
-    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    async def until(delay, _wake):
+        if delay > access.RECOVERY_RETRY and not release.is_set():
+            parked.set()
+            await asyncio.to_thread(release.wait)
+
+    monkeypatch.setattr(access, "utcnow", now)
+    monkeypatch.setattr("nyctr.models.utcnow", now)
+    monkeypatch.setattr("nyctr.main._until", until)
+    monkeypatch.setattr(access, "ANALYSIS_HOLD", timedelta(seconds=30))
+    return clock, release, parked
+
+
+def counting_passes(monkeypatch):
+    """Count each recovery pass, including one that raises."""
     passes = {"n": 0}
     real_finish = access.finish_due
 
@@ -881,6 +895,27 @@ def test_a_fresh_claim_is_finished_after_its_hold_when_upkeep_is_off(tmp_path, m
             passes["n"] += 1
 
     monkeypatch.setattr(access, "finish_due", finish_due)
+    return passes
+
+
+@BOTH
+def test_a_fresh_claim_is_finished_after_its_hold_when_upkeep_is_off(
+        tmp_path, database, request, monkeypatch):
+    """With the upkeep tick off, a fresh claim is left alone and finished once its hold ends.
+
+    A request with no claim is finished on the first pass. The clock stays still until the test
+    has read that pass, then moves past the hold. The API is serving the whole time.
+    """
+    url = database_url(database, tmp_path, request)
+    clock, release, parked = held_clock(monkeypatch)
+    calls = []
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        calls.append(block_id)
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    passes = counting_passes(monkeypatch)
     planted = {"done": False}
 
     def plant_left(db, **kwargs):
@@ -897,29 +932,112 @@ def test_a_fresh_claim_is_finished_after_its_hold_when_upkeep_is_off(tmp_path, m
         db.add(AccessRequest(id="theirs", block_id="block-theirs", domain="shop.example",
                              device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
                              duration_minutes=30, status="analysing", analysis_holder="someone-else",
-                             analysis_claimed_at=utcnow()))
+                             analysis_claimed_at=clock["now"]))
 
     monkeypatch.setattr("nyctr.main.release_abandoned", plant_left)
-    app = demo(tmp_path)
+    app = demo(tmp_path, url)
     try:
         with TestClient(app) as client:
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and passes["n"] < 1:
-                assert client.get("/api/health").status_code == 200
-                time.sleep(0.02)
-            assert passes["n"] == 1 and calls == ["block-free"]
-            with app.state.session_factory() as db:
-                free = db.get(AccessRequest, "free")
-                kept = db.get(AccessRequest, "theirs")
-            assert free.status == "auto_approved"
-            assert kept.status == "analysing" and kept.analysis_holder == "someone-else"
-            assert client.get("/api/health").json()["status"] == "ok"
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and passes["n"] < 2:
-                time.sleep(0.02)
-            assert passes["n"] >= 2 and calls == ["block-free", "block-theirs"]
-            with app.state.session_factory() as db:
-                assert db.get(AccessRequest, "theirs").status == "auto_approved"
+            try:
+                assert parked.wait(5)
+                assert passes["n"] == 1 and calls == ["block-free"]
+                with app.state.session_factory() as db:
+                    free = db.get(AccessRequest, "free")
+                    kept = db.get(AccessRequest, "theirs")
+                assert free.status == "auto_approved"
+                assert kept.status == "analysing" and kept.analysis_holder == "someone-else"
+                assert client.get("/api/health").json()["status"] == "ok"
+                clock["now"] += timedelta(seconds=31)
+                release.set()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and passes["n"] < 2:
+                    time.sleep(0.02)
+                assert passes["n"] >= 2 and calls == ["block-free", "block-theirs"]
+                with app.state.session_factory() as db:
+                    done = db.get(AccessRequest, "theirs")
+                    status, holder = done.status, done.analysis_holder
+                assert status == "auto_approved" and holder is None
+            finally:
+                release.set()  # A failed check must not leave recovery parked in the wait.
+    finally:
+        app.state.engine.dispose()
+
+
+@BOTH
+def test_a_job_that_fails_after_its_claim_is_finished_once_the_hold_ends(
+        tmp_path, database, request, monkeypatch):
+    """Nothing is waiting at startup, and the upkeep tick is off.
+
+    A later job that raises after its claim stays claimed. Recovery does not take that claim, or a
+    fresh claim of another holder, until the hold ends. It then finishes the failed job.
+    """
+    url = database_url(database, tmp_path, request)
+    clock, release, parked = held_clock(monkeypatch)
+    calls = []
+
+    async def analyse(db, domain, block_id=None, *, settings):
+        calls.append(block_id)
+        if block_id == "block-gallery" and calls.count("block-gallery") == 1:
+            raise RuntimeError("after the claim")
+        return store_analysis(db, domain, block_id, "missing", None, None)
+
+    monkeypatch.setattr(block_analysis, "analyse", analyse)
+    passes = counting_passes(monkeypatch)
+    real_delay = access.recovery_delay
+    idle = threading.Event()
+
+    def delay(factory, *, now=None):
+        found = real_delay(factory, now=now)
+        if found is None:
+            idle.set()
+        return found
+
+    monkeypatch.setattr(access, "recovery_delay", delay)
+    app = demo(tmp_path, url)
+    try:
+        with TestClient(app) as client:
+            try:
+                assert idle.wait(5)
+                assert passes["n"] == 1 and calls == []
+                assert client.get("/api/health").json()["status"] == "ok"
+                with app.state.session_factory() as db:
+                    plant(db, "block-theirs")
+                    db.add(AccessRequest(id="theirs", block_id="block-theirs", domain="shop.example",
+                                         device_name="Jamie's MacBook", requester_id="user-jamie", reason="Need it",
+                                         duration_minutes=30, status="analysing", analysis_holder="someone-else",
+                                         analysis_claimed_at=clock["now"]))
+                    db.commit()
+                admin = signin(client)
+                assert client.put("/api/rules/access", headers=admin, json=rule_body()).status_code == 200
+                member = signin(client, member=True)
+                # The answer is stored first. The job then raises, and the test client reports that raise.
+                with pytest.raises(RuntimeError, match="after the claim"):
+                    client.post("/api/requests", headers=member, json={
+                        "block_id": "block-gallery", "reason": "Need the gallery", "duration_minutes": 60})
+                assert parked.wait(5)
+                with app.state.session_factory() as db:
+                    own = db.scalar(select(AccessRequest).where(AccessRequest.block_id == "block-gallery"))
+                    kept = db.get(AccessRequest, "theirs")
+                assert own.status == "analysing" and own.analysis_holder
+                assert kept.status == "analysing" and kept.analysis_holder == "someone-else"
+                assert calls == ["block-gallery"]
+                clock["now"] += timedelta(seconds=31)
+                release.set()
+                own_status, kept_status, kept_holder = "analysing", "analysing", "someone-else"
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with app.state.session_factory() as db:
+                        own = db.scalar(select(AccessRequest).where(AccessRequest.block_id == "block-gallery"))
+                        kept = db.get(AccessRequest, "theirs")
+                        own_status, kept_status, kept_holder = own.status, kept.status, kept.analysis_holder
+                    if own_status != "analysing" and kept_status != "analysing":
+                        break
+                    time.sleep(0.02)
+                assert own_status == "auto_approved"
+                assert kept_status == "auto_approved" and kept_holder is None
+                assert calls.count("block-gallery") == 2 and "block-theirs" in calls
+            finally:
+                release.set()  # A failed check must not leave recovery parked in the wait.
     finally:
         app.state.engine.dispose()
 
