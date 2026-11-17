@@ -30,6 +30,7 @@ from . import (
     query,
     removal,
     retention,
+    statements,
     worker,
 )
 from . import blocks as block_list
@@ -370,7 +371,7 @@ def create_app(settings: Settings | None = None):
         return {"ok": True}
 
     app.include_router(oidc_router)
-    for feature in (access, guests, query, assistant, presence, notices):
+    for feature in (access, guests, query, assistant, presence, notices, statements):
         app.include_router(feature.router)
 
     @app.get("/api/model")
@@ -936,7 +937,7 @@ def create_app(settings: Settings | None = None):
             return access.shown(db, existing, admin=administrator)
         row = AccessRequest(block_id=observation.id, domain=observation.domain, device_name=observation.device_name,
                             requester_id=user.id, reason=body.reason, duration_minutes=body.duration_minutes,
-                            status="analysing")
+                            status="analysing", basis="event")
         db.add(row)
         try:
             db.flush()

@@ -217,7 +217,13 @@ audit record (`rule.access_checked`):
    before anything else about the block is looked at.
 3. The tier is switched on (record only goes on, and opens nothing).
 4. Nyctr can open the address where it is blocked, and changes are allowed there.
-5. The block is tied to the device by an assignment or an administrator's link.
+5. The block is tied to the device by an assignment or an administrator's link,
+   or the request is a statement and the rule's `allow_statement` switch is on.
+   The switch is off until an administrator turns it on. Off, a request a member
+   filed by naming a site waits for a person even when every later check would
+   pass. On, this check passes and the rest of the rule decides. A deliberate
+   block, or one Nyctr cannot score, still fails at check 2, so the switch
+   cannot open it.
 6. The tier's own conditions hold: for advertising lists, a score at or below
    the written limit (never above 60). An unknown score fails.
 7. No administrator said no to that address before.
@@ -234,6 +240,19 @@ audit record (`rule.access_checked`):
    recorded. What was added at the source is removed by the next upkeep tick,
    not at once.
 10. The time is the shorter of what was asked and the tier's limit.
+
+A member on a recognised device can name a site that did not open
+(`POST /api/statements`). Nyctr reduces the text to one plain domain and files
+a request with basis `statement` only when a source that reports blocked
+lookups has an exact block of that name from the last 15 minutes, and that
+block has not expired. A parent or a child name is not that block. The answer
+says only whether the typed name was blocked recently. It does not name
+another device, member or lookup. The device is the one the member is on, by a
+live sign-in tie or an assignment, and only while recognition is on. Without a
+portal address the one address is used. With one, the console address is
+refused. Five attempts an hour are kept for each member, including a name that
+matches nothing, and each is audited with the name, the device and the outcome.
+A sixth is refused without saying whether the name matched.
 
 ## Two addresses
 

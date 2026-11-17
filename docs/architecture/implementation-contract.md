@@ -74,6 +74,15 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   `reviewed` and `denied` change nothing on the network. `approved` opens a
   temporary lease whose `execution` says whether the provider was changed.
 - `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
+- `POST /api/statements` with `{domain}` (signed in). The server reduces `domain`
+  to one plain domain. 201 files one request, basis `statement`, for the device
+  the caller is on, and the same path as any other request then decides it.
+  200 returns that open request when the name was already asked, or
+  `{matched:false,message}` when no exact block of that name was seen in the
+  last 15 minutes. 403 when recognition is off, the caller is on the console
+  address while a portal address is set, or the device is not theirs. 422 when
+  the text is not one domain. 429 after five attempts in the hour, including
+  misses. The answer never includes another device, member or lookup.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
   missing, expired or not visible to the caller answers the same 404.
 - `GET /api/me/device` -> `{device_id,name,simulated,how,reason,message}`; only among the
@@ -147,12 +156,15 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   or demo. `PUT /api/collection` (admin) with
   `{enabled,minutes}` where minutes is one of `choices`; 409 in demo mode.
   `writes` maps `nextdns` and `unifi_network` to simulated, enabled or disabled.
-- `PUT /api/rules/access` with `{enabled,per_day 1–20,daily_total 1–100,
+- `PUT /api/rules/access` with `{enabled,allow_statement,per_day 1–20,daily_total 1–100,
   ad_tracker:{mode,max_score 0–60,max_minutes 15–240},
   threat_feed:{mode,max_minutes 15–240,min_registered_days 30–3650}}`. `mode` is
   off, shadow (record only) or on for `ad_tracker`, and only off for
   `threat_feed`, whose `max_minutes` cannot be above `ad_tracker`'s. No other
-  tier can be named. The form before tiers (`{enabled,max_score,max_minutes,
+  tier can be named. `allow_statement` defaults to false. Left out of a save, it
+  is stored false. Off, a statement always waits for a person. On, the rule
+  decides it as any other request. A deliberate block or an unknown score still
+  waits. The form before tiers (`{enabled,max_score,max_minutes,
   per_day}`) is read from storage and refused here. Read back, its daily total
   is the old limit for each person times the number of active accounts, from
   1 to 100. A rule written with this route starts at 10 when the total is left

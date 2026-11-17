@@ -78,6 +78,18 @@ class LoginAttempt(Base):
     reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class StatementQuota(Base):
+    """Count one member's site statements until a fixed hour from the first attempt resets.
+
+    Misses count. The row is the lock that keeps two first statements, and the hourly limit,
+    from both landing.
+    """
+    __tablename__ = "statement_quotas"
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class OIDCFlow(Base):
     """Bind a short-lived sign-in flow to browser state, nonce, and PKCE verifier."""
     __tablename__ = "oidc_flows"
@@ -239,6 +251,9 @@ class AccessRequest(Base):
     analysis_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     analysis_holder: Mapped[str | None] = mapped_column(String(64), nullable=True)
     analysis_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Schema 9: why this request was filed. Null on a row from before the column.
+    # `event` is a block the member could already see. `statement` is a name they typed.
+    basis: Mapped[str | None] = mapped_column(String(16), nullable=True, default="event")
     # One request per member/event preserves idempotence even under concurrent POSTs.
     __table_args__ = (UniqueConstraint("requester_id", "block_id"),)
 
