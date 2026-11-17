@@ -32,6 +32,7 @@ from nyctr.models import (
     Resource,
     Setting,
     StatementQuota,
+    User,
     utcnow,
 )
 from nyctr.presence import WHY
@@ -140,7 +141,13 @@ def test_a_statement_is_refused_in_plain_words_and_audited(tmp_path, database, r
     app = open_demo(database, tmp_path, request, "refused")
     with TestClient(app) as client:
         stranger = ask(client, None, "secret.example")
-        assert stranger.status_code == 401 and stated(app) == []
+        assert stranger.status_code == 401 and stranger.json() == {"detail": "Sign in to continue"}
+        assert "secret.example" not in stranger.text
+        assert filed_for(app, "secret.example") == [] and quota(app) is None
+        unsigned = stated(app)
+        assert len(unsigned) == 1 and unsigned[0].actor_id is None
+        assert unsigned[0].details == {"domain": "secret.example", "device_id": "", "device_name": "",
+                                        "outcome": "no_session"}
         headers = signin(client, member=True)
         bad = ask(client, headers, "https://10.1.1.1/secret")
         assert bad.status_code == 422 and "name" in bad.json()["detail"].lower()
@@ -169,9 +176,12 @@ def test_a_statement_is_refused_in_plain_words_and_audited(tmp_path, database, r
         assert filed_for(app, "metrics.analytics-hub.example") == []
         assert quota(app) == 5
         outcomes = [row.details["outcome"] for row in stated(app)]
-        assert outcomes == ["not_a_name", "stale", "not_exact", "not_exact", "stale", "miss", "limited"]
+        assert outcomes == ["no_session", "not_a_name", "stale", "not_exact", "not_exact", "stale", "miss", "limited"]
         for row in stated(app):
             assert set(row.details) == {"domain", "device_id", "device_name", "outcome"}
+            if row.details["outcome"] == "no_session":
+                assert row.actor_id is None and row.details["device_id"] == ""
+                continue
             assert row.details["device_id"] == "laptop-jamie"
             assert row.details["device_name"] == "Jamie's MacBook"
             assert row.actor_id == "user-jamie"
@@ -203,6 +213,77 @@ def test_a_statement_is_refused_in_plain_words_and_audited(tmp_path, database, r
         assert refused.status_code == 403 and refused.json()["detail"] == CONSOLE
         assert "blocked recently" not in refused.text and quota(other) == 1
         assert stated(other, "console")[-1].details["outcome"] == "console"
+
+
+@BOTH
+def test_an_unsigned_statement_is_audited_without_a_member(tmp_path, database, request):
+    """A missing, repeated, or unusable session is refused and audited. Nothing is filed.
+
+    The actor stays empty, including when an expired or disabled session used to
+    name a member. A live session with no mutation token stays a mutation refusal.
+    """
+    app = open_demo(database, tmp_path, request, "unsigned")
+    with TestClient(app) as client:
+        marker = "Alex's workstation"
+        first = ask(client, None, "secret.example")
+        second = ask(client, None, "secret.example")
+        assert first.status_code == second.status_code == 401
+        assert first.json() == second.json() == {"detail": "Sign in to continue"}
+        assert "secret.example" not in first.text and marker not in second.text
+        assert filed_for(app, "secret.example") == [] and quota(app) is None
+        empty = client.post("/api/statements", json={})
+        assert empty.status_code == 401 and empty.json() == {"detail": "Sign in to continue"}
+        before_broken = len(stated(app, "no_session"))
+        broken = client.post("/api/statements", content=b"{", headers={"content-type": "application/json"})
+        # The body is rejected before sign-in runs, so there is no session audit and no stored copy.
+        assert broken.status_code == 422 and len(stated(app, "no_session")) == before_broken
+        assert marker not in broken.text and "downloads.filemirror.example" not in broken.text
+        extra = client.post("/api/statements", json={"domain": "secret.example", "note": marker})
+        assert extra.status_code == 401 and marker not in extra.text and "secret.example" not in extra.text
+        client.cookies.set(COOKIE_NAME, "not-a-session")
+        junk = client.post("/api/statements", json={"domain": "secret.example"})
+        assert junk.status_code == 401 and junk.json()["detail"] == "Sign in to continue"
+        client.cookies.clear()
+        rows = stated(app, "no_session")
+        assert [row.details["domain"] for row in rows] == [
+            "secret.example", "secret.example", "", "secret.example", "secret.example"]
+        for row in rows:
+            assert row.actor_id is None and row.target_id is None
+            assert row.details["device_id"] == "" and row.details["device_name"] == ""
+            assert marker not in str(row.details) and "user-jamie" not in str(row.details)
+            assert "testclient" not in str(row.details) and "192.0.2" not in str(row.details)
+        assert quota(app) is None and filed_for(app, "secret.example") == []
+
+        headers = signin(client, member=True)
+        bare = client.post("/api/statements", json={"domain": "secret.example"})
+        assert bare.status_code == 403 and bare.json()["detail"] == "Invalid or missing CSRF token"
+        assert len(stated(app, "no_session")) == len(rows)
+        with app.state.session_factory() as db:
+            account = db.get(User, "user-jamie")
+            account.active = False
+            db.commit()
+        disabled = ask(client, headers, "secret.example")
+        assert disabled.status_code == 401 and disabled.json()["detail"] == "Sign in to continue"
+        denied = stated(app, "no_session")[-1]
+        assert denied.actor_id is None and "user-jamie" not in str(denied.details)
+        assert denied.details["domain"] == "secret.example"
+        with app.state.session_factory() as db:
+            account = db.get(User, "user-jamie")
+            account.active = True
+            for session in db.scalars(select(LoginSession)):
+                session.expires_at = utcnow() - timedelta(seconds=5)
+            db.commit()
+        expired = ask(client, headers, "later.example")
+        assert expired.status_code == 401 and expired.json()["detail"] == "Sign in to continue"
+        late = stated(app, "no_session")[-1]
+        assert late.actor_id is None and late.details["domain"] == "later.example"
+        assert "user-jamie" not in str(late.details) and "user-admin" not in str(late.details)
+        assert filed_for(app, "later.example") == [] and quota(app) is None
+        headers = signin(client, member=True)
+        again = ask(client, headers, "hub.example")
+        assert again.status_code == 200 and again.json()["message"] == MISSED
+        assert stated(app)[-1].actor_id == "user-jamie" and stated(app)[-1].details["outcome"] == "miss"
+        assert quota(app) == 1
 
 
 @BOTH

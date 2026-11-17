@@ -264,7 +264,12 @@ With one, the console address is refused. Five attempts are kept for each
 member in a fixed hour that starts at the first attempt, including a name
 that matches nothing and a repeat of an open request, and each is audited
 with the name, the device and the outcome. The refusal says when that hour
-resets. A sixth is refused without saying whether the name matched.
+resets. A sixth is refused without saying whether the name matched. A call
+with no session gets the same sign-in refusal as every other route. That
+refusal is audited with no member and no device. Only a short printable copy
+of the typed name is kept. The address the request came from, and any other
+field in the body, are not stored. A live session with a bad mutation token
+stays a mutation refusal and is not that audit.
 
 ## Two addresses
 

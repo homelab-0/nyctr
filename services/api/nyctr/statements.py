@@ -7,6 +7,7 @@ minutes and files one request for the device they are on. It reveals only that.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -20,11 +21,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import access, facts, peer, presence
-from .deps import device_permitted, get_db, identity
+from .deps import device_permitted, get_db
 from .integrations import registry
 from .models import AccessRequest, Integration, Observation, StatementQuota, utc, utcnow
-from .security import audit
-from .sites import PORTAL, site_of
+from .security import audit, authenticate
+from .sites import PORTAL, seen_as, site_of
 
 router = APIRouter(prefix="/api")
 
@@ -214,9 +215,49 @@ def _answer(status: int, message: str, request: dict | None = None, *, matched: 
     return JSONResponse(jsonable_encoder(body), status_code=status)
 
 
+async def _typed_domain(request: Request) -> str:
+    """A short printable copy of `domain`, or nothing when the body has no such string.
+
+    Called only after sign-in has already been refused. It does not look anything up,
+    and it keeps no other field from the body.
+    """
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    domain = payload.get("domain")
+    if not isinstance(domain, str):
+        return ""
+    return _typed(domain)
+
+
+def _record_unsigned(db: Session, domain: str) -> None:
+    """Audit a refused sign-in. No member is invented, and no device or address is stored."""
+    audit(db, None, "access.statement", domain=domain, device_id="", device_name="", outcome="no_session")
+    db.commit()
+
+
+async def signed_member(request: Request, db: Session = Depends(get_db)):
+    """Sign-in for this route. A missing session is audited, then refused unchanged.
+
+    The shared check still returns 401 for a missing, unknown, expired or disabled
+    session, and 403 when a live session has no matching mutation token. Only the
+    401 is audited, with no member attached.
+    """
+    try:
+        user, session = authenticate(request, db)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            _record_unsigned(db, await _typed_domain(request))
+        raise
+    return seen_as(request, user), session
+
+
 @router.post("/statements")
 def state_a_site(body: StatementInput, background: BackgroundTasks, request: Request,
-                 auth=Depends(identity), db: Session = Depends(get_db)):
+                 auth=Depends(signed_member), db: Session = Depends(get_db)):
     """File one statement for the device the member is on, or say the name was not blocked recently.
 
     Five attempts an hour for each member, including a name that matches nothing.

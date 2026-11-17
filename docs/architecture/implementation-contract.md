@@ -87,7 +87,12 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   match. In the demonstration the device is the same one `GET /api/me/device`
   shows. 422 when the text is not one domain. 429 after five attempts in the
   fixed hour that starts at the first attempt, including misses and repeats.
-  The answer never includes another device, member or lookup. The stored
+  401 `Sign in to continue` when the cookie is missing, unknown or expired, or
+  the account is disabled. One `access.statement` audit is written with no
+  member, an empty device, outcome `no_session`, and at most a short printable
+  copy of `domain`. The peer address and any other body field are not stored.
+  A live session with a bad mutation token stays 403 and does not write that
+  audit. The answer never includes another device, member or lookup. The stored
   device id is not part of the AccessRequest JSON below. A statement whose
   member may no longer use that device waits for a person. Nothing is opened.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
