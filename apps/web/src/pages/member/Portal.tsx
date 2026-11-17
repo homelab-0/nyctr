@@ -986,14 +986,36 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   // My requests and a request's own page keep reading while one of this member's
   // requests is still undecided, so the answer shows up where they are already looking.
   // After that decision, the leases are read once more before reading stops, so a lease
-  // written with the decision is not missed. A failed lease read keeps reading too.
+  // written with the decision is not missed.
+  // The first look can already be a yes, while the openings were read just before that
+  // yes was stored. That page reads the openings once more, then stops, even when no
+  // opening is there. A no does not ask again. A failed lease read keeps reading too.
   const undecided = (data.requests.data ?? []).some(
     (row) => row.status === 'pending' || row.status === 'analysing',
   );
   const follow = useRef({ saw: false, extra: false });
   if (undecided) follow.current = { saw: true, extra: false };
+  const leaseFor = new Set((data.leases.data ?? []).map((item) => item.request_id));
+  const onList = section === 'requests';
+  const onRequest = section === 'portal' && request !== null;
+  const missingLease =
+    (onList || onRequest) &&
+    data.requests.data !== null &&
+    data.leases.data !== null &&
+    !data.leases.error &&
+    data.requests.data.some(
+      (row) =>
+        (onList || row.id === request) &&
+        (row.status === 'approved' || row.status === 'auto_approved') &&
+        !leaseFor.has(row.id),
+    );
+  // One later read covers either path. It waits until nothing is undecided, so the
+  // later read is still available when that decision arrives.
   const needExtra =
-    follow.current.saw && !undecided && !follow.current.extra && data.requests.data !== null;
+    !follow.current.extra &&
+    !undecided &&
+    data.requests.data !== null &&
+    (follow.current.saw || missingLease);
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
     (undecided || (data.requests.data !== null && Boolean(data.leases.error)) || needExtra);

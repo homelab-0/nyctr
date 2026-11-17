@@ -1444,6 +1444,77 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/requests')).toBe(settled);
   });
 
+  it('reads the openings once more when the first look is already a yes and the opening is missing', async () => {
+    clock();
+    let opened = false;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({})],
+        'GET /leases': () => (opened ? [lease()] : []),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(1);
+    expect(reads(calls, '/leases')).toBe(1);
+    opened = true;
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    const settled = reads(calls, '/leases');
+    await advance(60_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+    expect(reads(calls, '/requests')).toBe(settled);
+  });
+
+  it('stops after that one look when a yes still has no opening', async () => {
+    clock();
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({ status: 'approved', decided_by: 'admin' })],
+        'GET /leases': [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    await advance(5_000);
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+  });
+
+  it('does not read again when the opening is already with the yes', async () => {
+    clock();
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({})],
+        'GET /leases': [lease()],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    const held = reads(calls, '/leases');
+    await advance(60_000);
+    expect(reads(calls, '/leases')).toBe(held);
+    expect(reads(calls, '/requests')).toBe(held);
+  });
+
   it('keeps My requests on screen when a later check fails', async () => {
     clock();
     let fail = false;
