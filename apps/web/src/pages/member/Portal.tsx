@@ -985,44 +985,47 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
   // My requests and a request's own page keep reading while one of this member's
   // requests is still undecided, so the answer shows up where they are already looking.
-  // After that decision, the leases are read once more before reading stops, so a lease
-  // written with the decision is not missed.
-  // The first look can already be a yes, while the openings were read just before that
-  // yes was stored. That page reads the openings once more, then stops, even when no
-  // opening is there. A no does not ask again. A failed lease read keeps reading too.
+  // After a decision, the openings are read once more, so one written with the decision
+  // is not missed. Each yes has its own later read: a second ask does not reuse the first.
+  // That read happens once, then stops, even when no opening is there. A no does not ask
+  // again. A failed lease read keeps reading until one succeeds.
   const undecided = (data.requests.data ?? []).some(
     (row) => row.status === 'pending' || row.status === 'analysing',
   );
-  const follow = useRef({ saw: false, extra: false });
-  if (undecided) follow.current = { saw: true, extra: false };
+  const follow = useRef({ saw: false, sawSpent: false, checked: new Set<string>() });
+  if (undecided) {
+    follow.current.saw = true;
+    follow.current.sawSpent = false;
+  }
   const leaseFor = new Set((data.leases.data ?? []).map((item) => item.request_id));
   const onList = section === 'requests';
   const onRequest = section === 'portal' && request !== null;
-  const missingLease =
-    (onList || onRequest) &&
-    data.requests.data !== null &&
-    data.leases.data !== null &&
-    !data.leases.error &&
-    data.requests.data.some(
-      (row) =>
-        (onList || row.id === request) &&
-        (row.status === 'approved' || row.status === 'auto_approved') &&
-        !leaseFor.has(row.id),
-    );
-  // One later read covers either path. It waits until nothing is undecided, so the
-  // later read is still available when that decision arrives.
-  const needExtra =
-    !follow.current.extra &&
-    !undecided &&
-    data.requests.data !== null &&
-    (follow.current.saw || missingLease);
+  const owed = (data.requests.data ?? []).filter(
+    (row) =>
+      (onList || onRequest) &&
+      data.leases.data !== null &&
+      !data.leases.error &&
+      (onList || row.id === request) &&
+      (row.status === 'approved' || row.status === 'auto_approved') &&
+      !leaseFor.has(row.id) &&
+      !follow.current.checked.has(row.id),
+  );
+  const needSaw =
+    follow.current.saw && !undecided && !follow.current.sawSpent && data.requests.data !== null;
+  // The later read waits until nothing is undecided, so a request that is still
+  // waiting does not use up the read meant for its own decision.
+  const needExtra = !undecided && data.requests.data !== null && (needSaw || owed.length > 0);
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
     (undecided || (data.requests.data !== null && Boolean(data.leases.error)) || needExtra);
   const again = useRefreshWhile(waiting, () => {
     const finishing = needExtra;
+    const spendSaw = needSaw;
+    const confirming = owed.map((row) => row.id);
     return Promise.all([data.requests.reload(), data.leases.reload()]).finally(() => {
-      if (finishing) follow.current.extra = true;
+      if (!finishing) return;
+      if (spendSaw) follow.current.sawSpent = true;
+      for (const id of confirming) follow.current.checked.add(id);
     });
   });
   useEffect(() => {
