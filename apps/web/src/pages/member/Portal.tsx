@@ -92,6 +92,7 @@ const RECONNECT: Record<DeviceOs, { name: string; steps: string[] }> = {
 };
 
 const STATUS: Record<string, { text: string; tone: string }> = {
+  analysing: { text: 'Checking', tone: '' },
   pending: { text: 'Waiting for a person', tone: 'yellow' },
   auto_approved: { text: 'Opened', tone: 'green' },
   approved: { text: 'Approved', tone: 'green' },
@@ -775,6 +776,14 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
             Check back in a little while.
           </p>
         </header>
+      ) : row.status === 'analysing' ? (
+        <header className="m-result wait">
+          <span className="m-badge">
+            <Hourglass size={24} />
+          </span>
+          <h1 className="display d1">Nyctr is checking this.</h1>
+          <p className="lede">The answer will show up here.</p>
+        </header>
       ) : row.status === 'pending' ? (
         <header className="m-result wait">
           <span className="m-badge">
@@ -845,6 +854,7 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
           <Score value={row.risk_score} big />
           <div>
             <h2>What Nyctr found when it checked {row.domain}</h2>
+            {row.check && <p>{row.check}</p>}
             <p>
               {row.status !== 'auto_approved'
                 ? 'This is the score the administrator will see too.'
@@ -975,15 +985,49 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
   // My requests and a request's own page keep reading while one of this member's
   // requests is still undecided, so the answer shows up where they are already looking.
-  // After that decision, a failed lease read would leave the previous list on screen, so
-  // reading continues until the lease list has been read successfully as well.
-  const undecided = (data.requests.data ?? []).some((row) => row.status === 'pending');
+  // After a decision, the openings are read once more, so one written with the decision
+  // is not missed. Each yes has its own later read: a second ask does not reuse the first.
+  // That read happens once, then stops, even when no opening is there. A no does not ask
+  // again. A failed lease read keeps reading until one succeeds.
+  const undecided = (data.requests.data ?? []).some(
+    (row) => row.status === 'pending' || row.status === 'analysing',
+  );
+  const follow = useRef({ saw: false, sawSpent: false, checked: new Set<string>() });
+  if (undecided) {
+    follow.current.saw = true;
+    follow.current.sawSpent = false;
+  }
+  const leaseFor = new Set((data.leases.data ?? []).map((item) => item.request_id));
+  const onList = section === 'requests';
+  const onRequest = section === 'portal' && request !== null;
+  const owed = (data.requests.data ?? []).filter(
+    (row) =>
+      (onList || onRequest) &&
+      data.leases.data !== null &&
+      !data.leases.error &&
+      (onList || row.id === request) &&
+      (row.status === 'approved' || row.status === 'auto_approved') &&
+      !leaseFor.has(row.id) &&
+      !follow.current.checked.has(row.id),
+  );
+  const needSaw =
+    follow.current.saw && !undecided && !follow.current.sawSpent && data.requests.data !== null;
+  // The later read waits until nothing is undecided, so a request that is still
+  // waiting does not use up the read meant for its own decision.
+  const needExtra = !undecided && data.requests.data !== null && (needSaw || owed.length > 0);
   const waiting =
     (section === 'requests' || (section === 'portal' && request !== null)) &&
-    (undecided || (data.requests.data !== null && Boolean(data.leases.error)));
-  const again = useRefreshWhile(waiting, () =>
-    Promise.all([data.requests.reload(), data.leases.reload()]),
-  );
+    (undecided || (data.requests.data !== null && Boolean(data.leases.error)) || needExtra);
+  const again = useRefreshWhile(waiting, () => {
+    const finishing = needExtra;
+    const spendSaw = needSaw;
+    const confirming = owed.map((row) => row.id);
+    return Promise.all([data.requests.reload(), data.leases.reload()]).finally(() => {
+      if (!finishing) return;
+      if (spendSaw) follow.current.sawSpent = true;
+      for (const id of confirming) follow.current.checked.add(id);
+    });
+  });
   useEffect(() => {
     document.title = 'Blocked sites · Nyctr';
     window.scrollTo?.(0, 0);

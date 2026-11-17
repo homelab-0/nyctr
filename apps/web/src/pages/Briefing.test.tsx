@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import { scheduleFixture, scheduleOff } from '../test/schedule';
@@ -105,6 +105,126 @@ const need = (
   title: `${id} source ${title}`,
   detail,
   at: null,
+});
+
+describe('an opening the rule made', () => {
+  it('shows the check and ends the opening with one press', async () => {
+    const calls = mockApi({
+      'GET /overview': overview,
+      'GET /leases': [],
+      'GET /integrations': [source('fine', 'connected')],
+      'GET /collection': scheduleOff(),
+      'POST /leases/lease-1/end': {},
+    });
+    render(
+      <Briefing
+        attention={[
+          {
+            kind: 'lease',
+            id: 'lease-1',
+            action: 'end',
+            severity: 'low',
+            title: 'shop.example was opened by the access rule',
+            detail: 'Nyctr checked this site: the risk looks low.',
+            at: null,
+          },
+        ]}
+        loading={false}
+      />,
+    );
+    expect(await screen.findByText('Nyctr checked this site: the risk looks low.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'End' }));
+    await waitFor(() =>
+      expect(
+        calls.some((call) => call.method === 'POST' && call.path === '/leases/lease-1/end'),
+      ).toBe(true),
+    );
+  });
+
+  it('drops the opening from the list on screen after End, without leaving the page', async () => {
+    let ended = false;
+    const calls = mockApi({
+      'GET /overview': overview,
+      'GET /leases': () =>
+        ended
+          ? []
+          : [
+              {
+                id: 'lease-1',
+                domain: 'shop.example',
+                kind: 'temporary',
+                status: 'active',
+                execution: 'applied',
+                owned: true,
+                risk_score: 20,
+                created_at: new Date().toISOString(),
+                expires_at: new Date(Date.now() + 58 * 60_000).toISOString(),
+                last_error: null,
+              },
+            ],
+      'GET /integrations': [source('fine', 'connected')],
+      'GET /collection': scheduleOff(),
+      'POST /leases/lease-1/end': () => {
+        ended = true;
+        return {};
+      },
+    });
+    const retry = vi.fn();
+    render(
+      <Briefing
+        attention={[
+          {
+            kind: 'lease',
+            id: 'lease-1',
+            action: 'end',
+            severity: 'low',
+            title: 'shop.example was opened by the access rule',
+            detail: 'Nyctr checked this site: the risk looks low.',
+            at: null,
+          },
+        ]}
+        loading={false}
+        retry={retry}
+      />,
+    );
+    const panel = () => screen.getByRole('heading', { name: 'Open right now' }).closest('section')!;
+    expect((await screen.findByText('58 min left')).textContent).toBeTruthy();
+    expect(panel().textContent).toContain('shop.example');
+    fireEvent.click(screen.getByRole('button', { name: 'End' }));
+    expect(await screen.findByText('Nothing is open.')).toBeTruthy();
+    expect(panel().textContent).not.toContain('58 min left');
+    expect(retry).toHaveBeenCalled();
+    expect(calls.filter((call) => call.method === 'GET' && call.path === '/leases').length).toBe(2);
+  });
+
+  it('shows the message when the opening has already ended', async () => {
+    const detail = 'This access has already ended';
+    mockApi({
+      'GET /overview': overview,
+      'GET /leases': [],
+      'GET /integrations': [source('fine', 'connected')],
+      'GET /collection': scheduleOff(),
+      'POST /leases/lease-1/end': { __status: 409, detail },
+    });
+    render(
+      <Briefing
+        attention={[
+          {
+            kind: 'lease',
+            id: 'lease-1',
+            action: 'end',
+            severity: 'low',
+            title: 'shop.example was opened by the access rule',
+            detail: 'Nyctr checked this site: the risk looks low.',
+            at: null,
+          },
+        ]}
+        loading={false}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'End' }));
+    expect((await screen.findByRole('alert')).textContent).toBe(detail);
+  });
 });
 
 describe('briefing: sources that need a look', () => {

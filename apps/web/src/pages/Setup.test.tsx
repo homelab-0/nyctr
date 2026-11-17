@@ -13,7 +13,7 @@ const rules: Rules = {
     enabled: true,
     per_day: 4,
     daily_total: 10,
-    ad_tracker: { mode: 'on', max_score: 25, max_minutes: 30 },
+    ad_tracker: { mode: 'on', max_score: 25, max_minutes: 30, analysis_required: false },
     threat_feed: { mode: 'off', max_minutes: 30, min_registered_days: 180 },
   },
   guest: { enabled: false, hits: 3, minutes: 5 },
@@ -132,22 +132,26 @@ describe('access rule in Setup', () => {
   const tier = async (name: string) => within(await screen.findByRole('region', { name }));
 
   it('says which kinds of block can open by themselves and which always come to the administrator', async () => {
-    openRule();
+    const { user } = openRule();
     const ads = await tier('Advertising and tracker lists');
     const pressed = ads.getAllByRole('button', { pressed: true });
     expect(pressed.map((button) => button.textContent)).toEqual(['On']);
     expect(ads.getByText(/On: Nyctr opens these by itself/)).toBeDefined();
-    // The threat tier has no switch: it shows its conditions and says what it is waiting for.
+    expect(ads.getByText(/A check can only stop an opening/)).toBeDefined();
     const threats = await tier('Threat feeds');
-    expect(threats.getByText('Needs the risk analysis')).toBeDefined();
-    expect(threats.getByText(/the risk analysis comes in a later release/)).toBeDefined();
+    expect(threats.getByRole('button', { name: 'Off', pressed: true })).toBeDefined();
+    expect(
+      threats.getByText(/only when the check says the block does not look justified/),
+    ).toBeDefined();
     expect(threats.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
       'the name does not look machine-made or disguised',
       'the address was registered at least 180 days ago',
       'nobody said no to it before',
       'it is opened for 30 minutes at most',
     ]);
-    expect(threats.queryAllByRole('button')).toEqual([]);
+    expect(threats.getByText(/Off: these requests wait for you/)).toBeDefined();
+    await user.click(threats.getByRole('button', { name: 'Record only' }));
+    expect(await threats.findByText(/Record only: Nyctr opens nothing/)).toBeDefined();
     // The kinds that never open are listed with why, and nothing there can be pressed.
     const never = document.querySelector<HTMLElement>('.rows.boxed')!;
     expect([...never.querySelectorAll('.t')].map((kind) => kind.textContent)).toEqual([
@@ -169,7 +173,10 @@ describe('access rule in Setup', () => {
     await user.click(ads.getByRole('button', { name: 'Record only' }));
     await waitFor(() =>
       expect(saved()).toEqual([
-        { ...rules.access, ad_tracker: { mode: 'shadow', max_score: 25, max_minutes: 30 } },
+        {
+          ...rules.access,
+          ad_tracker: { mode: 'shadow', max_score: 25, max_minutes: 30, analysis_required: false },
+        },
       ]),
     );
     expect(await ads.findByText(/Record only: Nyctr opens nothing/)).toBeDefined();
@@ -181,13 +188,97 @@ describe('access rule in Setup', () => {
     await user.click(ads.getByRole('button', { name: 'Lower minutes' }));
     const shorter = {
       ...rules.access,
-      ad_tracker: { mode: 'on', max_score: 25, max_minutes: 15 },
+      ad_tracker: { mode: 'on', max_score: 25, max_minutes: 15, analysis_required: false },
       threat_feed: { mode: 'off', max_minutes: 15, min_registered_days: 180 },
     };
     await waitFor(() => expect(saved()).toEqual([shorter]));
     expect(await screen.findByText('it is opened for 15 minutes at most')).toBeDefined();
     await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
     await waitFor(() => expect(saved()[1]).toEqual({ ...shorter, daily_total: 9 }));
+  });
+
+  it('names the check beside On and Off', async () => {
+    openRule();
+    const ads = await tier('Advertising and tracker lists');
+    const check = ads.getByRole('switch', { name: 'Require a check of the address' });
+    const named = ads.getByText('Require a check of the address');
+    expect(named).toBeDefined();
+    expect(check.closest('.bar')).toBe(named.closest('.bar'));
+    expect(check.parentElement?.textContent).toContain('Off');
+  });
+
+  it('sends the later change after the earlier save has settled', async () => {
+    const { saved, user } = openRule();
+    await screen.findByRole('button', { name: 'Lower openings per day' });
+    const release = holdBack('PUT', '/rules/access');
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    expect(saved()[0]).toMatchObject({ per_day: 3, daily_total: 10 });
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    expect(saved()).toHaveLength(1);
+    release();
+    await waitFor(() => expect(saved()).toHaveLength(2));
+    expect(saved()[1]).toMatchObject({ per_day: 3, daily_total: 9 });
+  });
+
+  it('returns to the last saved rule when a later queued save fails', async () => {
+    let current = rules;
+    let attempt = 0;
+    const calls = mockApi({
+      'GET /rules': () => current,
+      'PUT /rules/access': (body: unknown) => {
+        attempt += 1;
+        if (attempt === 2) return { __status: 500, detail: 'The access rule could not be saved.' };
+        current = { ...current, access: body as Rules['access'] };
+        return body;
+      },
+    });
+    render(<Setup params={new URLSearchParams('tab=rule')} />);
+    const user = userEvent.setup();
+    const automatic = () => screen.getByRole('switch', { name: 'Automatic access' });
+    await screen.findByRole('button', { name: 'Lower openings per day' });
+    const inner = globalThis.fetch;
+    let releaseFirst = () => {};
+    let releaseSecond = () => {};
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondHeld = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let seenPuts = 0;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+      if ((options?.method || 'GET') === 'PUT' && String(input) === '/api/rules/access') {
+        seenPuts += 1;
+        if (seenPuts === 1) {
+          const answer = inner(input, options);
+          await firstHeld;
+          return answer;
+        }
+        if (seenPuts === 2) await secondHeld;
+      }
+      return inner(input, options);
+    });
+    const saved = () => calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+    const reads = () =>
+      calls.filter((call) => call.method === 'GET' && call.path === '/rules').length;
+    await user.click(automatic());
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    expect(saved()[0]).toMatchObject({ enabled: false, per_day: 4 });
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    expect(saved()).toHaveLength(1);
+    const before = reads();
+    releaseFirst();
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    expect(automatic().getAttribute('aria-checked')).toBe('false');
+    releaseSecond();
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'The access rule could not be saved.',
+    );
+    expect(automatic().getAttribute('aria-checked')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    await waitFor(() => expect(saved()).toHaveLength(3));
+    expect(saved()[2]).toMatchObject({ enabled: false, per_day: 4, daily_total: 9 });
   });
 });
 

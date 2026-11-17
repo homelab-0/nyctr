@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Sparkles } from 'lucide-react';
-import { useApi } from '../api';
-import { ErrorState, Loading, Panel, Score, SourceTag } from '../components/ui';
+import { post, useApi } from '../api';
+import { ErrorState, InlineError, Loading, Panel, Score, SourceTag } from '../components/ui';
 import { counted, lookupSpan, namedCounts, notSeen } from '../lib/counts';
 import { failing, uncollected, waitingText, whyEmpty } from '../lib/coverage';
 import { ago, atSource, isOpen, left, useNow, word } from '../lib/format';
@@ -117,6 +117,7 @@ export default function Briefing({
   const missing = notCollected(sources.data || [], catalog.data);
   const careful = cautions(sources.data || [], catalog.data);
   const [question, setQuestion] = useState('');
+  const [endError, setEndError] = useState<string | null>(null);
   const now = useNow();
   // A schedule read again means a collection was due, so "Collected ... ago" is read again too.
   const { reads } = schedule;
@@ -183,8 +184,42 @@ export default function Briefing({
             </p>
           ) : (
             <div className="rows">
+              {endError ? <InlineError message={endError} /> : null}
               {attention.map((item) => {
                 const href = needHref(item);
+                if (item.action === 'end') {
+                  return (
+                    <div className="row" key={`${item.kind}:${href}:${item.id}`}>
+                      <i className={`dot ${item.severity}`} />
+                      <span>
+                        <a href={href}>
+                          <span className="t">{item.title}</span>
+                        </a>
+                        <span className="d">{item.detail}</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="button small"
+                        onClick={() => {
+                          setEndError(null);
+                          void post(`/leases/${item.id}/end`, {})
+                            .then(() => {
+                              // Open right now reads its own list. Ending only the attention
+                              // list would leave this opening on screen.
+                              leases.reload();
+                              retry?.();
+                            })
+                            .catch((reason: Error) => {
+                              setEndError(reason.message);
+                              leases.reload();
+                            });
+                        }}
+                      >
+                        End
+                      </button>
+                    </div>
+                  );
+                }
                 return (
                   <a className="row" key={`${item.kind}:${href}:${item.id}`} href={href}>
                     <i className={`dot ${item.severity}`} />

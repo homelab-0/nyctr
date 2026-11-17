@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App';
@@ -1053,9 +1053,15 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/requests')).toBe(2);
     expect(reads(calls, '/leases')).toBe(2);
     onlyOwn(calls);
-    await advance(60_000);
+    await advance(4_999);
     expect(reads(calls, '/requests')).toBe(2);
     expect(reads(calls, '/leases')).toBe(2);
+    await advance(1);
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
   });
 
   it('shows a decision in My requests within five seconds, in the same row', async () => {
@@ -1083,8 +1089,10 @@ describe('an answer while the member page stays open', () => {
     expect(row?.textContent).not.toContain('Waiting for a person');
     expect(reads(calls, '/requests')).toBe(2);
     onlyOwn(calls);
+    await advance(5_000);
+    expect(reads(calls, '/requests')).toBe(3);
     await advance(60_000);
-    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/requests')).toBe(3);
   });
 
   it('reads every five seconds for two minutes, then every thirty', async () => {
@@ -1127,6 +1135,10 @@ describe('an answer while the member page stays open', () => {
     expect(document.getElementById('main-content')).toBe(main);
     expect(moved).not.toHaveBeenCalled();
     const blocks = reads(calls, '/blocks');
+    await advance(30_000);
+    expected += 1;
+    expect(reads(calls, '/requests')).toBe(expected);
+    expect(reads(calls, '/leases')).toBe(expected);
     await advance(60_000);
     expect(reads(calls, '/requests')).toBe(expected);
     expect(reads(calls, '/blocks')).toBe(blocks);
@@ -1399,6 +1411,110 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/requests')).toBe(settled);
   });
 
+  it('reads the leases once more after a decision, then stops', async () => {
+    clock();
+    let phase: 'pending' | 'approved' | 'open' = 'pending';
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(phase === 'pending' ? pending : { status: 'approved', decided_by: 'admin' }),
+        ],
+        'GET /leases': () => (phase === 'open' ? [lease()] : []),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: 'A person needs to look at this.' })).toBeDefined();
+    phase = 'approved';
+    await advance(5_000);
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    phase = 'open';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
+    const settled = reads(calls, '/leases');
+    await advance(60_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+    expect(reads(calls, '/requests')).toBe(settled);
+  });
+
+  it('reads the openings once more when the first look is already a yes and the opening is missing', async () => {
+    clock();
+    let opened = false;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({})],
+        'GET /leases': () => (opened ? [lease()] : []),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(1);
+    expect(reads(calls, '/leases')).toBe(1);
+    opened = true;
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    const settled = reads(calls, '/leases');
+    await advance(60_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+    expect(reads(calls, '/requests')).toBe(settled);
+  });
+
+  it('stops after that one look when a yes still has no opening', async () => {
+    clock();
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({ status: 'approved', decided_by: 'admin' })],
+        'GET /leases': [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    await advance(5_000);
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+    await advance(60_000);
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(reads(calls, '/leases')).toBe(2);
+  });
+
+  it('does not read again when the opening is already with the yes', async () => {
+    clock();
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({})],
+        'GET /leases': [lease()],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    const held = reads(calls, '/leases');
+    await advance(60_000);
+    expect(reads(calls, '/leases')).toBe(held);
+    expect(reads(calls, '/requests')).toBe(held);
+  });
+
   it('keeps My requests on screen when a later check fails', async () => {
     clock();
     let fail = false;
@@ -1488,4 +1604,207 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/requests')).toBe(before);
     expect(reads(calls, '/leases')).toBe(before);
   });
+
+  it('reads the openings after a submission whose first list is already a yes', async () => {
+    clock();
+    let submitted = false;
+    let leaseReads = 0;
+    let resolveRequests: (rows: AccessRequest[]) => void = () => {};
+    const deferredRequests = new Promise<AccessRequest[]>((resolve) => {
+      resolveRequests = resolve;
+    });
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /blocks': [block('b1', 'photos.example', 'laptop')],
+        'GET /requests': () => (submitted ? deferredRequests : []),
+        'GET /leases': () => {
+          leaseReads += 1;
+          // The first two reads are the page opening and the read that races the decision.
+          return leaseReads <= 2 ? [] : [lease()];
+        },
+        'POST /requests': () => {
+          submitted = true;
+          return request({ status: 'analysing', decided_by: null });
+        },
+      },
+      '/portal?block=b1',
+    );
+    await paint();
+    fireEvent.change(screen.getByLabelText('What do you need it for?'), {
+      target: { value: 'Fabricated wedding photos' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask to open it' }));
+    await paint();
+    expect(leaseReads).toBe(2);
+    await act(async () => {
+      resolveRequests([request({})]);
+    });
+    await paint();
+    expect(
+      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    await advance(60_000);
+    await paint();
+    // A read started after the yes must replace the empty list from before the decision.
+    expect(reads(calls, '/leases')).toBeGreaterThan(2);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+  });
+});
+
+describe('independent confirmation: stop and retry boundaries', () => {
+  it.each(['/portal?request=r1', '/requests'])(
+    'retries a failed post-decision lease read and stops after success on %s',
+    async (path) => {
+      clock();
+      let count = 0;
+      const { calls } = open(
+        {
+          ...quiet,
+          'GET /requests': [request({})],
+          'GET /leases': () => {
+            count += 1;
+            if (count === 1) return [];
+            if (count <= 3) return { __status: 500, detail: 'Fabricated lease failure' };
+            return [lease()];
+          },
+        },
+        path,
+      );
+      await paint();
+      await advance(5_000);
+      await paint();
+      expect(count).toBe(2);
+      await advance(5_000);
+      await paint();
+      expect(count).toBe(3);
+      await advance(5_000);
+      await paint();
+      expect(count).toBe(4);
+      if (path.startsWith('/portal'))
+        expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+      else expect(document.body.textContent).toContain('58 min left');
+      const done = reads(calls, '/leases');
+      await advance(180_000);
+      expect(reads(calls, '/leases')).toBe(done);
+    },
+  );
+
+  it.each([
+    ['/portal?request=r1', 'denied'],
+    ['/requests', 'denied'],
+    ['/portal?request=r1', 'applied'],
+    ['/requests', 'applied'],
+    ['/portal?request=r1', 'no_lease'],
+    ['/requests', 'no_lease'],
+    ['/portal?request=r1', 'not_applied'],
+    ['/requests', 'not_applied'],
+  ])('stops truthfully on %s with %s', async (path, outcome) => {
+    clock();
+    const denied = outcome === 'denied';
+    const rows =
+      outcome === 'applied'
+        ? [lease()]
+        : outcome === 'not_applied'
+          ? [lease({ execution: 'not_applied', owned: false })]
+          : [];
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': [request({ status: denied ? 'denied' : 'approved', decided_by: 'admin' })],
+        'GET /leases': rows,
+      },
+      path,
+    );
+    await paint();
+    await advance(5_000);
+    await paint();
+    const expected = outcome === 'no_lease' ? 2 : 1;
+    expect(reads(calls, '/leases')).toBe(expected);
+    if (path.startsWith('/portal')) {
+      const heading = denied
+        ? 'Not this time.'
+        : outcome === 'applied'
+          ? "It's open."
+          : 'Approved, but not switched on yet.';
+      expect(screen.getByRole('heading', { name: heading })).toBeDefined();
+    } else if (outcome === 'no_lease' || outcome === 'not_applied') {
+      expect(document.body.textContent).toContain(
+        outcome === 'no_lease' ? 'Approved' : 'Approved, not on yet',
+      );
+      expect(document.body.textContent).not.toContain('min left');
+    }
+    await advance(180_000);
+    expect(reads(calls, '/leases')).toBe(expected);
+    expect(reads(calls, '/requests')).toBe(expected);
+  });
+
+  it.each(['/portal?request=r2', '/requests'])(
+    'gives a later submitted request its own lease read on %s',
+    async (view) => {
+      clock();
+      let submitted = false;
+      let count = 0;
+      let resolveRequests: (rows: AccessRequest[]) => void = () => {};
+      const deferred = new Promise<AccessRequest[]>((resolve) => {
+        resolveRequests = resolve;
+      });
+      const first = request({});
+      const second = request({ id: 'r2', block_id: 'b2', domain: 'second.example' });
+      const secondLease = lease({ id: 'l2', request_id: 'r2', domain: 'second.example' });
+      const { calls } = open(
+        {
+          ...quiet,
+          'GET /blocks': [block('b2', 'second.example', 'laptop')],
+          'GET /requests': () => (submitted ? deferred : [first]),
+          'GET /leases': () => {
+            count += 1;
+            if (count === 1) return [];
+            if (count <= 3) return [lease()];
+            return [lease(), secondLease];
+          },
+          'POST /requests': () => {
+            submitted = true;
+            return { ...second, status: 'analysing', decided_by: null };
+          },
+        },
+        '/portal?request=r1',
+      );
+      await paint();
+      await advance(5_000);
+      await paint();
+      expect(count).toBe(2);
+      expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+      await act(async () => {
+        window.location.hash = '/portal?block=b2';
+      });
+      await paint();
+      fireEvent.change(screen.getByRole('textbox', { name: 'What do you need it for?' }), {
+        target: { value: 'Fabricated second request' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Ask to open it' }));
+      await paint();
+      expect(count).toBe(3);
+      await act(async () => {
+        resolveRequests([first, second]);
+      });
+      await paint();
+      expect(
+        screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+      ).toBeDefined();
+      await act(async () => {
+        window.location.hash = view;
+      });
+      await paint();
+      await advance(60_000);
+      await paint();
+      expect(reads(calls, '/leases')).toBeGreaterThan(3);
+      if (view.startsWith('/portal'))
+        expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+      else
+        expect(screen.getByRole('link', { name: /second.example/ }).textContent).toContain(
+          'min left',
+        );
+    },
+  );
 });

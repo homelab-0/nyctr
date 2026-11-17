@@ -15,9 +15,11 @@ import {
 } from '../components/ui';
 import { ago, atSource, span, useNow, writtenNote } from '../lib/format';
 import { bringIntoView } from '../lib/links';
+import { useRefreshWhile } from '../lib/refresh';
 import type { AccessRequest, Lease, Person, Rules } from '../types';
 
 const STATUS: Record<string, { text: string; tone: string }> = {
+  analysing: { text: 'Checking', tone: '' },
   pending: { text: 'Waiting', tone: 'yellow' },
   auto_approved: { text: 'Opened by the rule', tone: 'green' },
   approved: { text: 'Approved', tone: 'green' },
@@ -49,9 +51,9 @@ export default function Requests({
   const now = useNow();
   const all = requests.data || [];
   const waiting = all
-    .filter((row) => row.status === 'pending')
+    .filter((row) => row.status === 'pending' || row.status === 'analysing')
     .sort((a, b) => (b.risk_score ?? 101) - (a.risk_score ?? 101));
-  const decided = all.filter((row) => row.status !== 'pending');
+  const decided = all.filter((row) => row.status !== 'pending' && row.status !== 'analysing');
   const list = tab === 'waiting' ? waiting : decided;
   const row = all.find((item) => item.id === selected) || list[0] || null;
   const names = new Map((people.data || []).map((person) => [person.id, person.name]));
@@ -60,19 +62,51 @@ export default function Requests({
     setError(null);
     if (row) setMinutes(Math.min(240, Math.max(15, row.duration_minutes)));
   }, [row?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The link's request is chosen when the address changes, or when that request first appears.
+  // A later read of the same address leaves the choice, and any note being written, as they are.
+  const appliedUrl = useRef<string | null>(null);
+  const urlId = params.get('id');
   useEffect(() => {
-    const wanted = all.find((item) => item.id === params.get('id'));
-    if (wanted) {
-      setSelected(wanted.id);
-      setTab(wanted.status === 'pending' ? 'waiting' : 'decided');
+    if (!urlId) {
+      appliedUrl.current = null;
+      return;
     }
-  }, [requests.data, params]); // eslint-disable-line react-hooks/exhaustive-deps
+    const wanted = all.find((item) => item.id === urlId);
+    if (appliedUrl.current === urlId) {
+      if (wanted && selected === wanted.id) {
+        setTab(
+          wanted.status === 'pending' || wanted.status === 'analysing' ? 'waiting' : 'decided',
+        );
+      }
+      return;
+    }
+    if (!wanted) return;
+    appliedUrl.current = urlId;
+    setSelected(wanted.id);
+    setTab(wanted.status === 'pending' || wanted.status === 'analysing' ? 'waiting' : 'decided');
+  }, [requests.data, urlId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // On a narrow screen the request's panel sits under the list: bring it into view when one is chosen.
   const panel = useRef<HTMLElement>(null);
   useEffect(() => {
     if (selected && row?.id === selected) bringIntoView(panel.current);
   }, [selected, row?.id]);
+  // While a request is still being checked, read the list again so a finished check shows up
+  // without a reload. Reading stops when none are left, and when this page is left.
+  const checking = all.some((item) => item.status === 'analysing');
+  useRefreshWhile(requests.data !== null && checking, () => requests.reload());
+  // The decision can open an address. Read the openings once that decision is on the list,
+  // so the page can say what happened at the source.
+  const checkingIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const now = new Set(all.filter((item) => item.status === 'analysing').map((item) => item.id));
+    const finished = [...checkingIds.current].some((id) => {
+      const item = all.find((entry) => entry.id === id);
+      return item !== undefined && item.status !== 'analysing';
+    });
+    checkingIds.current = now;
+    if (finished) leases.reload();
+  }, [requests.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Records the decision. Approval opens a lease; the server reports what really happened. */
   const decide = async (decision: 'approved' | 'denied') => {
@@ -103,7 +137,7 @@ export default function Requests({
   // never says whether anything was opened.
   const lease = (leases.data || []).find((item) => item.request_id === row?.id);
   const happened =
-    !row || row.status === 'pending'
+    !row || row.status === 'pending' || row.status === 'analysing'
       ? ''
       : lease
         ? `${atSource(lease)}${lease.status === 'ended' ? ' It has ended since.' : ''}`
@@ -195,6 +229,31 @@ export default function Requests({
                 />
                 {row.risk_factors && <Factors items={row.risk_factors} />}
                 {row.decision_note && <p className="aside">{row.decision_note}</p>}
+                {row.status === 'analysing' && (
+                  <p className="aside">Nyctr is still checking this request.</p>
+                )}
+                {row.analysis && (
+                  <div>
+                    <h3>Check of this address</h3>
+                    <KV
+                      items={[
+                        ['Verdict', row.analysis.verdict || 'None'],
+                        ['Risk', row.analysis.risk || 'None'],
+                        ['Uncertainty', row.analysis.uncertainty || 'None'],
+                      ]}
+                    />
+                    <ul className="aside">
+                      {(row.analysis.facts?.facts || []).map((fact) => (
+                        <li key={fact.id || fact.kind}>
+                          {fact.kind}: {fact.state}
+                        </li>
+                      ))}
+                    </ul>
+                    {row.analysis.reasons.map((reason) => (
+                      <p key={reason.fact}>{reason.text}</p>
+                    ))}
+                  </div>
+                )}
                 <KV
                   items={[
                     ['Who', names.get(row.requester_id) || 'Unknown'],

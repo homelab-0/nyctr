@@ -151,19 +151,21 @@ def test_a_waiting_request_writes_one_notice_and_a_rolled_back_request_writes_no
         member = live_signin(client, LIVE_MEMBER)
         made = client.post("/api/requests", headers=member, json=ASK)
         assert made.status_code == 201, made.text
+        assert made.json()["status"] == "analysing" and made.json()["risk_score"] is None
         again = client.post("/api/requests", headers=member, json=ASK)
-        assert again.status_code == 201
+        assert again.status_code == 201 and again.json()["id"] == made.json()["id"]
         with app.state.session_factory() as db:
+            from nyctr.models import AccessRequest
             rows = db.scalars(select(Notice)).all()
+            stored = db.scalar(select(AccessRequest))
             assert len(rows) == 1 and rows[0].kind == "request_waiting" and rows[0].subject == made.json()["id"]
             body = json.dumps(rows[0].payload)
-            assert rows[0].payload["request"]["score"] == made.json()["risk_score"]
-            assert rows[0].payload["request"]["score"] != 0 or made.json()["risk_score"] == 0
+            assert stored.status == "pending" and "is waiting on " in rows[0].payload["title"]
+            assert rows[0].payload["request"]["score"] == stored.risk_score
+            assert rows[0].payload["request"]["score"] != 0 or stored.risk_score == 0
             assert "10.0.0.9" not in body and "token=" not in rows[0].payload["link"]
             assert rows[0].payload["link"] == f"https://console.example/#/requests?id={made.json()['id']}"
             assert list(parse_qs(rows[0].payload["link"].split("?", 1)[1])) == ["id"]
-            from nyctr.models import AccessRequest
-            stored = db.scalar(select(AccessRequest))
             stored.status = "approved"
             assert notices.waiting(db, app.state.settings, stored) is None
             assert len(db.scalars(select(Notice)).all()) == 1

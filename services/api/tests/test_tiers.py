@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.exc import OperationalError
-from test_access import GALLERY, put_rule
+from test_access import GALLERY, put_rule, read_request, settled
 from test_crossing import DOMAIN, Source, ask, console, started
 
 from nyctr import access, layers, policy, risk
@@ -45,8 +45,8 @@ RULES = [AccessRule(enabled=enabled, per_day=per_day, daily_total=total, threat_
                     ad_tracker=AdTier(mode=mode, max_score=score, max_minutes=minutes))
          for enabled, mode, score, minutes, per_day, total in product(
              (False, True), ("off", "shadow", "on"), (0, 60), (15, 240), (1, 20), (1, 100))]
-# What validation refuses today, forced past it: the threat tier recording or on, with everything else on.
-FORCED = [ON.model_copy(update={"threat_feed": ThreatTier().model_copy(update={"mode": mode})})
+# The threat tier recording or on, with everything else on. Both positions validate.
+FORCED = [AccessRule(enabled=True, ad_tracker=AdTier(mode="on"), threat_feed=ThreatTier(mode=mode))
           for mode in ("shadow", "on")]
 
 
@@ -180,12 +180,11 @@ def test_the_checks_run_in_one_order_and_the_first_failure_ends_them():
     assert not may_open(shadow, facts(AD, score=26)).would
 
 
-def test_the_threat_tier_stays_off_and_would_need_an_analysis_that_vouches():
-    """No stored rule can switch it on yet. Forced on, only an analysis that is there and says so opens it."""
+def test_the_threat_tier_opens_only_when_an_analysis_vouches():
+    """Record only and on are real positions. On opens only when an analysis is there and vouches."""
     for mode in ("shadow", "on"):
-        with pytest.raises(ValidationError):
-            ThreatTier(mode=mode)
-    assert may_open(ON, facts(FEED, analysis=GOOD)).failed == "mode"
+        assert AccessRule(enabled=True, threat_feed=ThreatTier(mode=mode)).threat_feed.mode == mode
+    assert may_open(ON, facts(FEED, analysis=GOOD)).failed == "mode"  # Threats stay off on this rule.
     forced = FORCED[1]
     opened = may_open(forced, facts(AD, FEED, analysis=GOOD))  # Beside an advertising list it is a threat block.
     assert opened.allow and opened.tier == "threat_feed" and opened.minutes == 30
@@ -194,6 +193,8 @@ def test_the_threat_tier_stays_off_and_would_need_an_analysis_that_vouches():
         assert may_open(forced, facts(FEED, analysis=GOOD, **changes)).failed == "conditions"
     assert may_open(forced, facts(FEED, analysis=GOOD, declined=True)).failed == "declined"
     assert may_open(forced, facts(FEED, analysis=GOOD, score=92)).allow  # The score is not its condition.
+    would = may_open(FORCED[0], facts(FEED, analysis=GOOD))
+    assert would.would and not would.allow and would.tier == "threat_feed"
 
 
 def test_the_decision_and_the_layers_reach_no_database_network_or_model():
@@ -304,7 +305,6 @@ def test_a_csam_block_or_a_class_of_address_someone_chose_to_block_never_opens_w
 @pytest.mark.parametrize("body", [
     *({"enabled": True, tier: {"mode": "on"}} for tier in policy.NEVER),
     {"enabled": True, "deny_entry": {"mode": "shadow", "max_minutes": 15}},
-    {"threat_feed": {"mode": "shadow"}}, {"threat_feed": {"mode": "on"}},
     {"daily_total": 0}, {"daily_total": 101}, {"per_day": 21},
     {"ad_tracker": {"max_minutes": 15}},  # The threat tier's 30 minutes would then be the longer.
     {"ad_tracker": {"max_minutes": 60}, "threat_feed": {"max_minutes": 61}},
@@ -314,7 +314,7 @@ def test_a_csam_block_or_a_class_of_address_someone_chose_to_block_never_opens_w
     {"enabled": True, "allow_statement": True},
 ])
 def test_the_rule_cannot_be_written_wider_than_the_tiers_allow(client, admin_headers, body):
-    """A mode on a never tier, the threat tier past off, a limit out of bounds: refused, and nothing stored."""
+    """A mode on a never tier, or a limit out of bounds: refused, and nothing stored."""
     before = client.get("/api/rules").json()["access"]
     assert client.put("/api/rules/access", headers=admin_headers, json=body).status_code == 422
     assert client.get("/api/rules").json()["access"] == before
@@ -396,7 +396,8 @@ def test_a_rule_stored_before_tiers_reads_as_it_acted_and_a_broken_one_as_everyt
         # No longer valid in either form: the safe default, as before.
         ({**OLD, "max_score": 61}, AccessRule()), ({**OLD, "per_day": 0}, AccessRule()),
         ({**OLD, "ad_tracker": {"mode": "on"}}, AccessRule()),
-        ({"enabled": True, "threat_feed": {"mode": "on"}}, AccessRule()),
+        ({"enabled": True, "threat_feed": {"mode": "on"}},
+         AccessRule(enabled=True, threat_feed=ThreatTier(mode="on"))),
         ({"enabled": True, "ad_tracker": {"mode": "on"}, "intrusion": {"mode": "on"}}, AccessRule()),
         ({"enabled": True, "ad_tracker": {"mode": "on", "max_minutes": 15}}, AccessRule()),
         ({"enabled": "yes please", "max_score": [25]}, AccessRule()),
@@ -410,7 +411,6 @@ def test_a_rule_stored_before_tiers_reads_as_it_acted_and_a_broken_one_as_everyt
                 db.expire_all()
                 read = policy.get_rule(db, "access_rule")
                 assert read == expected, stored
-                assert read.threat_feed.mode == "off"
             assert not AccessRule().enabled and AccessRule().ad_tracker.mode == "off"
             policy.put_rule(db, "access_rule", cases[0][1], "someone")  # Stored again, it is in the new form.
             db.commit()
@@ -430,15 +430,16 @@ def test_after_the_upgrade_the_same_requests_open_and_the_same_wait(client, app)
         db.get(Setting, "access_rule").value = {"enabled": True, "max_score": 25, "max_minutes": 45, "per_day": 4}
         db.commit()
     member = signin(client, member=True)
-    opened = client.post("/api/requests", headers=member, json=GALLERY).json()
+    opened = settled(client, member, client.post("/api/requests", headers=member, json=GALLERY))
     assert (opened["status"], opened["duration_minutes"]) == ("auto_approved", 45)
     for block in ("block-verify", "block-tablet", "block-print"):  # Newly registered, a deny entry, an unsaid list.
-        waits = client.post("/api/requests", headers=member, json={**GALLERY, "block_id": block}).json()
+        waits = settled(client, member, client.post("/api/requests", headers=member,
+                                                    json={**GALLERY, "block_id": block}))
         assert waits["status"] == "pending"
     signin(client)
     assert client.get("/api/rules").json()["access"] == {
         "enabled": True, "per_day": 4, "daily_total": 8,  # Two active accounts, four openings each.
-        "ad_tracker": {"mode": "on", "max_score": 25, "max_minutes": 45},
+        "ad_tracker": {"mode": "on", "max_score": 25, "max_minutes": 45, "analysis_required": False},
         "threat_feed": {"mode": "off", "max_minutes": 30, "min_registered_days": 180}}
 
 
@@ -446,7 +447,8 @@ def test_a_request_is_told_which_new_check_left_it_to_a_person(client, app):
     """The tier switched off, the day's total for everyone, and a block not tied to a device."""
     def request(block="block-gallery"):
         headers = signin(client, member=True)
-        return client.post("/api/requests", headers=headers, json={**GALLERY, "block_id": block}).json()
+        return settled(client, headers, client.post("/api/requests", headers=headers,
+                                                    json={**GALLERY, "block_id": block}))
 
     put_rule(client, signin(client), ad_tracker={"mode": "off"})
     off = request()
@@ -467,7 +469,8 @@ def test_a_request_is_told_which_new_check_left_it_to_a_person(client, app):
         db.commit()
     # Only an administrator can ask about a block that is not assigned; the rule does not open it for them either.
     admin = put_rule(client, signin(client)) or signin(client)
-    loose = client.post("/api/requests", headers=admin, json={**GALLERY, "block_id": "block-inferred"}).json()
+    loose = settled(client, admin, client.post("/api/requests", headers=admin,
+                                              json={**GALLERY, "block_id": "block-inferred"}))
     assert loose["status"] == "pending" and loose["decision_note"] \
         == "Nyctr cannot be sure which device this block belongs to, so a person decides."
 
@@ -477,7 +480,8 @@ def test_record_only_leaves_the_request_to_a_person_and_changes_nothing_at_the_s
     source = Source(monkeypatch)
     with started(tmp_path) as (app, client, member, admin):
         put_rule(client, admin["headers"], ad_tracker={"mode": "shadow"})
-        row = client.post("/api/requests", headers=live_signin(client, LIVE_MEMBER), json=ask("one")).json()
+        member_headers = live_signin(client, LIVE_MEMBER)
+        row = settled(client, member_headers, client.post("/api/requests", headers=member_headers, json=ask("one")))
         assert (row["status"], row["decided_by"]) == ("pending", None) and row["decision_note"] == (
             "The access rule would have opened this for 60 minutes. It is set to record only, so a person decides.")
         assert source.calls == [] and source.listed == []
@@ -489,7 +493,7 @@ def test_record_only_leaves_the_request_to_a_person_and_changes_nothing_at_the_s
             assert (event.details["outcome"], event.details["tier"], event.details["minutes"]) \
                 == ("would_open", "ad_tracker", 60)
             assert event.details["limits"] == {"per_day": 4, "daily_total": 10, "mode": "shadow", "max_score": 25,
-                                               "max_minutes": 60}
+                                               "max_minutes": 60, "analysis_required": False}
         # A person still decides it, and that does change the source.
         assert client.post(f"/api/requests/{row['id']}/review", headers=live_signin(client),
                            json={"decision": "approved", "note": "Fine", "minutes": 30}).status_code == 200
@@ -515,7 +519,7 @@ def test_two_requests_of_one_person_at_one_instant_cannot_both_pass_the_daily_to
             second = asyncio.create_task(sam.post("/api/requests", json=ask("two")))
             await asyncio.wait_for(waiting.wait(), 300)
             source.go.set()
-            rows = [(await task).json() for task in (first, second)]
+            rows = [await read_request(sam, await task) for task in (first, second)]
         assert [row["status"] for row in rows] == ["auto_approved", "pending"]
         assert rows[1]["decision_note"] \
             == "Nyctr has reached today's limit of 1 automatic openings for everyone, so a person decides."
@@ -538,9 +542,9 @@ def test_two_people_at_one_instant_cannot_both_pass_the_daily_total(tmp_path, mo
         async with console(app, sam) as first_person, console(app, other) as second_person:
             first = asyncio.create_task(first_person.post("/api/requests", json=ask("one")))
             await asyncio.wait_for(source.reached.wait(), 300)  # Sam's add is sent; nothing of it is stored yet.
-            second = (await second_person.post("/api/requests", json=ask("robin"))).json()
+            second = await second_person.post("/api/requests", json=ask("robin"))
             source.go.set()
-            return (await first).json(), second
+            return await read_request(first_person, await first), await read_request(second_person, second)
 
     with started(tmp_path) as (app, client, member, admin):
         put_rule(client, admin["headers"], daily_total=1)
@@ -705,12 +709,12 @@ def test_two_people_opening_one_address_each_keep_the_rules_record(tmp_path, mon
                 assert _outcomes(app, "robin") == ["may_open"], name
                 if name == "the claim is held":
                     source.go.set()
-                    sam_row = (await first).json()
+                    sam_row = await read_request(first_person, await first)
                 proceed.set()
             assert await until(found.get()) == "the claim is taken"
             assert _outcomes(app, "robin") == ["may_open"], "the claim is taken"
             proceed.set()
-            return sam_row, (await second).json()
+            return sam_row, await read_request(second_person, await second)
 
     with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, client, member, _admin):
         robin = ("robin@example.net", "a third secure password")
@@ -774,7 +778,7 @@ def test_a_rule_changed_while_the_add_is_unanswered_is_read_again(tmp_path, monk
             put = await asyncio.wait_for(owner.put("/api/rules/access", json=body), 60)
             assert put.status_code == 200, put.text
             source.go.set()
-            return (await first).json()
+            return await read_request(sam, await first)
 
     with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, _client, member, admin):
         try:
@@ -813,7 +817,7 @@ def test_a_lower_limit_while_the_add_is_unanswered_shortens_the_lease(tmp_path, 
             put = await asyncio.wait_for(owner.put("/api/rules/access", json=body), 60)
             assert put.status_code == 200, put.text
             source.go.set()
-            return (await first).json()
+            return await read_request(sam, await first)
 
     with started(tmp_path, rule=True, **({} if url is None else {"database_url": url})) as (app, _client, member, admin):
         try:
@@ -857,7 +861,8 @@ def test_the_rule_row_is_locked_while_the_opening_is_stored(tmp_path, monkeypatc
 
         monkeypatch.setattr(access, "_lock_rule", lock)
         try:
-            row = client.post("/api/requests", headers=live_signin(client, LIVE_MEMBER), json=ask("one")).json()
+            headers = live_signin(client, LIVE_MEMBER)
+            row = settled(client, headers, client.post("/api/requests", headers=headers, json=ask("one")))
             assert row["status"] == "auto_approved" and seen == ["held"]
         finally:
             app.state.engine.dispose()

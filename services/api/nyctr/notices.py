@@ -483,8 +483,14 @@ def _add(db: Session, settings: Settings, kind: str, subject: str, title: str, l
 
 
 def waiting(db: Session, settings: Settings, row: AccessRequest) -> Notice | None:
-    """Queue one notice that this request is waiting. The caller commits it with the decision."""
-    if row.status != "pending" or _exists(db, "request_waiting", row.id):
+    """Queue one notice for this request. The caller commits it with the decision.
+
+    A request left for a person says they are waiting. An opening the rule just stored says Nyctr
+    opened it. Both use the same kind, so a request has one notice, and a second call adds none.
+    """
+    pending = row.status == "pending"
+    opened = row.status == "auto_approved" and row.decided_by == "rule"
+    if (not pending and not opened) or _exists(db, "request_waiting", row.id):
         return None
     secret = _secret_value(_load(db)[0].secret_ref)
     person = db.get(User, row.requester_id)
@@ -493,8 +499,8 @@ def waiting(db: Session, settings: Settings, row: AccessRequest) -> Notice | Non
     lines = [part.strip() for part in (row.decision_note or "").splitlines() if part.strip()][:3]
     request = _request_fields(row, name, observation.reason if observation else "", secret)
     link = f"{settings.public_url}/#/requests?id={quote(row.id, safe='')}"
-    return _add(db, settings, "request_waiting", row.id, f"{name} is waiting on {row.domain}", lines, request, link,
-                secret)
+    title = f"{name} is waiting on {row.domain}" if pending else f"Nyctr opened {row.domain}"
+    return _add(db, settings, "request_waiting", row.id, title, lines, request, link, secret)
 
 
 def stuck(db: Session, settings: Settings, lease: Lease) -> Notice | None:

@@ -28,15 +28,17 @@ class AdTier(BaseModel):
     mode: Literal["off", "shadow", "on"] = "off"
     max_score: int = Field(default=25, ge=0, le=60)
     max_minutes: int = Field(default=60, ge=15, le=240)
+    # When set, an analysis is required, as it is for a threat feed. Otherwise an analysis can only stop an opening.
+    analysis_required: bool = False
 
 
 class ThreatTier(BaseModel):
-    """Blocks by a feed of addresses reported as threats. Its conditions are kept and shown; it stays off.
+    """Blocks by a feed of addresses reported as threats.
 
-    This tier opens nothing without an analysis of the address. None exists yet, so no other mode validates.
+    An analysis is required. The tier stays off until an administrator switches it to record only or on.
     """
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["off"] = "off"
+    mode: Literal["off", "shadow", "on"] = "off"
     max_minutes: int = Field(default=30, ge=15, le=240)
     min_registered_days: int = Field(default=180, ge=30, le=3650)
 
@@ -159,8 +161,9 @@ def may_open(rule: AccessRule, facts: Facts) -> Decision:
     """Say whether the rule lets Nyctr open this block by itself. The first check that fails ends it.
 
     The order is fixed. A tier that can never be automatic is refused before the analysis is looked
-    at, so nothing an analysis says can open one. Outside the threat tier an analysis can only stop
-    an opening. The minutes come from the request and the tier's limit alone.
+    at, so nothing an analysis says can open one. A threat feed requires an analysis. Advertising
+    requires one only when the administrator said so; otherwise an analysis can only stop an opening.
+    The minutes come from the request and the tier's limit alone.
     """
     tier = block_tier(facts.policies)
     limits = getattr(rule, tier) if tier in AUTOMATIC else None
@@ -174,7 +177,9 @@ def may_open(rule: AccessRule, facts: Facts) -> Decision:
         return facts.score is not None and facts.score <= limits.max_score
 
     def analysis() -> bool:
-        if tier == "threat_feed":  # Required: there, and saying the block looks unjustified and the risk low.
+        # Required for a threat feed, and for advertising when the administrator said so.
+        required = tier == "threat_feed" or bool(getattr(limits, "analysis_required", False))
+        if required:  # There, and saying the block looks unjustified and the risk low.
             return said.present and said.verdict == "not_justified" and said.risk == "low"
         return not said.present or (said.verdict in ("not_justified", "cannot_tell") and said.risk in ("low", "unknown"))
 

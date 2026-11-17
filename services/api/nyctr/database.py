@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from .models import Base, SchemaVersion
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 # Schema 2 adds access decisions, leases, guest control and generated insights.
 _V2_TABLES = ("settings", "leases", "device_links", "guest_passes", "guest_actions", "sightings", "insights")
@@ -81,6 +81,18 @@ def _upgrade_to_7(connection):
     connection.execute(SchemaVersion.__table__.insert().values(version=7))
 
 
+def _upgrade_to_8(connection):
+    """Add the analysis and its claim on a request. Existing rows gain empty columns and stay as they were."""
+    present = {column["name"] for column in inspect(connection).get_columns("access_requests")}
+    dialect = connection.dialect
+    for name in ("analysis_id", "analysis_holder", "analysis_claimed_at"):
+        if name not in present:
+            column = Base.metadata.tables["access_requests"].columns[name]
+            kind = column.type.compile(dialect=dialect)
+            connection.execute(text(f"ALTER TABLE access_requests ADD COLUMN {name} {kind}"))
+    connection.execute(SchemaVersion.__table__.insert().values(version=8))
+
+
 def make_engine(database_url: str):
     """Create a pooled database engine with SQLite settings suitable for API tests.
 
@@ -137,6 +149,9 @@ def migrate(engine):
         if version == 6:
             _upgrade_to_7(connection)
             version = 7
+        if version == 7:
+            _upgrade_to_8(connection)
+            version = 8
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"Unsupported schema version {version}; expected {CURRENT_SCHEMA_VERSION}")
 

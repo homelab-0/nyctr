@@ -10,10 +10,11 @@ reconciliation, including after a restart.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Literal
 
@@ -26,10 +27,20 @@ from sqlalchemy.orm import Session
 from . import peer, policy, presence, risk, schedule
 from .collection import SECRET_REF
 from .config import Settings
-from .deps import admin, columns, device_assigned, device_permitted, get_db, identity, observation_permitted
+from .deps import (
+    admin,
+    columns,
+    device_assigned,
+    device_permitted,
+    get_db,
+    identity,
+    observation_permitted,
+    request_json,
+)
 from .integrations import IntegrationError, registry
 from .models import (
     AccessRequest,
+    Analysis,
     Audit,
     DeviceLink,
     Integration,
@@ -46,6 +57,7 @@ from .security import audit
 from .sites import site_of
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("nyctr.access")
 
 
 def lease_json(row: Lease, names: dict[str, str] | None = None) -> dict:
@@ -324,6 +336,14 @@ def source_removed(db: Session, lease: Lease) -> bool:
 # How long a claim on a source entry is held if the copy that took it was killed mid-call. Longer than an
 # opening and its undo can take: each is one change with its own time limit (`actions.CHANGE_SECONDS`).
 ENDING_HOLD = timedelta(minutes=5)
+# How long the analysis job's claim is honoured. A later start may take a claim older than this.
+ANALYSIS_HOLD = timedelta(minutes=2)
+# How often a running check stamps that claim again. Shorter than the hold, so a check that is still
+# waiting for a model slot, or still opening, does not look idle to another process. The hold stays
+# two minutes: a check that has stopped is taken over only after that, counted from its last stamp.
+CLAIM_PULSE = 30.0
+# A pass that leaves a request it could already claim tries again after this pause.
+RECOVERY_RETRY = 1.0
 # How long an opening waits for an ending or another opening of the same address before it is refused.
 OPENING_WAITS = 10.0
 
@@ -760,7 +780,399 @@ def _left_to_a_person(verdict: policy.Decision, rule: AccessRule, assessment: ri
     }[check]
 
 
-async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation) -> None:
+def plain_check(analysis: Analysis | None) -> str:
+    """One sentence for the person who asked. It never includes the raw facts."""
+    lead = "Nyctr checked this site: "
+    state = analysis.model_state if analysis is not None else "missing"
+    if analysis is None or state == "missing":
+        return lead + "no model is connected, so there is no verdict."
+    if state == "failed":
+        return lead + "the check did not finish."
+    if state == "invalid":
+        return lead + "the check's answer could not be used."
+    if state == "timed_out":
+        return lead + "the check took too long."
+    if state == "cannot_tell" or analysis.verdict == "cannot_tell":
+        return lead + "the check could not say either way."
+    if analysis.verdict == "not_justified" and analysis.risk == "low":
+        return lead + "the block does not look justified, and the risk looks low."
+    if analysis.verdict == "justified":
+        return lead + "the block looks justified."
+    if analysis.verdict == "not_justified":
+        return lead + "the block does not look justified."
+    return lead + "the check could not say either way."
+
+
+def shown(db: Session, row: AccessRequest, *, admin: bool) -> dict:
+    """The request a person may read. An administrator gets the analysis; a member gets one sentence."""
+    data = request_json(row)
+    analysis = db.get(Analysis, row.analysis_id) if row.analysis_id else None
+    if analysis is None:
+        return data
+    if admin:
+        data["analysis"] = {"id": analysis.id, "facts": analysis.facts, "verdict": analysis.verdict,
+                            "risk": analysis.risk, "reasons": analysis.reasons,
+                            "uncertainty": analysis.uncertainty, "model_state": analysis.model_state}
+    else:
+        data["check"] = plain_check(analysis)
+    return data
+
+
+def queue_auto_opened(db: Session, settings: Settings, row: AccessRequest) -> None:
+    """Queue the notice for an opening the rule made, in the same transaction as the decision."""
+    from . import notices
+
+    notices.waiting(db, settings, row)
+
+
+def _for_the_rule(analysis: Analysis | None) -> policy.AnalysisInput:
+    """The three words the rule may see. Nothing else the analysis holds is passed on."""
+    if analysis is None:
+        return policy.AnalysisInput()
+    from .block_analysis import analysis_input
+    raw = analysis_input(analysis)
+    if raw.present and raw.verdict and raw.risk:
+        return policy.AnalysisInput(True, raw.verdict, raw.risk)
+    return policy.AnalysisInput()
+
+
+def _registered_days(analysis: Analysis | None) -> int | None:
+    """Days since the stored registration fact. Unknown, or a date that cannot be read, stays unknown."""
+    payload = analysis.facts if analysis is not None else None
+    items = payload.get("facts") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return None
+    for fact in items:
+        if not isinstance(fact, dict) or fact.get("kind") != "registration" or fact.get("state") != "known":
+            continue
+        value = fact.get("value")
+        raw = value.get("registered") if isinstance(value, dict) else None
+        if not isinstance(raw, str):
+            return None
+        try:
+            when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        days = (utcnow() - when.astimezone(UTC)).days
+        return days if days >= 0 else None
+    return None
+
+
+def _lock_request(db: Session, request_id: str) -> bool:
+    """Take the request's write lock and change nothing. False when the row is gone.
+
+    The update is a real write, so SQLite takes its writer lock. The caller re-reads after it.
+    """
+    locked = db.execute(update(AccessRequest).where(AccessRequest.id == request_id)
+                        .values(analysis_holder=AccessRequest.analysis_holder)
+                        .execution_options(synchronize_session="fetch"))
+    return locked.rowcount == 1
+
+
+def _analysis_free(row: AccessRequest, now: datetime, restart_of: str | None,
+                   previous: str | None = None) -> bool:
+    """Whether this call may take the analysis claim. A fresh claim of another holder stays theirs.
+
+    Anyone may take a claim older than the two-minute hold. A start may also take a claim that
+    belongs to this process's own previous start. A tick passes no `previous`, so a live copy's
+    fresh claim stays where it is, including when that copy started only a few seconds earlier.
+    """
+    if row.status != "analysing":
+        return False
+    claimed = utc(row.analysis_claimed_at) if row.analysis_claimed_at else None
+    if row.analysis_holder is None or claimed is None or claimed < now - ANALYSIS_HOLD:
+        return True
+    return bool(previous and restart_of and row.analysis_holder == previous
+                and row.analysis_holder != restart_of)
+
+
+# The task that is between claiming a request and storing its decision, in this process only.
+# Another process cannot see it. What that process sees is the claim's stamp, refreshed while the
+# task is alive. A task that has finished is forgotten here, and the stamp then ages as before.
+_LIVE: dict[str, asyncio.Task] = {}
+
+
+def _attempt_running(request_id: str) -> bool:
+    """Whether some other task in this process is already checking this request."""
+    owner = _LIVE.get(request_id)
+    if owner is None:
+        return False
+    if owner.done():
+        _LIVE.pop(request_id, None)
+        return False
+    return owner is not asyncio.current_task()
+
+
+def claim_analysis(db: Session, request_id: str, holder: str, *, restart_of: str | None = None,
+                   previous: str | None = None, now: datetime | None = None) -> bool:
+    """Claim the analysis job, after locking and reading the row again. The caller commits.
+
+    False leaves the transaction rolled back. A second writer stopped on the lock reads what this
+    one stored and finds the claim taken. A check this process is already running is not taken,
+    even when its stored stamp is older than the hold: that stamp can age while the check waits.
+    """
+    if _attempt_running(request_id):
+        db.rollback()
+        return False
+    now = now or utcnow()
+    if not _lock_request(db, request_id):
+        db.rollback()
+        return False
+    row = db.get(AccessRequest, request_id)
+    db.refresh(row)
+    if not _analysis_free(row, now, restart_of, previous):
+        db.rollback()
+        return False
+    row.analysis_holder, row.analysis_claimed_at = holder, now
+    db.flush()
+    return True
+
+
+def renew_analysis(db: Session, request_id: str, holder: str, *, now: datetime | None = None) -> bool:
+    """Move this holder's claim stamp forward while the request is still being analysed.
+
+    The caller commits. False rolls this transaction back and leaves the stamp as it was. A holder
+    that has lost the row, or a request that is no longer being analysed, is not stamped.
+    """
+    now = now or utcnow()
+    if not _lock_request(db, request_id):
+        db.rollback()
+        return False
+    row = db.get(AccessRequest, request_id)
+    db.refresh(row)
+    if row.status != "analysing" or row.analysis_holder != holder:
+        db.rollback()
+        return False
+    row.analysis_claimed_at = now
+    db.flush()
+    return True
+
+
+def keep_analysis(db: Session, request_id: str, holder: str, analysis_id: str) -> bool:
+    """Attach the analysis while this holder still has the request and none is stored yet.
+
+    The caller commits. False rolls this transaction back, including the lock.
+    """
+    db.flush()
+    if not _lock_request(db, request_id):
+        db.rollback()
+        return False
+    row = db.get(AccessRequest, request_id)
+    db.refresh(row)
+    if row.status != "analysing" or row.analysis_holder != holder or row.analysis_id is not None:
+        db.rollback()
+        return False
+    row.analysis_id = analysis_id
+    db.flush()
+    return True
+
+
+def keep_decision(db: Session, request_id: str, holder: str | None, **values) -> bool:
+    """Store the decision while the request is still being analysed by this holder. The caller commits.
+
+    Risk fields already set on the row are flushed before the re-read, so the re-read does not drop
+    them. False rolls this transaction back and writes nothing over another decision.
+    """
+    db.flush()
+    if not holder or not _lock_request(db, request_id):
+        db.rollback()
+        return False
+    row = db.get(AccessRequest, request_id)
+    db.refresh(row)
+    if row.status != "analysing" or row.analysis_holder != holder:
+        db.rollback()
+        return False
+    for key, value in values.items():
+        setattr(row, key, value)
+    row.analysis_holder = row.analysis_claimed_at = None
+    db.flush()
+    return True
+
+
+async def _pulse_claim(factory, request_id: str, holder: str, stop: asyncio.Event) -> None:
+    """Stamp a running check's claim until it stops. The first wait is the full pause.
+
+    A check that fails at once must not look as if it had just been stamped. One missed stamp is
+    logged and the loop continues: the check itself is not abandoned because a stamp could not be stored.
+    """
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=CLAIM_PULSE)
+            return
+        except TimeoutError:
+            pass
+        try:
+            with factory() as db:
+                if not renew_analysis(db, request_id, holder):
+                    return
+                db.commit()
+        except Exception as error:  # noqa: BLE001 - a missed stamp must not abandon the check
+            log.warning("Refreshing an analysis claim failed: %s", type(error).__name__)
+
+
+async def _end_pulse(pulse: asyncio.Task | None, stop: asyncio.Event) -> None:
+    """Stop the stamp and wait for it. A cancelled check raises again after that wait.
+
+    The wait has to finish even when this task is already being cancelled, or the stamp task would
+    still be running when the process stops. Raising afterwards stops this pass from claiming the
+    next request on its way out.
+    """
+    current = asyncio.current_task()
+    shielded = 0
+    if current is not None:
+        while current.cancelling():
+            current.uncancel()
+            shielded += 1
+    if pulse is not None:
+        stop.set()
+        try:
+            await pulse
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:  # noqa: BLE001 - the check's own outcome is already decided
+            log.warning("Refreshing an analysis claim failed: %s", type(error).__name__)
+    pending = current.cancelling() if current is not None else 0
+    if not shielded and not pending:
+        return
+    if current is not None:
+        for _ in range(shielded):
+            current.cancel()
+    raise asyncio.CancelledError
+
+
+def _drop_unlinked(factory, analysis_id: str) -> None:
+    """Delete an analysis no request points at. One a winner stored is left alone."""
+    with factory() as db:
+        used = db.scalar(select(AccessRequest.id).where(AccessRequest.analysis_id == analysis_id).limit(1))
+        row = None if used else db.get(Analysis, analysis_id)
+        if row is None:
+            return
+        db.delete(row)
+        db.commit()
+
+
+async def finish_one(factory, settings: Settings, request_id: str, holder: str, *,
+                     restart_of: str | None = None, previous: str | None = None) -> None:
+    """Claim one analysing request, store its analysis, then let the rule decide.
+
+    The model call holds no transaction. It also waits for the same in-flight limit the explicit
+    analysis endpoint uses, so two checks are not both inside a model call when that limit is one.
+    The wait sits outside the analysis. This attempt is remembered in this process from the claim
+    until the decision, so a later pass here does not start a second one. Once a model slot is
+    free, the claim's stamp is moved forward, and it is moved again every half minute while the
+    check continues, so another process still sees a fresh claim. A claim that is actually idle
+    can still be taken after two minutes, and a fresh claim held by someone else is still left alone.
+    If the claim is lost after the analysis is stored, that analysis is kept only when a request
+    points at it. An unexpected failure leaves the claim: the two-minute takeover, or this
+    process's own previous start, finishes the request once. Clearing it at once would let the
+    next tick open the address again while the failed attempt's record is still being put right.
+    """
+    from . import assistant, block_analysis
+    if _attempt_running(request_id):
+        return
+    current = asyncio.current_task()
+    if current is not None:
+        _LIVE[request_id] = current
+    stop, pulse = asyncio.Event(), None
+    try:
+        try:
+            with factory() as db:
+                if not claim_analysis(db, request_id, holder, restart_of=restart_of, previous=previous):
+                    return
+                db.commit()
+                row = db.get(AccessRequest, request_id)
+                domain, block_id, already = row.domain, row.block_id, row.analysis_id
+            pulse = asyncio.create_task(_pulse_claim(factory, request_id, holder, stop))
+            if not already:
+                async with assistant.model_turn():
+                    # The queue can be longer than the hold. Stamp before the check, while this slot is held.
+                    with factory() as db:
+                        if not renew_analysis(db, request_id, holder):
+                            return
+                        db.commit()
+                    with factory() as db:
+                        made = await block_analysis.analyse(db, domain, block_id, settings=settings)
+                with factory() as db:
+                    if not keep_analysis(db, request_id, holder, made.id):
+                        _drop_unlinked(factory, made.id)
+                        return
+                    db.commit()
+            with factory() as db:
+                if not renew_analysis(db, request_id, holder):
+                    return
+                db.commit()
+            with factory() as db:
+                row = db.get(AccessRequest, request_id)
+                if row is None or row.status != "analysing" or row.analysis_holder != holder:
+                    return
+                observation = db.get(Observation, row.block_id)
+                if observation is not None and utc(observation.expires_at) <= utcnow():
+                    observation = None
+                stored = db.get(Analysis, row.analysis_id) if row.analysis_id else None
+                if observation is None:
+                    if keep_decision(db, request_id, holder, status="pending", decision_note=(
+                            "The blocked lookup behind this request is no longer current, so a person decides.")):
+                        from . import notices
+                        notices.waiting(db, settings, row)
+                        db.commit()
+                    return
+                await decide(db, settings, row, observation, analysis=stored, holder=holder)
+                db.commit()
+        except Exception as error:  # noqa: BLE001 - logged by type; the claim stays until it is taken over
+            log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+            raise
+    finally:
+        if current is not None and _LIVE.get(request_id) is current:
+            _LIVE.pop(request_id, None)
+        await _end_pulse(pulse, stop)
+
+
+async def finish_due(factory, settings: Settings, *, restart_of: str | None = None,
+                     previous: str | None = None) -> None:
+    """Finish every request that is still being analysed. A tick passes no `previous`.
+
+    One request's failure is logged by `finish_one` and left claimed. The next request in this
+    pass still runs.
+    """
+    from .collection import holder_id
+    with factory() as db:
+        ids = list(db.scalars(select(AccessRequest.id).where(AccessRequest.status == "analysing")
+                              .order_by(AccessRequest.created_at, AccessRequest.id)))
+    holder = holder_id(factory)
+    for request_id in ids:
+        try:
+            await finish_one(factory, settings, request_id, holder, restart_of=restart_of, previous=previous)
+        except Exception:  # noqa: BLE001 - logged by finish_one; the claim stays and the next request runs
+            continue
+
+
+def recovery_delay(factory, *, now: datetime | None = None) -> float | None:
+    """Seconds until another pass is useful, or None when no request is still being analysed.
+
+    A fresh claim stays with its holder. The wait is how long until the soonest of those claims
+    reaches the two-minute hold. A request that can be claimed now is tried again after a short
+    pause, so a failure does not spin and does not wait out a hold it does not have.
+    """
+    now = now or utcnow()
+    with factory() as db:
+        rows = list(db.scalars(select(AccessRequest).where(AccessRequest.status == "analysing")))
+    if not rows:
+        return None
+    waits: list[float] = []
+    for row in rows:
+        claimed = utc(row.analysis_claimed_at) if row.analysis_claimed_at else None
+        if row.analysis_holder is None or claimed is None:
+            waits.append(0.0)
+            continue
+        waits.append(max(0.0, (claimed + ANALYSIS_HOLD - now).total_seconds()))
+    soonest = min(waits)
+    return RECOVERY_RETRY if soonest <= 0.0 else soonest
+
+
+async def decide(db: Session, settings: Settings, row: AccessRequest, observation: Observation, *,
+                 analysis: Analysis | None = None, holder: str | None = None) -> None:
     """Assess a new request, store the assessment, and open access only if the written rule allows.
 
     Whether it may is `policy.may_open`'s answer to the facts gathered here; this function does the
@@ -794,7 +1206,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
         return policy.Facts(
             policies=assessment.policies, can_open=_opener(integration) is not None,
             changes_on=bool(integration) and settings.write_mode(integration.provider) != "disabled", match=match,
-            score=assessment.score, name_shape=len(assessment.factors) > 1, registered_days=None,
+            score=assessment.score, name_shape=len(assessment.factors) > 1,
+            registered_days=_registered_days(analysis), analysis=_for_the_rule(analysis),
             declined=bool(db.scalar(select(AccessRequest.id).where(
                 AccessRequest.domain == row.domain, AccessRequest.status == "denied").limit(1))),
             opened_today=max(0, _auto_opens_today(db, row.requester_id) - pending),
@@ -818,18 +1231,13 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
     def leave(verdict: policy.Decision, words: str) -> None:
         """The checks passed and the request still waits. The record says waits, not that it opened.
 
-        The note is written only while the request is still pending. If that write changes nothing, a
-        decision has landed since the request was read, and this one records nothing over it.
+        The note is written only while this job still holds the request. If that write changes nothing,
+        a decision has landed since the request was read, and this one records nothing over it.
         """
-        changed = db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
-                                                         AccessRequest.status == "pending")
-                             .values(decision_note=words)
-                             .execution_options(synchronize_session=False)).rowcount == 1
-        if not changed:  # The answer reads the row again: a decision since the last read keeps its note.
+        if not keep_decision(db, row.id, holder, status="pending", decision_note=words):
             db.expire(row)
             return
         record(policy.Decision(False, False, verdict.tier, verdict.minutes, None, verdict.checks), words)
-        row.decision_note = words
         from . import notices
         notices.waiting(db, settings, row)
 
@@ -841,9 +1249,9 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
         # that is already listed as waiting is never overwritten. If a person has it, the rule leaves it to them.
         gate = hold_review(db, row.id)
         db.refresh(row)
-        if gate is None or row.status != "pending":
+        if gate is None or row.status != "analysing":
             # No claim, or the request was decided while this waited for one. The note below matches
-            # pending, so a decision that landed after the refresh keeps its own note and no waits record.
+            # analysing and this holder, so a decision that landed keeps its own note and no waits record.
             if gate is None:
                 leave(verdict, "This request is already being decided, so a person decides.")
             return end_review(db, gate) if gate else None
@@ -855,8 +1263,8 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                 waited += 0.25
             integration = db.get(Integration, row.integration_id)
             if turn is None:
-                why = "Nyctr was still opening your earlier requests, so a person decides this one."
-                leave(verdict, why)
+                leave(verdict, "Nyctr was still opening your earlier requests, so a person decides this one.")
+                why = None  # leave wrote the note. The path below must not write over it.
             elif integration is None:
                 leave(verdict, f"{name} was removed from Nyctr while this request waited, so a person decides.")
                 why = None  # leave wrote the note while the request was pending. It commits with the claim.
@@ -896,16 +1304,16 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
                         # Compare and swap, as in the review route: a copy that does not know the request's
                         # claim may have decided meanwhile. Then nothing is stored, and what was added stays
                         # on record to be removed.
-                        if db.execute(update(AccessRequest).where(AccessRequest.id == row.id,
-                                                                  AccessRequest.status == "pending")
-                                      .values(status="auto_approved", decided_by="rule", duration_minutes=minutes,
-                                              decision_note=f"Opened for {minutes} minutes by the access rule.")
-                                      ).rowcount != 1:
+                        if not keep_decision(
+                                db, row.id, holder, status="auto_approved", decided_by="rule",
+                                duration_minutes=minutes,
+                                decision_note=f"Opened for {minutes} minutes by the access rule."):
                             db.rollback()
                             return release_entry(db, claim, unstored=True)
                         elif _give_back(db, turn):  # With the commit that stores the lease, so the next one counts it.
                             _give_back(db, gate)
                             turn = gate = None
+                            queue_auto_opened(db, settings, row)  # Same transaction as the decision.
                             return db.refresh(row)
                         else:
                             # The turn was taken over while this stood still, so the day's count may have moved on
@@ -927,8 +1335,9 @@ async def decide(db: Session, settings: Settings, row: AccessRequest, observatio
             release_entry(db, turn)
             if gate:
                 end_review(db, gate)
-    if why is not None:
-        row.decision_note = why
+    if why is not None and not keep_decision(db, row.id, holder, status="pending", decision_note=why):
+        db.expire(row)
+    elif why is not None:
         from . import notices
         notices.waiting(db, settings, row)
 

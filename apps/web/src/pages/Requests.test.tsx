@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '../test/mock-api';
 import type { AccessRequest, Lease } from '../types';
@@ -6,8 +6,28 @@ import Requests from './Requests';
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+const FAKED = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] as const;
+const times = (calls: { path: string }[], path: string) =>
+  calls.filter((call) => call.path === path).length;
+
+function clock() {
+  vi.useFakeTimers({ now: Date.now(), toFake: [...FAKED] });
+}
+async function paint() {
+  for (let turn = 0; turn < 20; turn += 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+}
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
 
 describe('approving a request the server refuses', () => {
   it('says why above the Approve button and leaves the request waiting', async () => {
@@ -129,5 +149,224 @@ describe('a decided request', () => {
       note: '',
       minutes: 60,
     });
+  });
+});
+
+describe('a request that is being checked', () => {
+  it('says the check is still running and shows the stored analysis to the administrator', async () => {
+    const row = {
+      id: 'r1',
+      block_id: 'block',
+      domain: 'shop.example',
+      device_name: 'Laptop',
+      requester_id: 'member',
+      reason: 'Need the page',
+      duration_minutes: 30,
+      status: 'analysing',
+      created_at: '2026-11-16T10:00:00Z',
+      risk_score: null,
+      analysis: {
+        id: 'a1',
+        verdict: 'not_justified',
+        risk: 'low',
+        uncertainty: 'The registry date is the only age on record.',
+        model_state: 'ok',
+        facts: { facts: [{ id: 'f1', kind: 'registration', state: 'known' }] },
+        reasons: [{ fact: 'f1', text: 'The block does not look justified.' }],
+      },
+    } as AccessRequest;
+    mockApi({
+      'GET /requests': [row],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    expect(await screen.findByText('Nyctr is still checking this request.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Check of this address' })).toBeTruthy();
+    expect(screen.getByText('not_justified')).toBeTruthy();
+    expect(screen.getByText('low')).toBeTruthy();
+    expect(screen.getByText('registration: known')).toBeTruthy();
+    expect(screen.getByText('The block does not look justified.')).toBeTruthy();
+  });
+
+  it('shows the finished check without a browser reload, then stops reading', async () => {
+    clock();
+    let done = false;
+    const row = {
+      id: 'r1',
+      block_id: 'block',
+      domain: 'shop.example',
+      device_name: 'Laptop',
+      requester_id: 'member',
+      reason: 'Need the page',
+      duration_minutes: 30,
+      status: 'analysing',
+      created_at: '2026-11-16T10:00:00Z',
+      risk_score: null,
+    } as AccessRequest;
+    const calls = mockApi({
+      'GET /requests': () => [done ? { ...row, status: 'auto_approved' } : row],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByText('Nyctr is still checking this request.')).toBeTruthy();
+    expect(screen.getAllByText('Checking').length).toBeGreaterThan(0);
+    const before = times(calls, '/requests');
+    done = true;
+    await advance(5_000);
+    expect(screen.getAllByText('Opened by the rule').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Nyctr is still checking this request.')).toBeNull();
+    expect(screen.getAllByText('shop.example').length).toBeGreaterThan(0);
+    const finished = times(calls, '/requests');
+    expect(finished).toBe(before + 1);
+    await advance(60_000);
+    expect(times(calls, '/requests')).toBe(finished);
+  });
+
+  it('stops reading when the page is left while a check is still running', async () => {
+    clock();
+    const calls = mockApi({
+      'GET /requests': [
+        {
+          id: 'r1',
+          block_id: 'block',
+          domain: 'shop.example',
+          device_name: 'Laptop',
+          requester_id: 'member',
+          reason: 'Need the page',
+          duration_minutes: 30,
+          status: 'analysing',
+          created_at: '2026-11-16T10:00:00Z',
+          risk_score: null,
+        } as AccessRequest,
+      ],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByText('Nyctr is still checking this request.')).toBeTruthy();
+    const before = times(calls, '/requests');
+    cleanup();
+    await advance(60_000);
+    expect(times(calls, '/requests')).toBe(before);
+  });
+
+  const request = (id: string, domain: string, status: AccessRequest['status']) =>
+    ({
+      id,
+      block_id: 'block',
+      domain,
+      device_name: 'Laptop',
+      requester_id: 'member',
+      reason: 'Need the page',
+      duration_minutes: 30,
+      status,
+      created_at: '2026-11-16T10:00:00Z',
+      risk_score: status === 'analysing' ? null : 20,
+    }) as AccessRequest;
+
+  it('shows the opening once the check finishes, without a browser reload', async () => {
+    clock();
+    let done = false;
+    const calls = mockApi({
+      'GET /requests': () => [
+        done
+          ? request('r1', 'shop.example', 'auto_approved')
+          : request('r1', 'shop.example', 'analysing'),
+      ],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': () =>
+        done
+          ? [{ id: 'l1', request_id: 'r1', status: 'active', execution: 'applied', owned: true }]
+          : [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByText('Nyctr is still checking this request.')).toBeTruthy();
+    expect(screen.queryByText('Nyctr has no record of a change at the source.')).toBeNull();
+    expect(screen.queryByText('Changed at the source and checked.')).toBeNull();
+    const before = times(calls, '/leases');
+    done = true;
+    await advance(5_000);
+    await paint();
+    expect(screen.getByText('Changed at the source and checked.')).toBeTruthy();
+    expect(screen.queryByText('Nyctr has no record of a change at the source.')).toBeNull();
+    expect(times(calls, '/leases')).toBe(before + 1);
+  });
+
+  it('keeps the request and the note being written when the list is read again', async () => {
+    clock();
+    mockApi({
+      'GET /requests': () => [
+        request('r1', 'first.example', 'analysing'),
+        request('r2', 'second.example', 'pending'),
+      ],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    fireEvent.click(screen.getByRole('button', { name: /second\.example/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Note for the record (optional)' }), {
+      target: { value: 'Only for today' },
+    });
+    await advance(5_000);
+    await paint();
+    const chosen = screen.getByRole('button', { name: /second\.example/ });
+    expect(chosen.classList.contains('on')).toBe(true);
+    expect(screen.getByRole('button', { name: /first\.example/ }).classList.contains('on')).toBe(
+      false,
+    );
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: 'Note for the record (optional)',
+        }) as HTMLTextAreaElement
+      ).value,
+    ).toBe('Only for today');
+  });
+
+  it('follows a new address, and an address whose request arrives later', async () => {
+    clock();
+    let showFirst = false;
+    mockApi({
+      'GET /requests': () =>
+        showFirst
+          ? [
+              request('r1', 'first.example', 'pending'),
+              request('r2', 'second.example', 'analysing'),
+            ]
+          : [request('r2', 'second.example', 'analysing')],
+      'GET /users': [],
+      'GET /rules': { __status: 500, detail: 'Unavailable' },
+      'GET /leases': [],
+    });
+    const view = render(<Requests params={new URLSearchParams('id=r1')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByRole('button', { name: /second\.example/ }).classList.contains('on')).toBe(
+      true,
+    );
+    showFirst = true;
+    await advance(5_000);
+    await paint();
+    expect(screen.getByRole('button', { name: /first\.example/ }).classList.contains('on')).toBe(
+      true,
+    );
+    view.rerender(<Requests params={new URLSearchParams('id=r2')} onChange={() => {}} />);
+    await paint();
+    expect(screen.getByRole('button', { name: /second\.example/ }).classList.contains('on')).toBe(
+      true,
+    );
+    expect(screen.getByRole('button', { name: /first\.example/ }).classList.contains('on')).toBe(
+      false,
+    );
   });
 });

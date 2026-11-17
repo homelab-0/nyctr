@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, select, update
@@ -48,6 +48,7 @@ from .collection import (  # noqa: F401
     lease_free_sql,
     off_loop,
     parsed_date,
+    previous_holder,
     release_abandoned,
     settle_abandoned,
     show_log,
@@ -193,6 +194,26 @@ class AssignmentInput(InputModel):
         return value
 
 
+async def _until(delay: float, wake: asyncio.Event) -> None:
+    """Wait out a claim's hold, or return sooner when a failed job asks for another pass."""
+    try:
+        await asyncio.wait_for(wake.wait(), timeout=delay)
+    except TimeoutError:
+        return
+
+
+async def _finish_request(app, request_id: str) -> None:
+    """Run one request's check. A failure after the claim asks recovery to look again."""
+    try:
+        await access.finish_one(
+            app.state.session_factory, app.state.settings, request_id, holder_id(app.state.engine))
+    except Exception:
+        wake = getattr(app.state, "analysis_again", None)
+        if wake is not None:
+            wake.set()
+        raise
+
+
 def create_app(settings: Settings | None = None):
     """Build the configured API, authorization dependencies, database lifecycle, and optional static host.
 
@@ -220,6 +241,34 @@ def create_app(settings: Settings | None = None):
             model.ensure_trace_key(db)
             release_abandoned(db, restart_of=holder)
             db.commit()
+        # Requests left analysing are finished in the background. A slow or failed check must not
+        # stop the API from serving. A fresh claim is left alone until its hold ends, then tried
+        # again, including when the upkeep tick is off. When nothing is being checked, recovery
+        # waits until a later job fails after its claim, so that job is not left until the next start.
+        again = asyncio.Event()
+        app.state.analysis_again = again
+
+        async def recover() -> None:
+            log = logging.getLogger("nyctr")
+            while True:
+                try:
+                    await access.finish_due(
+                        factory, settings, restart_of=holder, previous=previous_holder(engine))
+                except Exception as error:  # noqa: BLE001 - startup must serve even when recovery fails
+                    log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+                try:
+                    delay = access.recovery_delay(factory)
+                except Exception as error:  # noqa: BLE001 - a failed read is tried again, not fatal
+                    log.warning("Finishing a request's analysis failed: %s", type(error).__name__)
+                    delay = access.RECOVERY_RETRY
+                if delay is None:
+                    await again.wait()
+                    again.clear()
+                    continue
+                await _until(delay, again)
+                again.clear()
+
+        recovery = asyncio.create_task(recover())
         if settings.old_proxy_name_in_use:
             logging.getLogger("nyctr").warning(
                 "The list of proxies is read from FORWARDED_ALLOW_IPS. That name will stop working in a later "
@@ -227,6 +276,9 @@ def create_app(settings: Settings | None = None):
         pulse = Heartbeat(factory).start()
         upkeep = asyncio.create_task(worker.run(app)) if settings.worker_enabled else None
         yield
+        recovery.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await recovery
         if upkeep:
             upkeep.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -782,11 +834,11 @@ def create_app(settings: Settings | None = None):
 
         Members, the portal address and a caller with no session are refused. The
         model's reply is kept only after it matches the fixed shape. The same
-        limit as the other model calls applies first.
+        limit as the other model calls applies first, including how many may be in flight.
         """
-        assistant._throttle(_user.id)
         try:
-            row = await block_analysis.analyse(db, body.name, body.block_id or None, settings=settings)
+            async with assistant.model_turn(_user.id):
+                row = await block_analysis.analyse(db, body.name, body.block_id or None, settings=settings)
         except facts.NotAName as error:
             raise HTTPException(422, str(error)) from None
         return block_analysis.view(row)
@@ -856,19 +908,20 @@ def create_app(settings: Settings | None = None):
         query = select(AccessRequest).order_by(AccessRequest.created_at.desc())
         if auth[0].role != "admin":
             query = query.where(AccessRequest.requester_id == auth[0].id)
-            return [request_json(r) for r in db.scalars(query)]
+            return [access.shown(db, r, admin=False) for r in db.scalars(query)]
         # Administrators see which source each came from, by the name it had if it was removed.
         names = removal.removed_names(db)
-        return [{**request_json(r), "source_name": names.get(r.integration_id)} for r in db.scalars(query)]
+        return [{**access.shown(db, r, admin=True), "source_name": names.get(r.integration_id)}
+                for r in db.scalars(query)]
 
     @app.post("/api/requests", status_code=201)
-    async def create_request(body: RequestInput, auth=Depends(identity), db: Session = Depends(get_db)):
-        """Persist an authorized, fresh event request once per user and observation, then assess it.
+    async def create_request(body: RequestInput, background: BackgroundTasks, request: Request,
+                             auth=Depends(identity), db: Session = Depends(get_db)):
+        """Store an authorized, fresh event request as analysing and answer at once.
 
-        Hidden or missing events return 404; expired events return 409. The stored
-        domain/device snapshot survives inbox expiry. Concurrent duplicate submits
-        return the existing request. The assessment is always stored and returned;
-        access is opened only when the administrator-written rule allows it.
+        The analysis and the rule run as a claimed job after the answer. Hidden or missing events
+        return 404; expired events return 409. The stored domain and device survive inbox expiry.
+        A duplicate submit returns the stored request and does not start a second job.
         """
         user = auth[0]
         observation = db.get(Observation, body.block_id)
@@ -876,19 +929,19 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Block event not found")
         if utc(observation.expires_at) <= utcnow():
             raise HTTPException(409, "This block event has expired. Try accessing the site again.")
+        administrator = user.role == "admin"
         existing = db.scalar(select(AccessRequest).where(AccessRequest.requester_id == user.id,
                                                         AccessRequest.block_id == observation.id))
         if existing:
-            return request_json(existing)
+            return access.shown(db, existing, admin=administrator)
         row = AccessRequest(block_id=observation.id, domain=observation.domain, device_name=observation.device_name,
-                            requester_id=user.id, reason=body.reason, duration_minutes=body.duration_minutes)
+                            requester_id=user.id, reason=body.reason, duration_minutes=body.duration_minutes,
+                            status="analysing")
         db.add(row)
         try:
             db.flush()
             audit(db, user.id, "access.requested", row.id, block_id=observation.id,
                   duration_minutes=body.duration_minutes)
-            db.commit()
-            await access.decide(db, settings, row, observation)
             db.commit()
         except IntegrityError:
             db.rollback()
@@ -896,8 +949,9 @@ def create_app(settings: Settings | None = None):
                                                             AccessRequest.block_id == observation.id))
             if not existing:
                 raise
-            return request_json(existing)
-        return request_json(row)
+            return access.shown(db, existing, admin=administrator)
+        background.add_task(_finish_request, request.app, row.id)
+        return access.shown(db, row, admin=administrator)
 
     @app.post("/api/requests/{request_id}/review")
     async def review(request_id: str, body: ReviewInput, user=Depends(admin), db: Session = Depends(get_db)):
@@ -912,6 +966,8 @@ def create_app(settings: Settings | None = None):
         row = db.get(AccessRequest, request_id)
         if not row:
             raise HTTPException(404, "Request not found")
+        if row.status == "analysing":
+            raise HTTPException(409, "Nyctr is still checking this request.")
         if row.status != "pending":
             raise HTTPException(409, "This request has already been reviewed")
         approving = body.decision == "approved"
@@ -968,7 +1024,7 @@ def create_app(settings: Settings | None = None):
             refused = isinstance(error, (access.SourceGone, access.NotCollected, access.EntryBusy))
             raise HTTPException(409 if refused else 502, str(error)) from None
         db.refresh(row)
-        return request_json(row)
+        return access.shown(db, row, admin=True)
 
     @app.api_route("/api/hooks/collect", methods=["GET", "POST"], status_code=202)
     @app.api_route("/api/hooks/collect/{token}", methods=["GET", "POST"], status_code=202)

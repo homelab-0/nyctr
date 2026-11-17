@@ -65,18 +65,48 @@ const MODE_MEANS: Record<TierMode, string> = {
 function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   const [rule, setRule] = useState<AccessRule>(rules.access);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => setRule(rules.access), [rules.access]);
-  /** Saves immediately so the sentence on screen is always the rule in force. */
-  const save = async (next: AccessRule) => {
+  // The rule the next save sends. A change updates it at once, so a second change is built on
+  // the first even before the page paints again.
+  const latest = useRef(rules.access);
+  // The last rule the server accepted. A failed save returns to this one. A success counts even
+  // when its read-back is ignored because another save is still queued.
+  const confirmed = useRef(rules.access);
+  const tail = useRef(Promise.resolve());
+  const pending = useRef(0);
+  useEffect(() => {
+    // A save that has not settled yet is newer than the rule just read back.
+    if (pending.current > 0) return;
+    latest.current = rules.access;
+    confirmed.current = rules.access;
+    setRule(rules.access);
+  }, [rules.access]);
+  /** Sends the whole rule, one save at a time, from the latest rule on the page. */
+  const save = (apply: (current: AccessRule) => AccessRule) => {
+    const next = apply(latest.current);
+    latest.current = next;
     setRule(next);
     setError(null);
-    try {
-      await put('/rules/access', next);
-      reload();
-    } catch (e) {
-      setError((e as Error).message);
-      setRule(rules.access);
-    }
+    pending.current += 1;
+    const run = tail.current.then(async () => {
+      const body = latest.current;
+      try {
+        await put('/rules/access', body);
+        confirmed.current = body;
+        reload();
+      } catch (e) {
+        setError((e as Error).message);
+        if (latest.current === body) {
+          latest.current = confirmed.current;
+          setRule(confirmed.current);
+        }
+      } finally {
+        pending.current -= 1;
+      }
+    });
+    tail.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
   };
   const writes = rules.writes.access;
   const openers = rules.sources.filter((source) => source.changes.length > 0);
@@ -84,9 +114,18 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
   const threats = rule.threat_feed;
   /** A threat-feed block is never open longer than an advertising one, so its limit follows down. */
   const saveAds = (change: Partial<AccessRule['ad_tracker']>) => {
-    const next = { ...ads, ...change };
-    const max_minutes = Math.min(threats.max_minutes, next.max_minutes);
-    return void save({ ...rule, ad_tracker: next, threat_feed: { ...threats, max_minutes } });
+    save((current) => {
+      const next = { ...current.ad_tracker, ...change };
+      const max_minutes = Math.min(current.threat_feed.max_minutes, next.max_minutes);
+      return { ...current, ad_tracker: next, threat_feed: { ...current.threat_feed, max_minutes } };
+    });
+  };
+  const saveThreats = (change: Partial<AccessRule['threat_feed']>) => {
+    save((current) => {
+      const next = { ...current.threat_feed, ...change };
+      const max_minutes = Math.min(next.max_minutes, current.ad_tracker.max_minutes);
+      return { ...current, threat_feed: { ...next, max_minutes } };
+    });
   };
   return (
     <Panel
@@ -98,7 +137,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
           <Switch
             label="Automatic access"
             checked={rule.enabled}
-            onChange={(enabled) => void save({ ...rule, enabled })}
+            onChange={(enabled) => save((current) => ({ ...current, enabled }))}
           />
           <span className="aside">
             With this off, every request waits for you, whatever is set below.
@@ -111,7 +150,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             min={1}
             max={20}
             value={rule.per_day}
-            onChange={(per_day) => void save({ ...rule, per_day })}
+            onChange={(per_day) => save((current) => ({ ...current, per_day }))}
           />
           requests a day for each person, and
           <Stepper
@@ -119,7 +158,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             min={1}
             max={100}
             value={rule.daily_total}
-            onChange={(daily_total) => void save({ ...rule, daily_total })}
+            onChange={(daily_total) => save((current) => ({ ...current, daily_total }))}
           />
           a day for everyone together.
         </p>
@@ -163,19 +202,36 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             <span>0 to {ads.max_score}: Nyctr may open it</span>
             <span>{ads.max_score + 1} to 100, or no score: a person decides</span>
           </div>
+          <div className="bar">
+            <span>Require a check of the address</span>
+            <Switch
+              label="Require a check of the address"
+              checked={ads.analysis_required}
+              onChange={(analysis_required) => saveAds({ analysis_required })}
+            />
+          </div>
           <p className="aside">
+            {ads.analysis_required
+              ? 'Nyctr opens one of these only when the check says the block does not look justified ' +
+                'and the risk looks low.'
+              : 'A check can only stop an opening. It cannot open one by itself.'}{' '}
             {MODE_MEANS[ads.mode]} An address you said no to before always waits for you.
           </p>
         </section>
         <section className="tier" aria-label="Threat feeds">
           <div className="bar">
             <b>Threat feeds</b>
-            <span className="tag">Needs the risk analysis</span>
+            <Seg
+              label="Threat feeds"
+              value={threats.mode}
+              options={MODES}
+              onChange={(mode) => saveThreats({ mode })}
+            />
           </div>
           <p className="aside">
-            A feed of addresses reported as dangerous blocked it. This stays off for now: Nyctr will
-            open one of these only after it has analysed the address, and the risk analysis comes in
-            a later release. These are the conditions it will then also have to meet:
+            A feed of addresses reported as dangerous blocked it. Nyctr opens one of these only when
+            the check says the block does not look justified and the risk looks low, and these are
+            also true:
           </p>
           <ul className="aside">
             <li>the name does not look machine-made or disguised</li>
@@ -183,6 +239,7 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             <li>nobody said no to it before</li>
             <li>it is opened for {threats.max_minutes} minutes at most</li>
           </ul>
+          <p className="aside">{MODE_MEANS[threats.mode]}</p>
         </section>
         <h3>Always come to you</h3>
         <div className="rows boxed">

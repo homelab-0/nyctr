@@ -9,6 +9,7 @@ from datetime import timedelta
 import httpx
 import pytest
 from sqlalchemy import select, update
+from test_access import read_request
 from test_crossing import DOMAIN, Source, ask, claims, console, started
 from test_upkeep import Sources, upkeep
 
@@ -53,7 +54,7 @@ def test_an_opening_whose_read_back_fails_is_refused_and_its_entry_is_removed_be
 
         async def scenario():
             async with console(app, member) as sam:
-                return (await sam.post("/api/requests", json=ask("one"))).json()
+                return await read_request(sam, await sam.post("/api/requests", json=ask("one")))
 
         answer = asyncio.run(scenario())
         assert answer["status"] == "pending" and "a person decides" in answer["decision_note"]
@@ -72,7 +73,7 @@ def test_what_the_first_try_could_not_remove_is_listed_never_as_access_and_settl
 
         async def scenario():
             async with console(app, member) as sam, console(app, admin) as owner:
-                made = (await sam.post("/api/requests", json=ask("one"))).json()
+                made = await read_request(sam, await sam.post("/api/requests", json=ask("one")))
                 listed = (await owner.get("/api/leases")).json()
                 assert [(row["status"], row["execution"], row["requester_id"]) for row in listed] == [
                     ("unconfirmed", "not_applied", None)]
@@ -141,7 +142,7 @@ def test_nyctr_never_removes_an_entry_that_was_there_before_or_that_another_exce
 
         async def scenario():
             async with console(app, member) as sam:  # Asked first: it is there. The opening then fails.
-                assert (await sam.post("/api/requests", json=ask("one"))).json()["status"] == "pending"
+                assert (await read_request(sam, await sam.post("/api/requests", json=ask("one"))))["status"] == "pending"
             assert rows(app) == [] and source.calls == ["GET", "GET"] and source.listed == [DOMAIN]
             source.listed.clear()
             with app.state.session_factory() as db:
@@ -187,7 +188,7 @@ def test_a_source_that_cannot_say_whether_the_address_was_there_gets_a_record_ny
         async def scenario():
             Sources(monkeypatch)
             async with console(app, member) as sam, console(app, admin) as owner:
-                assert (await sam.post("/api/requests", json=ask("one"))).json()["status"] == "pending"
+                assert (await read_request(sam, await sam.post("/api/requests", json=ask("one"))))["status"] == "pending"
                 up = upkeep(app, [utcnow() + timedelta(days=1)])
                 up.tick()
                 await up.stop()

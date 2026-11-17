@@ -16,6 +16,22 @@ from nyctr.models import Audit, Integration, Lease, Observation, utcnow
 GALLERY = {"block_id": "block-gallery", "reason": "Need to open a picture gallery", "duration_minutes": 240}
 
 
+def settled(client, headers, response):
+    """The stored request. The answer itself is analysing; the decision follows and is read back."""
+    body = response.json()
+    return next(row for row in client.get("/api/requests", headers=headers).json() if row["id"] == body["id"])
+
+
+async def read_request(client, response):
+    """The stored request, read by the same signed-in client that sent it.
+
+    The answer itself is analysing. The decision is on the stored row once the job has run.
+    """
+    body = response if isinstance(response, dict) else response.json()
+    listed = (await client.get("/api/requests")).json()
+    return next(row for row in listed if row["id"] == body["id"])
+
+
 def put_rule(client, headers, max_score=25, max_minutes=60, **values):
     """Write the access rule as the administrator: advertising and tracker lists on, nothing else."""
     body = {"enabled": True, "per_day": 4, **values,
@@ -26,8 +42,9 @@ def put_rule(client, headers, max_score=25, max_minutes=60, **values):
 def test_low_risk_privacy_block_opens_under_the_written_rule(client, app, member_headers):
     """The rule, not the score alone, opens access; the time is capped and the result is marked simulated."""
     response = client.post("/api/requests", headers=member_headers, json=GALLERY)
-    row = response.json()
-    assert response.status_code == 201 and row["status"] == "auto_approved" and row["decided_by"] == "rule"
+    assert response.status_code == 201 and response.json()["status"] == "analysing"
+    row = settled(client, member_headers, response)
+    assert row["status"] == "auto_approved" and row["decided_by"] == "rule"
     assert row["risk_score"] == 16 and row["risk_category"] == "privacy_list" and row["duration_minutes"] == 60
     lease = next(x for x in client.get("/api/leases").json() if x["request_id"] == row["id"])
     assert lease["status"] == "active" and lease["execution"] == "simulated" and lease["kind"] == "temporary"
@@ -43,8 +60,9 @@ def test_low_risk_privacy_block_opens_under_the_written_rule(client, app, member
 ])
 def test_risky_or_deliberate_blocks_always_wait_for_a_person(client, member_headers, block, expect):
     """Security and policy blocks are scored, explained and left pending."""
-    row = client.post("/api/requests", headers=member_headers,
-                      json={"block_id": block, "reason": "I need this page", "duration_minutes": 60}).json()
+    response = client.post("/api/requests", headers=member_headers,
+                           json={"block_id": block, "reason": "I need this page", "duration_minutes": 60})
+    row = settled(client, member_headers, response)
     assert row["status"] == "pending" and row["risk_score"] > 30
     assert expect in row["decision_note"] or "person decides" in row["decision_note"]
     assert not [x for x in client.get("/api/leases").json() if x["request_id"] == row["id"]]
@@ -56,7 +74,8 @@ def test_unknown_reason_fails_closed(client, app, member_headers):
         source = db.get(Observation, "block-gallery")
         source.reason, source.reason_codes = "Something the adapter has never seen", []
         db.commit()
-    row = client.post("/api/requests", headers=member_headers, json=GALLERY).json()
+    response = client.post("/api/requests", headers=member_headers, json=GALLERY)
+    row = settled(client, member_headers, response)
     assert row["status"] == "pending" and row["risk_score"] is None and row["risk_category"] == "unknown"
     assert "could not score" in row["decision_note"]
 
@@ -67,9 +86,10 @@ def test_rule_switch_daily_cap_and_prior_denial_each_stop_automatic_access(clien
     put_rule(client, admin_headers, per_day=2)  # one automatic opening is already seeded today
     signin(client, member=True)
     member = {"X-CSRF-Token": client.get("/api/auth/me").json()["csrf_token"]}
-    first = client.post("/api/requests", headers=member, json=GALLERY).json()
+    first = settled(client, member, client.post("/api/requests", headers=member, json=GALLERY))
     assert first["status"] == "auto_approved"
-    second = client.post("/api/requests", headers=member, json={**GALLERY, "block_id": "block-fonts"}).json()
+    second = settled(client, member, client.post("/api/requests", headers=member,
+                                                json={**GALLERY, "block_id": "block-fonts"}))
     assert second["status"] == "pending" and "limit of 2" in second["decision_note"]
     admin_headers = signin(client)
     assert client.post(f"/api/requests/{second['id']}/review", headers=admin_headers,
@@ -85,8 +105,8 @@ def test_rule_switch_daily_cap_and_prior_denial_each_stop_automatic_access(clien
         db.commit()
     put_rule(client, admin_headers, enabled=False)
     member = signin(client, member=True)
-    again = client.post("/api/requests", headers=member,
-                        json={**GALLERY, "block_id": "block-fonts-again"}).json()
+    again = settled(client, member, client.post("/api/requests", headers=member,
+                                               json={**GALLERY, "block_id": "block-fonts-again"}))
     assert again["status"] == "pending" and "switched off" in again["decision_note"]
     admin_headers = signin(client)
     put_rule(client, admin_headers, enabled=True, per_day=10)
@@ -94,7 +114,8 @@ def test_rule_switch_daily_cap_and_prior_denial_each_stop_automatic_access(clien
         db.get(Observation, "block-fonts-again").id = "block-fonts-third"
         db.commit()
     member = signin(client, member=True)
-    third = client.post("/api/requests", headers=member, json={**GALLERY, "block_id": "block-fonts-third"}).json()
+    third = settled(client, member, client.post("/api/requests", headers=member,
+                                               json={**GALLERY, "block_id": "block-fonts-third"}))
     assert third["status"] == "pending" and "said no" in third["decision_note"]
 
 
@@ -124,8 +145,9 @@ def test_rule_values_are_bounded(client, admin_headers):
 
 def test_administrator_approval_opens_a_lease_and_expiry_closes_it(client, app, member_headers):
     """Approval creates a temporary lease; once its time is up reconciliation ends it."""
-    row = client.post("/api/requests", headers=member_headers,
-                      json={"block_id": "block-verify", "reason": "Bank asked me to verify", "duration_minutes": 30}).json()
+    row = settled(client, member_headers, client.post(
+        "/api/requests", headers=member_headers,
+        json={"block_id": "block-verify", "reason": "Bank asked me to verify", "duration_minutes": 30}))
     admin_headers = signin(client)
     done = client.post(f"/api/requests/{row['id']}/review", headers=admin_headers,
                        json={"decision": "approved", "note": "Checked with Jamie", "minutes": 45})
@@ -148,8 +170,8 @@ def test_approval_needs_current_evidence_but_refusing_does_not(client, app, memb
     Approving changes a provider, so stale evidence must not turn into access.
     The request and its history stay, and no lease is created.
     """
-    made = [client.post("/api/requests", headers=member_headers, json={
-        "block_id": block, "reason": "Need it for work", "duration_minutes": 30}).json()
+    made = [settled(client, member_headers, client.post("/api/requests", headers=member_headers, json={
+        "block_id": block, "reason": "Need it for work", "duration_minutes": 30}))
         for block in ("block-verify", "block-stream")]
     admin_headers = signin(client)
     with app.state.session_factory() as db:
@@ -222,8 +244,9 @@ def test_live_without_write_permission_never_claims_access(tmp_path):
         put_rule(client, admin_headers)
         assert client.get("/api/rules").json()["writes"] == {"access": "disabled", "guests": "disabled"}
         member = live_signin(client, LIVE_MEMBER)
-        row = client.post("/api/requests", headers=member,
-                          json={"block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
+        response = client.post("/api/requests", headers=member,
+                               json={"block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60})
+        row = settled(client, member, response)
         assert row["status"] == "pending" and row["risk_score"] == 16
         assert "not allowed to change Office DNS" in row["decision_note"]
         admin_headers = live_signin(client)
@@ -262,9 +285,9 @@ def open_live(client, app):
     admin_headers = live_signin(client)
     put_rule(client, admin_headers)
     member = live_signin(client, LIVE_MEMBER)
-    row = client.post("/api/requests", headers=member,
-                      json={"block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60}).json()
-    return row, live_signin(client)
+    response = client.post("/api/requests", headers=member,
+                           json={"block_id": "dns:block:one", "reason": "Need the gallery", "duration_minutes": 60})
+    return settled(client, member, response), live_signin(client)
 
 
 def test_enabled_writes_add_verify_and_remove_only_what_nyctr_created(tmp_path, monkeypatch):

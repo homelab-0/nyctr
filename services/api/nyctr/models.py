@@ -235,6 +235,10 @@ class AccessRequest(Base):
     decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     integration_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Schema 8: the stored analysis, and the claim of the job that is writing it. A restart finishes that job once.
+    analysis_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    analysis_holder: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    analysis_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # One request per member/event preserves idempotence even under concurrent POSTs.
     __table_args__ = (UniqueConstraint("requester_id", "block_id"),)
 

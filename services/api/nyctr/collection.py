@@ -401,14 +401,8 @@ def _report(event: str, name: str, **facts) -> None:
              " ".join(f"{key}={value}" for key, value in facts.items()))
 
 
-def begin_holder(engine) -> str:
-    """Give this start of Nyctr a holder id no earlier start can still be using."""
-    engine.nyctr_holder = uuid.uuid4().hex
-    return engine.nyctr_holder
-
-
-def holder_id(source) -> str:
-    """The holder id of the start `source` belongs to.
+def _bound_engine(source):
+    """The engine `source` belongs to.
 
     `source` is the session factory, its engine, or a connection checked out from that engine.
     A collection is sometimes given a function in place of the session factory, so the id is read
@@ -417,8 +411,29 @@ def holder_id(source) -> str:
     bind = getattr(source, "kw", None)
     if isinstance(bind, dict) and "bind" in bind:
         source = bind["bind"]
-    engine = getattr(source, "engine", source)
+    return getattr(source, "engine", source)
+
+
+def begin_holder(engine) -> str:
+    """Give this start of Nyctr a holder id no earlier start can still be using.
+
+    The id this engine was already using is kept. A later start of this same process can then
+    tell its own previous start from another copy.
+    """
+    engine.nyctr_previous_holder = getattr(engine, "nyctr_holder", None)
+    engine.nyctr_holder = uuid.uuid4().hex
+    return engine.nyctr_holder
+
+
+def holder_id(source) -> str:
+    """The holder id of the start `source` belongs to."""
+    engine = _bound_engine(source)
     return getattr(engine, "nyctr_holder", None) or begin_holder(engine)
+
+
+def previous_holder(source) -> str | None:
+    """The holder id this process used before its current start, if it had one."""
+    return getattr(_bound_engine(source), "nyctr_previous_holder", None)
 
 
 def clear_lease(row) -> None:

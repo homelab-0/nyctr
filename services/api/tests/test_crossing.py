@@ -13,7 +13,7 @@ import pytest
 from conftest import LIVE_ADMIN, LIVE_MEMBER, live_app, live_signin, seed_live_member
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
-from test_access import put_rule
+from test_access import put_rule, read_request
 from test_upkeep import Sources, closings, opened, stored, upkeep
 
 from nyctr import access
@@ -112,7 +112,7 @@ def test_two_openings_of_one_address_at_once_share_one_entry_that_goes_with_the_
             await asyncio.sleep(0.6)
             assert source.calls == ["GET", "GET", "POST"]  # The second is waiting and has sent nothing.
             source.go.set()
-            assert [(await task).json()["status"] for task in (first, second)] == ["auto_approved"] * 2
+            assert [(await read_request(sam, await task))["status"] for task in (first, second)] == ["auto_approved"] * 2
             assert source.listed == [DOMAIN] and source.calls == ["GET", "GET", "POST", "GET", "GET", "GET"]
             leases = (await owner.get("/api/leases")).json()
             assert [(row["execution"], row["owned"]) for row in leases] == [("applied", True)] * 2
@@ -143,7 +143,7 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 assert source.calls == ["GET", "DELETE"]  # The opening waits, having sent nothing.
                 source.go.set()
                 await up.ending["dns"]
-                assert (await asking).json()["status"] == "auto_approved"
+                assert (await read_request(sam, await asking))["status"] == "auto_approved"
                 assert source.calls == ["GET", "DELETE", "GET", "GET", "GET", "POST", "GET"]  # Added its own.
             else:  # The opening has read the list and has not stored its exception yet.
                 asking = asyncio.create_task(sam.post("/api/requests", json=ask("one")))
@@ -152,7 +152,7 @@ def test_an_opening_and_a_removal_of_one_address_cannot_cross(tmp_path, monkeypa
                 await up.ending["dns"]
                 assert source.calls == ["GET", "GET"] and stored(app, Lease, old) == "active"  # Refused; tried next tick.
                 source.go.set()
-                assert (await asking).json()["status"] == "auto_approved"
+                assert (await read_request(sam, await asking))["status"] == "auto_approved"
                 up.tick()
                 await up.ending["dns"]
                 # The entry is now the new exception's too, so it stays; the source was asked that it is there.

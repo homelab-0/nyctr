@@ -241,6 +241,18 @@ export interface AccessRequest {
   integration_id?: string | null;
   /** That source's name, kept after it is removed. Sent to administrators only. */
   source_name?: string | null;
+  /** One sentence about the check. Sent to the member who asked, never the raw facts. */
+  check?: string;
+  /** The stored check. Sent to administrators only. */
+  analysis?: {
+    id: string;
+    facts: { facts?: { id?: string; kind: string; state: string }[] };
+    verdict: string | null;
+    risk: string | null;
+    reasons: { fact: string; text: string }[];
+    uncertainty: string | null;
+    model_state: string;
+  };
 }
 /** What happened at the provider for a decision. Only `applied` means the provider was changed. */
 export type Execution = 'simulated' | 'applied' | 'not_applied' | 'failed';
@@ -293,9 +305,15 @@ export interface AccessRule {
   enabled: boolean;
   per_day: number;
   daily_total: number;
-  ad_tracker: { mode: TierMode; max_score: number; max_minutes: number };
-  /** Kept and shown, and off until Nyctr can analyse an address. */
-  threat_feed: { mode: 'off'; max_minutes: number; min_registered_days: number };
+  ad_tracker: {
+    mode: TierMode;
+    max_score: number;
+    max_minutes: number;
+    /** When set, a check is required. Otherwise a check can only stop an opening. */
+    analysis_required: boolean;
+  };
+  /** Off until an administrator switches it to record only or on. A check is always required. */
+  threat_feed: { mode: TierMode; max_minutes: number; min_registered_days: number };
 }
 export interface GuestRule {
   enabled: boolean;
@@ -423,8 +441,8 @@ export interface AttentionItem {
     | 'presence'
     | 'notice';
   id: string;
-  /** For a source that stored only part: open its Edit form, or go to its card. */
-  action?: 'edit' | 'card';
+  /** For a source that stored only part: open its Edit form, or go to its card. `end` closes a lease. */
+  action?: 'edit' | 'card' | 'end';
   severity: 'high' | 'medium' | 'low';
   title: string;
   detail: string;
