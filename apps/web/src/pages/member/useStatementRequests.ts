@@ -52,8 +52,10 @@ export type StatementView = 'home' | 'request' | 'requests' | 'devices' | 'block
 /**
  * `loaded` is the only state whose rows are evidence.
  * `error` and `unloaded` are not an empty result.
- * A row already taken from a loaded list stays until a later loaded list omits it,
- * or this sign-in ends.
+ * A loaded row belongs to this sign-in only when its requester is the signed-in member.
+ * A row taken from such a list stays until a later loaded list omits it, or this sign-in ends.
+ * Omitting it drops the remembered copy as well.
+ * A request this sign-in accepted, and no loaded list has shown, stays.
  */
 export type ListAvailability = 'loaded' | 'error' | 'unloaded';
 
@@ -126,11 +128,14 @@ function resolveKept(
 ): ResolvedRequest {
   const key = keptKey(userId, requestId);
   if (requests.availability === 'loaded') {
-    const listed = requests.rows.find((row) => row.id === requestId) ?? null;
+    const listed =
+      requests.rows.find((row) => row.id === requestId && row.requester_id === userId) ?? null;
     if (listed) return { request: listed, source: 'listed', filedButUnlisted: false };
   } else {
     const earlier = remembered.get(key) ?? null;
-    if (earlier) return { request: earlier, source: 'listed', filedButUnlisted: false };
+    if (earlier?.requester_id === userId) {
+      return { request: earlier, source: 'listed', filedButUnlisted: false };
+    }
   }
   const kept = retained.get(key) ?? null;
   if (kept && kept.userId === userId) {
@@ -172,6 +177,8 @@ export function useStatementRequests(input: StatementModelInput) {
     const prefix = `${input.userId}:`;
     const seen = new Set<string>();
     for (const row of input.requests.rows) {
+      // The served request names its member. A stale list must not be relabelled.
+      if (row.requester_id !== input.userId) continue;
       const key = keptKey(input.userId, row.id);
       seen.add(key);
       listed.current.set(key, row);
@@ -179,7 +186,9 @@ export function useStatementRequests(input: StatementModelInput) {
       if (stored) kept.current.set(key, { ...stored, request: row });
     }
     for (const key of [...listed.current.keys()]) {
-      if (key.startsWith(prefix) && !seen.has(key)) listed.current.delete(key);
+      if (!key.startsWith(prefix) || seen.has(key)) continue;
+      listed.current.delete(key);
+      kept.current.delete(key);
     }
   }
 
@@ -348,7 +357,10 @@ export function useStatementRequests(input: StatementModelInput) {
   }, []);
 
   const memberAsk = ask && ask.userId === input.userId ? ask : null;
-  const memberNotice = notice && notice.userId === input.userId ? notice : null;
+  const memberNotice =
+    notice && notice.userId === input.userId
+      ? (kept.current.get(keptKey(input.userId, notice.request.id)) ?? null)
+      : null;
   return {
     ask: memberAsk,
     notice: memberNotice,

@@ -472,4 +472,71 @@ describe('remembered requests', () => {
     expect(use().resolve('r-a').request?.status).toBe('denied');
     expect(use().kept('r-b')?.request.status).toBe('analysing');
   });
+
+  it('drops a listed request when a later loaded list omits it, and keeps one the list never had', async () => {
+    statements([
+      Promise.resolve(filed({ id: 'r-a', domain: 'a.example', status: 'analysing' })),
+      Promise.resolve(filed({ id: 'r-b', domain: 'b.example', status: 'analysing' })),
+    ]);
+    const base = props();
+    const view = render(<Host {...base} />);
+    begin('a.example');
+    send();
+    await waitFor(() => expect(use().notice?.request.id).toBe('r-a'));
+    const denied = request({ id: 'r-a', domain: 'a.example', status: 'denied' });
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [denied] }} />);
+    expect(use().resolve('r-a')).toMatchObject({
+      source: 'listed',
+      request: { status: 'denied', requester_id: 'sam' },
+    });
+    expect(use().kept('r-a')?.request.status).toBe('denied');
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(use().resolve('r-a')).toEqual({
+      request: null,
+      source: 'none',
+      filedButUnlisted: false,
+    });
+    expect(use().kept('r-a')).toBeNull();
+    expect(use().notice).toBeNull();
+    send('b.example');
+    await waitFor(() => expect(use().kept('r-b')?.request.status).toBe('analysing'));
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(use().resolve('r-b')).toMatchObject({
+      source: 'retained',
+      request: { id: 'r-b', status: 'analysing' },
+    });
+    expect(use().resolve('r-a').request).toBeNull();
+    view.rerender(<Host {...base} requests={{ availability: 'error', rows: [] }} />);
+    expect(use().resolve('r-a').request).toBeNull();
+    expect(use().kept('r-b')?.request.status).toBe('analysing');
+  });
+
+  it('does not keep a loaded row that names a different member', () => {
+    const sam = request({ id: 'r-sam', domain: 'sam.example', requester_id: 'sam' });
+    const kim = request({ id: 'r-kim', domain: 'kim.example', requester_id: 'kim' });
+    const held = { availability: 'loaded' as const, rows: [sam, kim] };
+    const base = props();
+    const view = render(<Host {...base} requests={held} />);
+    expect(use().resolve('r-sam')).toMatchObject({
+      source: 'listed',
+      request: { requester_id: 'sam', domain: 'sam.example' },
+    });
+    expect(use().resolve('r-kim').request).toBeNull();
+    view.rerender(<Host {...base} requests={{ availability: 'error', rows: [] }} />);
+    expect(use().resolve('r-sam').request?.requester_id).toBe('sam');
+    expect(use().resolve('r-kim').request).toBeNull();
+    view.rerender(<Host {...base} userId="kim" requests={held} />);
+    expect(use().resolve('r-sam').request).toBeNull();
+    expect(use().resolve('r-kim')).toMatchObject({
+      source: 'listed',
+      request: { requester_id: 'kim', domain: 'kim.example' },
+    });
+    expect(use().kept('r-sam')).toBeNull();
+    view.rerender(<Host {...base} userId="kim" requests={{ availability: 'error', rows: [] }} />);
+    expect(use().resolve('r-sam').request).toBeNull();
+    expect(use().resolve('r-kim')).toMatchObject({
+      source: 'listed',
+      request: { requester_id: 'kim' },
+    });
+  });
 });
