@@ -91,6 +91,7 @@ function decide(input: {
   saw?: boolean;
   spent?: boolean;
   failed?: boolean;
+  failedIds?: string[];
   checked?: string[];
   watchIds?: string[];
   openRequestId?: string | null;
@@ -106,6 +107,7 @@ function decide(input: {
     sawUndecided: input.saw ?? false,
     spentFinal: input.spent ?? false,
     finalFailed: input.failed ?? false,
+    failedLeaseIds: input.failedIds ?? [],
     checkedLeaseIds: input.checked ?? [],
   });
 }
@@ -120,6 +122,68 @@ function deniesWithoutEvidence(explanation: string | null) {
 }
 
 describe('lease evidence', () => {
+  it.each(['loaded', 'error'] as const)(
+    'keeps failed A manual while B gets a read, and rejects A’s late %s',
+    (oldOutcome) => {
+      const state = follow();
+      const a = { 'r-ask': held('approved', 'listed') };
+      const first = startRefresh(
+        state,
+        decide({
+          view: 'requests',
+          resolved: a,
+          requestsAvailability: 'loaded',
+          leases: { availability: 'loaded', rows: [] },
+        }),
+      );
+      acknowledgeRefresh(state, first, 'error');
+      expect([...state.failed]).toEqual(['r-ask']);
+      const both = { ...a, 'r-b': held('approved', 'listed', 'r-b') };
+      const b = decide({
+        view: 'requests',
+        resolved: both,
+        requestsAvailability: 'loaded',
+        leases: { availability: 'error', rows: [] },
+        failed: state.finalFailed,
+        failedIds: [...state.failed],
+      });
+      expect(b.openingIds).toEqual(['r-b']);
+      expect(b.openingUnchecked).toBe(true);
+      expect(b.continue).toBe(true);
+      const next = startRefresh(state, b);
+      acknowledgeRefresh(state, first, oldOutcome);
+      expect([...state.failed]).toEqual(['r-ask']);
+      expect([...state.checked]).toEqual([]);
+      acknowledgeRefresh(state, next, 'loaded');
+      expect([...state.failed]).toEqual(['r-ask']);
+      expect([...state.checked]).toEqual(['r-b']);
+      const stopped = decide({
+        view: 'requests',
+        resolved: both,
+        requestsAvailability: 'loaded',
+        leases: { availability: 'loaded', rows: [] },
+        failed: state.finalFailed,
+        failedIds: [...state.failed],
+        checked: [...state.checked],
+      });
+      expect(stopped.confirmingIds).toEqual([]);
+      expect(stopped.continue).toBe(false);
+      allowRetry(state);
+      const manual = decide({
+        view: 'requests',
+        resolved: both,
+        requestsAvailability: 'loaded',
+        leases: { availability: 'loaded', rows: [] },
+        failed: state.finalFailed,
+        failedIds: [...state.failed],
+        checked: [...state.checked],
+      });
+      expect(manual.confirmingIds).toEqual(['r-ask']);
+      replaceSession(state);
+      expect([...state.failed]).toEqual([]);
+      expect([...state.checked]).toEqual([]);
+    },
+  );
   it('calls a missing lease list unknown, and a loaded lease keeps what the source did', () => {
     const missing = openingEvidence({ status: 'auto_approved', lease: null, leaseList: 'error' });
     expect(missing).toMatchObject({
@@ -164,6 +228,7 @@ describe('lease evidence', () => {
       resolved: { 'r-ask': held('auto_approved') },
       leases: { availability: 'error', rows: [] },
       failed: state.finalFailed,
+      failedIds: [...state.failed],
     });
     expect(stalled.continue).toBe(false);
     expect(stalled.openingUnchecked).toBe(false);
@@ -177,6 +242,7 @@ describe('lease evidence', () => {
         resolved: { 'r-ask': held('auto_approved') },
         leases: { availability: 'error', rows: [] },
         failed: state.finalFailed,
+        failedIds: [...state.failed],
       }).continue,
     ).toBe(true);
 
@@ -205,6 +271,7 @@ describe('lease evidence', () => {
         leases: { availability: 'loaded', rows: [] },
         checked: [...state.checked],
         failed: state.finalFailed,
+        failedIds: [...state.failed],
       }).continue,
     ).toBe(false);
 
@@ -375,6 +442,7 @@ describe('lease evidence', () => {
         leases: { availability: 'error', rows: [] },
         saw: state.saw,
         failed: state.finalFailed,
+        failedIds: [...state.failed],
       }),
     ).toMatchObject({ continue: false, finalLeaseRefresh: false, openingUnchecked: false });
     const unknown = openingEvidence({ status: 'approved', lease: null, leaseList: 'error' });
@@ -390,6 +458,7 @@ describe('lease evidence', () => {
         leases: { availability: 'loaded', rows: [] },
         saw: state.saw,
         failed: state.finalFailed,
+        failedIds: [...state.failed],
       }),
     );
     replaceSession(state);
@@ -499,6 +568,7 @@ describe('lease evidence', () => {
       saw: state.saw,
       spent: state.spent,
       failed: state.finalFailed,
+      failedIds: [...state.failed],
     });
     expect(bothDecided.undecided).toBe(false);
     expect(bothDecided.finalLeaseRefresh).toBe(true);
@@ -672,6 +742,7 @@ describe('retained requests through the controller', () => {
       sawUndecided: watching.saw,
       spentFinal: watching.spent,
       finalFailed: watching.finalFailed,
+      failedLeaseIds: [...watching.failed],
       checkedLeaseIds: [...watching.checked],
     });
     expect(absent.retainedPending).toBe(true);
@@ -708,6 +779,7 @@ describe('retained requests through the controller', () => {
       sawUndecided: watching.saw,
       spentFinal: watching.spent,
       finalFailed: watching.finalFailed,
+      failedLeaseIds: [...watching.failed],
       checkedLeaseIds: [...watching.checked],
     });
     expect(decided.finalLeaseRefresh).toBe(true);
@@ -741,6 +813,7 @@ describe('retained requests through the controller', () => {
       sawUndecided: watching.saw,
       spentFinal: watching.spent,
       finalFailed: watching.finalFailed,
+      failedLeaseIds: [...watching.failed],
       checkedLeaseIds: [...watching.checked],
     });
     expect(stopped.continue).toBe(false);
@@ -757,6 +830,7 @@ describe('retained requests through the controller', () => {
       sawUndecided: watching.saw,
       spentFinal: watching.spent,
       finalFailed: watching.finalFailed,
+      failedLeaseIds: [...watching.failed],
       checkedLeaseIds: [...watching.checked],
     });
     expect(again.continue).toBe(true);
@@ -782,6 +856,7 @@ describe('retained requests through the controller', () => {
         sawUndecided: watching.saw,
         spentFinal: watching.spent,
         finalFailed: watching.finalFailed,
+        failedLeaseIds: [...watching.failed],
         checkedLeaseIds: [...watching.checked],
       }).continue,
     ).toBe(false);

@@ -253,6 +253,7 @@ export default function OpenNow({ onChange }: { onChange: () => void }) {
                   </span>
                 </span>
                 <span className="muted tiny">{lease.decided_by_name}</span>
+                <InlineError message={error?.key === lease.id ? error.message : null} />
               </div>
             ))}
           </div>

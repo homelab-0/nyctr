@@ -32,6 +32,57 @@ afterEach(() => {
 });
 
 describe('ending an exception', () => {
+  it('keeps the real already-ended409 after a stale active row refreshes into Recently closed', async () => {
+    let reads = 0;
+    let ends = 0;
+    let releaseOld: (rows: Lease[]) => void = () => {};
+    let releaseCurrent: (rows: Lease[]) => void = () => {};
+    const oldRead = new Promise<Lease[]>((resolve) => {
+      releaseOld = resolve;
+    });
+    const currentRead = new Promise<Lease[]>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    const active = lease('open', {});
+    const ended = lease('open', {
+      status: 'ended',
+      ended_reason: 'revoked',
+      ended_at: new Date().toISOString(),
+    });
+    const changed = vi.fn();
+    const calls = mockApi({
+      'GET /leases': () => (++reads === 1 ? [active] : reads === 2 ? oldRead : currentRead),
+      'GET /suggestions': [],
+      'POST /leases/open/end': () =>
+        ++ends === 1 ? {} : { __status: 409, detail: 'This access has already ended' },
+    });
+    render(<OpenNow onChange={changed} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'End now' }));
+    await vi.waitFor(() => expect(reads).toBe(2));
+    expect((screen.getByRole('button', { name: 'End now' }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'End now' }));
+    expect(await screen.findByText('This access has already ended')).toBeDefined();
+    await vi.waitFor(() => expect(reads).toBe(3));
+    await act(async () => releaseCurrent([ended]));
+    expect(screen.getByRole('heading', { name: 'Recently closed' })).toBeDefined();
+    expect(row('open.example').getByRole('alert').textContent).toBe(
+      'This access has already ended',
+    );
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'End now' })).toBeNull();
+    await act(async () => releaseOld([active]));
+    expect(screen.queryByRole('button', { name: 'End now' })).toBeNull();
+    expect(row('open.example').getByRole('alert').textContent).toBe(
+      'This access has already ended',
+    );
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(calls.filter((call) => call.method === 'POST').map((call) => call.body)).toEqual([
+      {},
+      {},
+    ]);
+  });
   it('offers "I removed it by hand" only where the server ends it that way', async () => {
     const calls = mockApi({
       'GET /leases': [

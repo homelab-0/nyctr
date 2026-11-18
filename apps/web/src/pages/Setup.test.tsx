@@ -167,6 +167,168 @@ describe('access rule in Setup', () => {
     expect(never.querySelectorAll('button, input, select')).toHaveLength(0);
   });
 
+  it('names the switch that lets a member-named site follow the rule, and keeps that choice through a later save', async () => {
+    const { saved, user } = openRule();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    const visible = screen.getByText('Open a site a member named');
+    expect(visible.closest('[role="switch"]')).toBeNull();
+    expect(visible.closest('.bar')).toBe(named.closest('.bar'));
+    expect(named.parentElement?.textContent).toContain('Off');
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText(/a site someone on their own device names/)).toBeDefined();
+    const release = holdBack('PUT', '/rules/access');
+    await user.click(named);
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    expect(saved()[0]).toMatchObject({ allow_statement: true, enabled: true, per_day: 4 });
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    expect(saved()).toHaveLength(1);
+    release();
+    await waitFor(() => expect(saved()).toHaveLength(2));
+    expect(saved()[1]).toMatchObject({ allow_statement: true, enabled: true, per_day: 3 });
+    expect(named.getAttribute('aria-checked')).toBe('true');
+    expect(
+      screen.getByRole('switch', { name: 'Automatic access' }).getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(
+      screen
+        .getByRole('switch', { name: 'Require a check of the address' })
+        .getAttribute('aria-checked'),
+    ).toBe('false');
+  });
+
+  it('keeps the last member-site choice and independent tier controls through rapid serialized saves', async () => {
+    const { saved, user } = openRule();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    const release = holdBack('PUT', '/rules/access');
+    await user.click(named);
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    await user.click(screen.getByRole('switch', { name: 'Automatic access' }));
+    await user.click(named);
+    await user.click(screen.getByRole('switch', { name: 'Require a check of the address' }));
+    const ads = await tier('Advertising and tracker lists');
+    await user.click(ads.getByRole('button', { name: 'Record only' }));
+    expect(saved()).toHaveLength(1);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    release();
+    await waitFor(() => expect(saved()).toHaveLength(5));
+    expect(saved()[0]).toMatchObject({ allow_statement: true, enabled: true });
+    expect(saved()[4]).toMatchObject({
+      allow_statement: false,
+      enabled: false,
+      ad_tracker: { mode: 'shadow', analysis_required: true, max_score: 25, max_minutes: 30 },
+      threat_feed: rules.access.threat_feed,
+    });
+    await waitFor(() => expect(named.getAttribute('aria-checked')).toBe('false'));
+    expect(
+      screen.getByRole('switch', { name: 'Automatic access' }).getAttribute('aria-checked'),
+    ).toBe('false');
+    expect(
+      screen
+        .getByRole('switch', { name: 'Require a check of the address' })
+        .getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(ads.getByRole('button', { name: 'Record only', pressed: true })).toBeDefined();
+  });
+
+  it('keeps a pending member-site save ordered when the administrator leaves and returns to the rule tab', async () => {
+    let current: Rules = { ...rules, access: { ...rules.access, allow_statement: true } };
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls = mockApi({
+      'GET /rules': () => current,
+      'GET /users': [],
+      'GET /devices': [],
+      'GET /presence': { items: [] },
+      'GET /device-links': [],
+      'PUT /rules/access': async (body: unknown) => {
+        await held;
+        current = { ...current, access: body as Rules['access'] };
+        return body;
+      },
+    });
+    render(<Setup params={new URLSearchParams('tab=rule')} />);
+    const user = userEvent.setup();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    await user.click(named);
+    await waitFor(() => expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: 'People and devices' }));
+    expect(screen.queryByRole('switch', { name: 'Open a site a member named' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Access rule' }));
+    expect(screen.getByRole('switch', { name: 'Open a site a member named' })).toBe(named);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(1);
+    release();
+    await waitFor(() => expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(2));
+    expect(calls.filter((call) => call.method === 'PUT').map((call) => call.body)).toEqual([
+      { ...rules.access, allow_statement: false },
+      { ...rules.access, allow_statement: false, per_day: 3 },
+    ]);
+    await waitFor(() => expect(current.access.per_day).toBe(3));
+    expect(current.access.allow_statement).toBe(false);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('keeps the same save queue after a failed read-back while a later PUT is held', async () => {
+    let current: Rules = { ...rules, access: { ...rules.access, allow_statement: true } };
+    let failRead = false;
+    let writes = 0;
+    let releaseFirst: () => void = () => {};
+    let releaseSecond: () => void = () => {};
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const second = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const calls = mockApi({
+      'GET /rules': () =>
+        failRead ? { __status: 503, detail: 'Injected rule read-back failure' } : current,
+      'GET /users': [],
+      'GET /devices': [],
+      'GET /device-links': [],
+      'GET /presence': { items: [] },
+      'PUT /rules/access': async (body: unknown) => {
+        writes += 1;
+        if (writes === 1) await first;
+        if (writes === 2) await second;
+        current = { ...current, access: body as Rules['access'] };
+        return body;
+      },
+    });
+    render(<Setup params={new URLSearchParams('tab=rule')} />);
+    const user = userEvent.setup();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    await user.click(named);
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    failRead = true;
+    releaseFirst();
+    await screen.findByText(/could not read the settings again/);
+    await waitFor(() => expect(writes).toBe(2));
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
+    expect(screen.getByRole('switch', { name: 'Open a site a member named' })).toBe(named);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'People and devices' }));
+    failRead = false;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await user.click(screen.getByRole('button', { name: 'Access rule' }));
+    expect(screen.getByRole('switch', { name: 'Open a site a member named' })).toBe(named);
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    expect(writes).toBe(2);
+    releaseSecond();
+    await waitFor(() => expect(writes).toBe(3));
+    await waitFor(() => expect(current.access.daily_total).toBe(9));
+    expect(calls.filter((call) => call.method === 'PUT').map((call) => call.body)).toEqual([
+      { ...rules.access, allow_statement: false },
+      { ...rules.access, allow_statement: false, per_day: 3 },
+      { ...rules.access, allow_statement: false, per_day: 3, daily_total: 9 },
+    ]);
+    expect(current.access.allow_statement).toBe(false);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+  });
+
   it('saves record only for advertising lists and says that nothing is opened', async () => {
     const { saved, user } = openRule();
     const ads = await tier('Advertising and tracker lists');
@@ -540,7 +702,12 @@ describe('the address Nyctr sees for you, in Setup', () => {
       expect(await shown('Nyctr cannot tell your address')).toBeDefined();
       // The line that states the address never holds the proxy's, and the sentence under it
       // names the proxy only as where the connection came from.
-      expect(document.querySelector('p.rule')?.textContent).toBe('Nyctr cannot tell your address');
+      const addressPanel = screen
+        .getByRole('heading', { name: 'The address Nyctr sees for you' })
+        .closest('section')!;
+      expect(addressPanel.querySelector('p.rule')?.textContent).toBe(
+        'Nyctr cannot tell your address',
+      );
       expect(
         screen.getByText(
           'The connection came from 10.42.0.10, which is on your list of proxies, but it passed no address on. Set the proxy to add the address it saw (X-Forwarded-For).',

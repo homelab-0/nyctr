@@ -143,6 +143,20 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             With this off, every request waits for you, whatever is set below.
           </span>
         </div>
+        <div className="bar">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+            <span>Open a site a member named</span>
+            <Switch
+              label="Open a site a member named"
+              checked={rule.allow_statement === true}
+              onChange={(allow_statement) => save((current) => ({ ...current, allow_statement }))}
+            />
+          </span>
+          <span className="aside">
+            With this off, a site someone on their own device names always waits for you. On, it
+            follows the same rule as any other request.
+          </span>
+        </div>
         <p className="rule">
           Open at most
           <Stepper
@@ -833,8 +847,9 @@ function AddressPanel() {
 export default function Setup({ params }: { params: URLSearchParams }) {
   const rules = useApi<Rules>('/rules');
   const [tab, setTab] = useState<Tab>((params.get('tab') as Tab) || 'rule');
+  const [openedRule, setOpenedRule] = useState(tab === 'rule');
   if (rules.loading && !rules.data) return <Loading text="Loading setup…" />;
-  if (rules.error || !rules.data)
+  if (!rules.data)
     return (
       <ErrorState message={rules.error || 'Setup could not be loaded.'} retry={rules.reload} />
     );
@@ -848,7 +863,10 @@ export default function Setup({ params }: { params: URLSearchParams }) {
         <Seg
           label="Setup section"
           value={tab}
-          onChange={setTab}
+          onChange={(next) => {
+            setTab(next);
+            if (next === 'rule') setOpenedRule(true);
+          }}
           options={[
             { id: 'rule', name: 'Access rule' },
             { id: 'people', name: 'People and devices' },
@@ -856,7 +874,20 @@ export default function Setup({ params }: { params: URLSearchParams }) {
           ]}
         />
       </header>
-      {tab === 'rule' && <RulePanel rules={rules.data} reload={rules.reload} />}
+      {rules.error && (
+        <p className="aside" role="alert">
+          Nyctr could not read the settings again, so the last settings stay on this page.{' '}
+          <button type="button" className="linklike" onClick={rules.reload}>
+            Try again
+          </button>
+        </p>
+      )}
+      {/* Keep this owner and its serialized saves alive while another tab is shown. */}
+      {openedRule && (
+        <div hidden={tab !== 'rule'}>
+          <RulePanel rules={rules.data} reload={rules.reload} />
+        </div>
+      )}
       {tab === 'people' && <PeoplePanel />}
       {tab === 'system' && (
         <div className="stack">

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 let csrfToken = '';
+let sessionRevision = 0;
 /** Replaces the session's in-memory mutation token; an empty value clears it on sign-out. */
 export const setCsrfToken = (value: string) => {
   csrfToken = value;
+  sessionRevision += 1;
 };
 
 /** Retains HTTP status so callers can distinguish expired sessions from retryable failures. */
@@ -19,11 +21,12 @@ export class ApiError extends Error {
 
 /**
  * Calls a relative API endpoint with same-origin cookies and CSRF on mutations.
- * Non-authentication 401s invalidate the shared session; authentication callers
+ * Non-authentication 401s invalidate only the session that sent them; authentication callers
  * handle their own errors so a rejected sign-in does not trigger an expiry event.
  * HTTP failures become ApiError; transport failures retain their original type.
  */
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const session = sessionRevision;
   const headers = new Headers(options.headers);
   if (options.body) headers.set('Content-Type', 'application/json');
   if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase()) && csrfToken) {
@@ -32,7 +35,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const response = await fetch(`/api${path}`, { ...options, headers, credentials: 'same-origin' });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401 && !path.startsWith('/auth/'))
+    if (response.status === 401 && !path.startsWith('/auth/') && session === sessionRevision)
       window.dispatchEvent(new Event('nyctr:session-expired'));
     const detail = body?.detail;
     const message =

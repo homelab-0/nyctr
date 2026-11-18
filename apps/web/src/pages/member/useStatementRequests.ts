@@ -4,9 +4,9 @@ import type { AccessRequest } from '../../types';
 
 /**
  * Files a site a member typed and remembers that request for this sign-in.
- * The portal does not mount this yet, and nothing here turns access on.
+ * The signed-in portal mounts this controller; nothing here turns access on.
  * A model score and the administrator switch are not inputs.
- * Opening evidence and repeated reading live in a later change.
+ * Opening evidence and repeated reading stay with the evidence helper and page.
  */
 
 export interface StatementDraft {
@@ -265,6 +265,7 @@ function reconcileLoaded(
 export function useStatementRequests(input: StatementModelInput) {
   const [ask, setAsk] = useState<StatementFlight | null>(null);
   const [, setNotice] = useState<KeptStatement | null>(null);
+  const [, setEligibility] = useState(0);
   const inputRef = useRef(input);
   const visits = useRef<StatementVisits>({ next: 0, mounted: 0 });
   const draft = useRef<StatementDraft>({ formId: 0, revision: 0, site: '' });
@@ -306,7 +307,10 @@ export function useStatementRequests(input: StatementModelInput) {
     }
   });
 
-  useEffect(() => {
+  // A keyed replacement or sign-out closes this owner during commit, before
+  // another component's layout effect can release one of its pending answers.
+  // StrictMode's layout setup reopens the same mounted owner after its replay.
+  useLayoutEffect(() => {
     left.current = false;
     return () => {
       left.current = true;
@@ -350,6 +354,7 @@ export function useStatementRequests(input: StatementModelInput) {
   /** Records a successful Forget before the caller reads the device again. */
   const acceptForget = useCallback((deviceId: string) => {
     revoked.current.add(deviceId);
+    setEligibility((value) => value + 1);
   }, []);
 
   /** Starts one visit. A later call is a new visit and never reuses this id. */
@@ -379,6 +384,7 @@ export function useStatementRequests(input: StatementModelInput) {
     if (
       !seen.userId ||
       !seen.deviceId ||
+      revoked.current.has(seen.deviceId) ||
       !site.trim() ||
       formId === 0 ||
       visits.current.mounted !== formId ||
@@ -496,7 +502,27 @@ export function useStatementRequests(input: StatementModelInput) {
 
   const memberAsk = ask && ask.userId === input.userId ? ask : null;
   const memberNotice = newestVisible(input.userId, input.requests, kept.current, listed.current);
+  // Resolve through the same provenance and retirement rules as the result page.
+  // Unavailable response bodies contribute no ids or rows.
+  const ids = new Set<string>();
+  if (input.requests.availability === 'loaded') {
+    for (const row of input.requests.rows) {
+      if (row.requester_id === input.userId) ids.add(row.id);
+    }
+  }
+  for (const row of kept.current.values()) {
+    if (row.userId === input.userId) ids.add(row.request.id);
+  }
+  for (const row of listed.current.values()) {
+    if (row.requester_id === input.userId) ids.add(row.id);
+  }
+  const rows = [...ids].flatMap((id) => {
+    const resolved = resolveKept(input.userId, id, input.requests, kept.current, listed.current);
+    return resolved.request ? [resolved.request] : [];
+  });
   return {
+    canFile: Boolean(input.userId && input.deviceId && !revoked.current.has(input.deviceId)),
+    rows,
     ask: memberAsk,
     notice: memberNotice,
     visits,
