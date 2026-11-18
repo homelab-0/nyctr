@@ -241,19 +241,20 @@ audit record (`rule.access_checked`):
    not at once.
 10. The time is the shorter of what was asked and the tier's limit.
 
-A statement stores the device it was filed for. Before it is opened, again
-after the claim on that source entry is held, and again after a provider has
-been asked, Nyctr reads that member's account from the database and requires
-the account to be active and the member to still have an assignment or a live
-tie on the stored device. A session that already holds the account still sees
-a disable or a removal committed by another session. If the account or the
+A statement stores the device it was filed for. Before the rule opens it,
+again after the claim on that source entry is held, and again after a provider
+has been asked, Nyctr reads that member's account from the database and
+requires the account to be active and the member to still have an assignment
+or a live tie on the stored device. A session that already holds the account
+still sees a disable or a removal committed by another session. If the account or the
 device no longer qualifies before the provider is asked, the claim is given
 back and nothing is sent. If it no longer qualifies after the provider has
 been asked, the request waits and an entry this opening added is removed by
 the next upkeep tick, not at once. An entry that was already there is left.
 An assignment or a live tie is enough for the device. The sign-in does not
-have to remain. An event request, and a row whose basis is empty, is not part
-of that check.
+have to remain. An administrator's approval does not repeat this check. The
+blocked lookup must still be present and not yet expired. An event request,
+and a row whose basis is empty, is not part of that check.
 
 In the demonstration the page does not ask a gateway. It chooses a permitted
 client whose stored address is this request's address, or else the first
@@ -264,15 +265,21 @@ A signed-in member can file `POST /api/statements` for the device that
 recognition names for this request. Nyctr files that request only for an
 exact blocked name from the last 15 minutes that has not expired and is not
 dated after now. A parent or child name is not treated as that block, and
-the answer does not disclose another person's history. Five attempts in a
-fixed hour from the first attempt count a miss and a repeat. This member's
+the answer does not disclose another person's history. The server names the
+device first and then requires one plain domain. A refusal at either step
+takes no attempt. Five attempts in a fixed hour from the first counted
+attempt then count a valid name that misses, and a repeat. This member's
 open request on this device is returned before new evidence is required.
 The request then follows the stored analysis, the access rule, and an owned
 lease. `allow_statement` stays off until an administrator turns it on. Off
 or on, it does not open a deliberate block, an unknown tier, or a block
 from a model alone. A provider change still requires
-`NYCTR_PROVIDER_WRITES`. If the account or the stored device no longer
-qualifies, the request and its history stay, and one waiting notice is kept.
+`NYCTR_PROVIDER_WRITES`. When the rule opens the request, the account must
+still be active and the member must still have an assignment or a live tie
+on the stored device. If either no longer qualifies, the request and its
+history stay, and one waiting notice is kept. An administrator's approval
+does not repeat that check. The blocked lookup must still be present and
+not yet expired.
 
 ## Two addresses
 

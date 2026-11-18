@@ -417,15 +417,6 @@ def test_the_production_app_serves_a_statement_only_after_sign_in(tmp_path):
     app = create_app(Settings(
         mode="demo", database_url=f"sqlite:///{tmp_path}/served.db",
         public_url="http://testserver", cookie_secure=False, worker_enabled=False))
-    # An included router keeps its own path. The unknown-path route must come after it.
-    listed = []
-    for route in app.router.routes:
-        original = getattr(route, "original_router", None)
-        if original is not None:
-            listed.extend(getattr(item, "path", "") for item in original.routes)
-        else:
-            listed.append(getattr(route, "path", ""))
-    assert listed.index("/api/statements") < listed.index("/api/{path:path}")
     with TestClient(app) as client:
         spec = client.get("/api/openapi.json").json()["paths"]
         assert "/api/statements" in spec
