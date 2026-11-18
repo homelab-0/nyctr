@@ -66,9 +66,12 @@ strings. Unsupported providers appear in the UI as planned, never connected.
 - `GET /api/devices` -> Resource[] permitted to the caller.
 - `GET /api/requests` -> AccessRequest[] permitted to the caller.
 - `POST /api/requests` with `{block_id,reason,duration_minutes}` -> AccessRequest.
-  Duration bounded to 15–240 minutes. Reject stale or unauthorized blocks. The
-  request is assessed immediately; the access rule may set `auto_approved` and
-  open a lease.
+  Duration bounded to 15–240 minutes. Reject stale or unauthorized blocks.
+  Sending it again returns the stored event for that member and block, the row
+  with no device id, including a row stored before the basis column, and does
+  not file a second one. A statement for a device is a different request and
+  is not returned. The request is assessed immediately; the access rule may
+  set `auto_approved` and open a lease.
 - `POST /api/requests/{id}/review` with
   `{decision:"reviewed"|"denied"|"approved",note,minutes?}` is admin-only.
   `reviewed` and `denied` change nothing on the network. `approved` opens a
