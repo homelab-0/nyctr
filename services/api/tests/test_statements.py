@@ -1780,6 +1780,24 @@ class _Closable:
         self.loop_ident["close"] = threading.get_ident()
 
 
+def _run_member(order, idents, body, release, *, limit):
+    """Run one sign-in. Cleanup releases the worker and leaves a finished task alone."""
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        idents["loop"] = threading.get_ident()
+        member = asyncio.create_task(statements.signed_member(object(), _Closable(order, idents)))
+        try:
+            await body(member, loop)
+        finally:
+            release.set()
+            if not member.done():
+                member.cancel()
+                await asyncio.wait({member}, timeout=2)
+
+    asyncio.run(asyncio.wait_for(scenario(), limit))
+
+
 def test_a_cancelled_request_wakes_when_the_pool_ends_before_the_call(monkeypatch):
     """A cancelled sign-in, already waiting, finishes when the pool task fails before the call.
 
@@ -1810,34 +1828,25 @@ def test_a_cancelled_request_wakes_when_the_pool_ends_before_the_call(monkeypatc
     monkeypatch.setattr(statements, "run_in_threadpool", fail_first)
     monkeypatch.setattr(statements, "authenticate", auth)
 
-    async def scenario():
-        loop = asyncio.get_running_loop()
-        idents["loop"] = threading.get_ident()
-        member = asyncio.create_task(statements.signed_member(object(), _Closable(order, idents)))
-        try:
-            await asyncio.wait_for(parked.wait(), 2)
-            member.cancel()
-            for _ in range(8):
-                await asyncio.sleep(0)
-            assert not member.done()
-            assert member.cancelling() == 0
-            assert order == []
-            release.set()
-            finished, pending = await asyncio.wait({member}, timeout=1)
-            assert member in finished and member not in pending
-            assert member.cancelling() == 0
-            with pytest.raises(asyncio.CancelledError):
-                await member
-            assert order == ["pool-end", "close"]
-            assert idents["close"] != idents["loop"]
-            assert asyncio.get_running_loop() is loop
-        finally:
-            release.set()
-            if not member.done():
-                member.cancel()
-                await asyncio.wait({member}, timeout=1)
+    async def body(member, loop):
+        await asyncio.wait_for(parked.wait(), 2)
+        member.cancel()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert not member.done()
+        assert member.cancelling() == 0
+        assert order == []
+        release.set()
+        finished, pending = await asyncio.wait({member}, timeout=1)
+        assert member in finished and member not in pending
+        assert member.cancelling() == 0
+        with pytest.raises(asyncio.CancelledError):
+            await member
+        assert order == ["pool-end", "close"]
+        assert idents["close"] != idents["loop"]
+        assert asyncio.get_running_loop() is loop
 
-    asyncio.run(asyncio.wait_for(scenario(), 5))
+    _run_member(order, idents, body, release, limit=5)
 
 
 def test_ending_the_pool_task_during_the_call_does_not_close_the_session(monkeypatch):
@@ -1869,42 +1878,102 @@ def test_ending_the_pool_task_during_the_call_does_not_close_the_session(monkeyp
     monkeypatch.setattr(statements, "run_in_threadpool", capture)
     monkeypatch.setattr(statements, "authenticate", auth)
 
-    async def scenario():
-        loop = asyncio.get_running_loop()
-        idents["loop"] = threading.get_ident()
-        member = asyncio.create_task(statements.signed_member(object(), _Closable(order, idents)))
+    async def body(member, loop):
+        assert await asyncio.to_thread(entered.wait, 2)
+        member.cancel()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert not member.done()
+        assert member.cancelling() == 0
+        assert order == ["in"]
+        work = seen["work"]
+        work.cancel()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert work.done()
+        assert not member.done()
+        assert order == ["in"]
+        finished, pending = await asyncio.wait({member}, timeout=0.4)
+        assert member in pending and member not in finished
+        assert not member.done()
+        assert member.cancelling() == 0
+        assert order == ["in"]
+        release.set()
+        finished, pending = await asyncio.wait({member}, timeout=2)
+        assert member in finished and member not in pending
+        with pytest.raises(asyncio.CancelledError):
+            await member
+        assert order == ["in", "out", "close"]
+        assert idents["close"] != idents["loop"]
+        assert asyncio.get_running_loop() is loop
+
+    _run_member(order, idents, body, release, limit=8)
+
+
+def test_a_queued_pool_callback_does_not_close_over_a_late_claim(monkeypatch):
+    """The wait stays up while the pool callback is queued. A late claim is not closed over."""
+    order, idents, saved, held = [], {}, {}, []
+    parked, left, inside, release = asyncio.Event(), asyncio.Event(), threading.Event(), threading.Event()
+    gate, real_pool, real_wait = {"open": True}, statements.run_in_threadpool, statements._wait_for_call
+
+    async def hang(func, *args):
+        if not gate["open"]:
+            return await real_pool(func, *args)
+        gate["open"], saved["invoke"], saved["work"] = False, func, asyncio.current_task()
+        parked.set()
+        await asyncio.Event().wait()
+
+    async def watch(done, work):
         try:
-            assert await asyncio.to_thread(entered.wait, 2)
+            await real_wait(done, work)
+        finally:
+            left.set()
+
+    def auth(request, db):
+        order.append("auth-in")
+        inside.set()
+        assert release.wait(2)
+        order.append("auth-out")
+        return None, None
+
+    monkeypatch.setattr(statements, "run_in_threadpool", hang)
+    monkeypatch.setattr(statements, "_wait_for_call", watch)
+    monkeypatch.setattr(statements, "authenticate", auth)
+
+    async def body(member, loop):
+        soon = loop.call_soon
+
+        def hold(callback, *args, context=None):
+            if getattr(callback, "__name__", "") == "pool_ended":
+                held.append((callback, args, context))
+                return soon(lambda: None)
+            extra = {} if context is None else {"context": context}
+            return soon(callback, *args, **extra)
+
+        try:
+            await asyncio.wait_for(parked.wait(), 2)
             member.cancel()
             for _ in range(8):
                 await asyncio.sleep(0)
-            assert not member.done()
-            assert member.cancelling() == 0
-            assert order == ["in"]
-            work = seen["work"]
-            work.cancel()
-            for _ in range(8):
+            assert not member.done() and member.cancelling() == 0 and not left.is_set()
+            loop.call_soon = hold
+            saved["work"].cancel()
+            member.cancel()
+            for _ in range(2):
                 await asyncio.sleep(0)
-            assert work.done()
-            assert not member.done()
-            assert order == ["in"]
-            finished, pending = await asyncio.wait({member}, timeout=0.4)
-            assert member in pending and member not in finished
-            assert not member.done()
-            assert member.cancelling() == 0
-            assert order == ["in"]
+            assert held and not left.is_set() and not member.done() and member.cancelling() == 0
+            threading.Thread(target=saved["invoke"], daemon=True).start()
+            assert await asyncio.to_thread(inside.wait, 2)
+            assert order == ["auth-in"] and not left.is_set()
             release.set()
             finished, pending = await asyncio.wait({member}, timeout=2)
             assert member in finished and member not in pending
             with pytest.raises(asyncio.CancelledError):
                 await member
-            assert order == ["in", "out", "close"]
-            assert idents["close"] != idents["loop"]
-            assert asyncio.get_running_loop() is loop
+            assert order == ["auth-in", "auth-out", "close"] and idents["close"] != idents["loop"]
         finally:
-            release.set()
-            if not member.done():
-                member.cancel()
-                await asyncio.wait({member}, timeout=2)
+            loop.call_soon = soon
+            for callback, args, context in held:
+                soon(callback, *args, context=context)
 
-    asyncio.run(asyncio.wait_for(scenario(), 8))
+    _run_member(order, idents, body, release, limit=5)

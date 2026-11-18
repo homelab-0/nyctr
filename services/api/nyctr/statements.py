@@ -281,35 +281,26 @@ def _settle(future: asyncio.Future) -> None:
         future.set_result(None)
 
 
-async def _wait_for_call(done: asyncio.Future, work: asyncio.Future, started: threading.Event) -> None:
-    """Stay on this task until the worker has left, even if the task was cancelled.
+async def _wait_for_call(done: asyncio.Future, work: asyncio.Future) -> None:
+    """Stay until the call has left. A finished pool task is not that signal.
 
-    A raw ``Task.cancel`` raises at the shielded wait. Further awaits would raise
-    again while the cancellation count stays up, so each wait clears that count
-    and the caller raises ``CancelledError`` only after the call has finished.
-    When the pool task ends before the call starts, that completion settles
-    ``done`` and this wait returns. The check between waits is not enough on its
-    own: a task already blocked on ``done`` does not return to it.
+    Raw cancel raises at a shielded wait, so each wait clears the count and the
+    caller raises only after ``done`` settles. The pool callback settles it while
+    the call is still pending. The call settles it only after it returns.
     """
     task = asyncio.current_task()
-    while not done.done():
-        if work.done() and not started.is_set():
-            break
-        if task is not None:
-            while task.cancelling():
-                task.uncancel()
-        try:
-            await asyncio.shield(done)
-        except asyncio.CancelledError:
-            continue
-    while not work.done():
-        if task is not None:
-            while task.cancelling():
-                task.uncancel()
-        try:
-            await asyncio.shield(work)
-        except asyncio.CancelledError:
-            continue
+    async def wait_out(future: asyncio.Future) -> None:
+        while not future.done():
+            if task is not None:
+                while task.cancelling():
+                    task.uncancel()
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+
+    await wait_out(done)
+    await wait_out(work)
     if work.done() and not work.cancelled():
         work.exception()
 
@@ -319,18 +310,16 @@ async def _off_loop(func, *args):
 
     ``run_in_threadpool`` waits out an AnyIO cancellation. Cancelling the request
     task itself still raises at that await. This task does not leave until the
-    call has finished, or until the pool task ends without starting the call.
+    call has finished, or until the pool callback fences a call that never started.
     A pool task that ends while the call is still running does not end the wait:
     cancelling that task releases its pool slot before the thread returns.
     """
     loop = asyncio.get_running_loop()
     done: asyncio.Future = loop.create_future()
-    started = threading.Event()
     box: dict = {}
     gate = threading.Lock()
-    # pending until the worker claims the call. skipped when the pool task ends
-    # first. running and finished belong to the worker, which settles done only
-    # after func returns.
+    # pending until claimed. The pool callback marks skipped and settles done.
+    # The worker marks running, then finished, and settles done after func returns.
     phase = "pending"
 
     def invoke():
@@ -339,7 +328,6 @@ async def _off_loop(func, *args):
             if phase != "pending":
                 return
             phase = "running"
-            started.set()
         try:
             box["value"] = func(*args)
         except BaseException as exc:
@@ -350,9 +338,8 @@ async def _off_loop(func, *args):
             loop.call_soon_threadsafe(_settle, done)
 
     def pool_ended(_finished: asyncio.Future) -> None:
-        # Runs on the loop when the pool task ends. Settling done here is safe
-        # only while the worker has not claimed the call. Doing it after that
-        # would let the caller close the session under the thread.
+        # On the loop. Settle only while the call is still pending, so a claimed
+        # call cannot be closed under the thread.
         nonlocal phase
         with gate:
             if phase != "pending":
@@ -365,7 +352,7 @@ async def _off_loop(func, *args):
     try:
         await asyncio.shield(work)
     except asyncio.CancelledError:
-        await _wait_for_call(done, work, started)
+        await _wait_for_call(done, work)
         raise
     error = box.get("error")
     if error is not None:
@@ -381,7 +368,7 @@ async def signed_member(request: Request, db: Session = Depends(get_db)):
     401 is audited, with no member attached. The body is read on the event loop.
     The session lookup and the audit commit run on the worker pool, one after the
     other. A cancellation closes the session only after the in-flight call returns,
-    or after the pool task ends when that call never started.
+    or after the pool callback fences a call that never started.
     """
     try:
         try:
