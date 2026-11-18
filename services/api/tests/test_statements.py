@@ -7,8 +7,9 @@ that serves requests does not include them.
 import asyncio
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import timedelta
 
 import httpx
@@ -17,6 +18,7 @@ from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member, signi
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 from test_access import put_rule
 from test_presence import KIM, LAPTOP, PHONE, PRINTER, TABLET, browser, change, home, two_sites
 from test_tiers import postgres_database
@@ -1390,3 +1392,588 @@ def test_an_active_account_still_opens_through_the_provider(tmp_path, database, 
     _finish(app)
     again, leases, _notes = _saved(app, domain)
     assert again.status == "auto_approved" and len(leases) == 1 and source.calls == before
+
+
+@asynccontextmanager
+async def _on_one_loop(app):
+    """One lifespan and one client, so two requests share the server's event loop."""
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            yield client
+
+
+def _pause(label: str) -> None:
+    """Block this worker until the test releases it. The wait itself is not the proof.
+
+    The proof is the other request, which has to finish while this event is still
+    unset. The short waits only let a failed test release the worker.
+    """
+    assert threading.current_thread() is not holder["loop_thread"]
+    if not holder.get("pause", True) or holder["abort"].is_set():
+        return
+    release = threading.Event()
+    holder["loop"].call_soon_threadsafe(holder["queue"].put_nowait, (label, release))
+    deadline = time.monotonic() + PAUSE_LIMIT
+    while not release.is_set():
+        if holder["abort"].is_set():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"the {label} wait was not released")
+        release.wait(min(0.05, remaining))
+
+
+async def _through_pauses(client, call, labels, during=None):
+    """Run `call` and, at each labelled pause, finish one other request on the same loop."""
+    holder["abort"].clear()
+    holder["pause"] = True
+    task = asyncio.create_task(call())
+    release = None
+    try:
+        for label in labels:
+            found, release = await asyncio.wait_for(holder["queue"].get(), PAUSE_LIMIT)
+            assert found == label
+            witness = await asyncio.wait_for(client.get("/api/auth/config"), 5)
+            assert witness.status_code == 200 and witness.json()["local_enabled"] is True
+            assert not release.is_set() and not task.done()
+            if during is not None:
+                during(label)
+            release.set()
+            release = None
+        return await asyncio.wait_for(task, PAUSE_LIMIT)
+    finally:
+        holder["abort"].set()
+        if release is not None:
+            release.set()
+        while True:
+            try:
+                _found, pending = holder["queue"].get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            pending.set()
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+holder: dict = {}
+
+
+def _hold_signin(monkeypatch):
+    """Hold the real session lookup and, separately, the unsigned audit commit."""
+    real_auth = statements.authenticate
+    real_record = statements._record_unsigned
+    holder["loop_thread"] = threading.current_thread()
+
+    def held_auth(request, db):
+        try:
+            return real_auth(request, db)
+        finally:
+            _pause("auth")
+
+    def held_record(db, domain):
+        _pause("audit")
+        return real_record(db, domain)
+
+    monkeypatch.setattr(statements, "authenticate", held_auth)
+    monkeypatch.setattr(statements, "_record_unsigned", held_record)
+
+
+@BOTH
+def test_sign_in_database_work_stays_off_the_event_loop(tmp_path, database, request, monkeypatch):
+    """A held session lookup, and a held unsigned audit, each leave the loop free.
+
+    Covers a missing session, a live session with no mutation token, and a member.
+    The audit row stays uncommitted until its own pause is released, so neither
+    wait keeps a write open across the other request.
+    """
+    app = open_demo(database, tmp_path, request, "off-loop")
+    _hold_signin(monkeypatch)
+
+    async def scenario():
+        holder["loop"] = asyncio.get_running_loop()
+        holder["queue"] = asyncio.Queue()
+        holder["abort"] = threading.Event()
+        holder["pause"] = True
+        async with _on_one_loop(app) as client:
+            before = len(stated(app, "no_session"))
+
+            def still_uncommitted(_label):
+                assert len(stated(app, "no_session")) == before
+
+            missing = await _through_pauses(
+                client, lambda: client.post("/api/statements", json={"domain": "secret.example"}),
+                ["auth", "audit"], still_uncommitted)
+            assert missing.status_code == 401 and missing.json() == {"detail": "Sign in to continue"}
+            unsigned = stated(app, "no_session")
+            assert len(unsigned) == before + 1 and unsigned[-1].actor_id is None
+            assert unsigned[-1].details == {"domain": "secret.example", "device_id": "", "device_name": "",
+                                             "outcome": "no_session"}
+            logged = await client.post("/api/auth/login", json={"email": "jamie@nyctr.demo", "password": "nyctr-demo"})
+            assert logged.status_code == 200, logged.text
+            token = logged.json()["csrf_token"]
+            audits = len(stated(app, "no_session"))
+            forbidden = await _through_pauses(
+                client, lambda: client.post("/api/statements", json={"domain": "secret.example"}), ["auth"])
+            assert forbidden.status_code == 403 and forbidden.json()["detail"] == "Invalid or missing CSRF token"
+            assert len(stated(app, "no_session")) == audits
+            allowed = await _through_pauses(
+                client, lambda: client.post(
+                    "/api/statements", headers={"X-CSRF-Token": token}, json={"domain": "missing.example"}),
+                ["auth"])
+            assert allowed.status_code == 200 and allowed.json()["message"] == MISSED
+            assert stated(app)[-1].actor_id == "user-jamie" and stated(app)[-1].details["outcome"] == "miss"
+
+    asyncio.run(scenario())
+
+
+@BOTH
+def test_cancelling_sign_in_closes_the_session_after_the_worker(tmp_path, database, request, monkeypatch):
+    """Cancelling the request task waits for the session lookup, then closes that session.
+
+    The client task is not the task inside the route. The route task is cancelled
+    directly. It stays pending while the worker is held, and the session close is
+    recorded only after that worker returns. The next refusal is audited on its own.
+    """
+    app = open_demo(database, tmp_path, request, "cancel-signin")
+    order, sessions = [], set()
+    real = statements.authenticate
+    original_close = Session.close
+
+    def held(request, db):
+        sessions.add(id(db))
+        order.append("auth-in")
+        try:
+            return real(request, db)
+        finally:
+            if holder.get("pause", True):
+                holder["loop"].call_soon_threadsafe(holder["entered"].set)
+                if not holder["release"].wait(PAUSE_LIMIT):
+                    raise TimeoutError("the sign-in wait was not released")
+            order.append("auth-out")
+
+    def close(self):
+        if id(self) in sessions:
+            order.append("close")
+        return original_close(self)
+
+    async def marking(func, *args):
+        holder["task"] = asyncio.current_task()
+        return await real_off(func, *args)
+
+    real_off = statements._off_loop
+    monkeypatch.setattr(statements, "authenticate", held)
+    monkeypatch.setattr(statements, "_off_loop", marking)
+    monkeypatch.setattr(Session, "close", close)
+
+    async def scenario():
+        holder["loop"] = asyncio.get_running_loop()
+        holder["pause"] = True
+        holder["entered"] = asyncio.Event()
+        holder["release"] = threading.Event()
+        async with _on_one_loop(app) as client:
+            post = asyncio.create_task(client.post("/api/statements", json={"domain": "secret.example"}))
+            try:
+                await asyncio.wait_for(holder["entered"].wait(), PAUSE_LIMIT)
+                route = holder["task"]
+                route.cancel()
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                    assert not route.done()
+                    assert "auth-out" not in order and "close" not in order
+                witness = await asyncio.wait_for(client.get("/api/auth/config"), 5)
+                assert witness.status_code == 200 and not holder["release"].is_set()
+                holder["release"].set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(route, PAUSE_LIMIT)
+            finally:
+                holder["release"].set()
+                if not post.done():
+                    post.cancel()
+                try:
+                    await post
+                except (asyncio.CancelledError, Exception):
+                    pass
+            assert "auth-out" in order and "close" in order
+            assert order.index("auth-out") < order.index("close")
+            assert stated(app, "no_session") == []
+            holder["pause"] = False
+            again = await client.post("/api/statements", json={"domain": "secret.example"})
+            assert again.status_code == 401 and again.json()["detail"] == "Sign in to continue"
+            row = stated(app, "no_session")
+            assert len(row) == 1 and row[0].actor_id is None
+            assert row[0].details["domain"] == "secret.example" and row[0].details["device_id"] == ""
+            follow = await client.get("/api/auth/config")
+            assert follow.status_code == 200
+
+    asyncio.run(scenario())
+
+
+@BOTH
+def test_a_failed_unsigned_audit_rolls_back(tmp_path, database, request, monkeypatch):
+    """A commit that fails leaves no unsigned audit, and the next refusal records one."""
+    app = open_demo(database, tmp_path, request, "audit-rollback")
+    real = statements._record_unsigned
+    armed = {"fail": True}
+
+    def once(db, domain):
+        if armed["fail"]:
+            armed["fail"] = False
+            original = db.commit
+
+            def fail():
+                db.commit = original
+                raise OperationalError("INSERT", {}, Exception("disk full"))
+
+            db.commit = fail
+        return real(db, domain)
+
+    monkeypatch.setattr(statements, "_record_unsigned", once)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        failed = client.post("/api/statements", json={"domain": "secret.example"})
+        assert failed.status_code == 500
+        assert stated(app, "no_session") == []
+        again = client.post("/api/statements", json={"domain": "secret.example"})
+        assert again.status_code == 401 and again.json()["detail"] == "Sign in to continue"
+        rows = stated(app, "no_session")
+        assert len(rows) == 1 and rows[0].actor_id is None
+        assert rows[0].details == {"domain": "secret.example", "device_id": "", "device_name": "",
+                                    "outcome": "no_session"}
+        assert filed_for(app, "secret.example") == [] and quota(app) is None
+
+
+def _blocks(app, rows):
+    """Store block rows. `rows` names the id, domain, observed time, expiry and source."""
+    with app.state.session_factory() as db:
+        if db.get(Integration, "json-only") is None:
+            db.add(Integration(id="json-only", provider="not-a-source", name="JSON only", status="connected",
+                               config={}, secret_ref="", capabilities=["dns.blocks"]))
+        saved = db.get(Integration, "demo-nextdns")
+        saved.capabilities = ["unrelated"]
+        for row in rows:
+            when = row["observed"]
+            db.add(Observation(
+                id=row["id"], integration_id=row.get("integration_id", "demo-nextdns"), device_id=None,
+                device_name="Unknown source device", domain=row["domain"], source="nextdns", reason="list",
+                reason_codes=[], observed_at=when, expires_at=row["expires"], evidence_kind="observed",
+                attribution="unattributed", risk_score=None, risk_explanation=""))
+        db.commit()
+
+
+@BOTH
+def test_a_buried_block_is_one_fresh_exact_row(tmp_path, database, request, monkeypatch):
+    """Hundreds of newer unrelated blocks do not hide one exact row, and only that row is loaded.
+
+    The same clock covers the inclusive window edge, a tie on that clock, a parent,
+    a child, a sibling, a label glued on without a dot, a future child and an empty
+    provider list. Two fresh rows with the same time file the greater id text.
+    Capability comes from the registry. A list stored on the source does not add
+    or remove one. A stored name that `LIKE` would confuse with an underscore is
+    still a miss.
+    """
+    app = open_demo(database, tmp_path, request, "buried")
+    frozen = utcnow()
+    monkeypatch.setattr(statements, "utcnow", lambda: frozen)
+    window = frozen - timedelta(minutes=15)
+    later = frozen + timedelta(hours=1)
+    fresh_at = frozen - timedelta(minutes=10)
+    noise_at = frozen - timedelta(minutes=1)
+    rows = [
+        {"id": "zz-older", "domain": "zz-exact.example", "observed": frozen - timedelta(minutes=14), "expires": later},
+        {"id": "zz-fresh", "domain": "zz-exact.example", "observed": fresh_at, "expires": later},
+        {"id": "zz-expired", "domain": "zz-exact.example", "observed": frozen - timedelta(seconds=30), "expires": frozen},
+        {"id": "zz-ahead", "domain": "zz-exact.example", "observed": frozen + timedelta(minutes=5), "expires": later},
+        {"id": "zz-foreign", "domain": "zz-exact.example", "observed": frozen - timedelta(seconds=1),
+         "expires": later, "integration_id": "json-only"},
+        {"id": "zz-tie-a", "domain": "zz-tie.example", "observed": fresh_at, "expires": later},
+        {"id": "zz-tie-b", "domain": "zz-tie.example", "observed": fresh_at, "expires": later},
+        {"id": "zz-stale", "domain": "zz-stale.example", "observed": frozen - timedelta(minutes=20), "expires": later},
+        {"id": "zz-stale-child", "domain": "www.zz-stale.example", "observed": fresh_at, "expires": later},
+        {"id": "zz-child", "domain": "www.zz-kin.example", "observed": fresh_at, "expires": later},
+        {"id": "zz-parent", "domain": "zz-root", "observed": fresh_at, "expires": later},
+        {"id": "zz-suffix", "domain": "zz-pub", "observed": fresh_at, "expires": later},
+        {"id": "zz-sibling", "domain": "right.zz-pair.zz-only", "observed": fresh_at, "expires": later},
+        {"id": "zz-glued", "domain": "notzz-glued.zz-only", "observed": fresh_at, "expires": later},
+        {"id": "zz-later-child", "domain": "www.zz-later.zz-only", "observed": frozen + timedelta(minutes=5),
+         "expires": later},
+        {"id": "zz-ahead-only", "domain": "zz-ahead.zz-only", "observed": frozen + timedelta(minutes=5),
+         "expires": later},
+        {"id": "zz-wild", "domain": "exXample.zz-wild", "observed": fresh_at, "expires": later},
+        {"id": "zz-edge", "domain": "zz-edge.example", "observed": window, "expires": later},
+        {"id": "zz-early", "domain": "zz-early.example", "observed": window - timedelta(seconds=1), "expires": later},
+        {"id": "zz-now", "domain": "zz-now.example", "observed": frozen, "expires": later},
+        {"id": "zz-ending", "domain": "zz-ending.example", "observed": frozen - timedelta(minutes=1), "expires": frozen},
+        {"id": "zz-empty", "domain": "zz-empty.example", "observed": fresh_at, "expires": later},
+    ]
+    rows.extend(
+        {"id": f"zz-noise-{number:03d}", "domain": f"n{number:03d}.zz-noise.test", "observed": noise_at, "expires": later}
+        for number in range(300))
+    seen = []
+    real_match = statements._match
+
+    def watch(db, name):
+        before = {id(obj) for obj in db.identity_map.values() if isinstance(obj, Observation)}
+        chosen, outcome = real_match(db, name)
+        loaded = [obj for obj in db.identity_map.values() if isinstance(obj, Observation) and id(obj) not in before]
+        seen.append((name, outcome, len(loaded), None if chosen is None else chosen.id))
+        return chosen, outcome
+
+    monkeypatch.setattr(statements, "_match", watch)
+
+    def expect(client, headers, domain, outcome, block=None):
+        clear_quota(app)
+        answer = ask(client, headers, domain)
+        assert seen[-1][0] == domain and seen[-1][1] == outcome and seen[-1][2] == (1 if outcome == "filed" else 0)
+        if outcome == "filed":
+            assert answer.status_code == 201, answer.text
+            assert seen[-1][3] == block
+            with app.state.session_factory() as db:
+                assert db.scalar(select(AccessRequest).where(AccessRequest.domain == domain)).block_id == block
+        else:
+            assert answer.status_code == 200 and answer.json() == {"matched": False, "message": MISSED}
+            assert stated(app)[-1].details["outcome"] == outcome and filed_for(app, domain) == []
+
+    with TestClient(app) as client:
+        _blocks(app, rows)
+        headers = signin(client, member=True)
+        expect(client, headers, "zz-exact.example", "filed", "zz-fresh")
+        expect(client, headers, "zz-tie.example", "filed", "zz-tie-b")
+        expect(client, headers, "zz-edge.example", "filed", "zz-edge")
+        expect(client, headers, "zz-now.example", "filed", "zz-now")
+        expect(client, headers, "zz-stale.example", "stale")
+        expect(client, headers, "zz-early.example", "stale")
+        expect(client, headers, "zz-kin.example", "not_exact")
+        expect(client, headers, "leaf.zz-root", "not_exact")
+        expect(client, headers, "leaf.zz-pub", "not_exact")
+        expect(client, headers, "left.zz-pair.zz-only", "miss")
+        expect(client, headers, "zz-glued.zz-only", "miss")
+        expect(client, headers, "zz-later.zz-only", "miss")
+        expect(client, headers, "zz-ahead.zz-only", "stale")
+        expect(client, headers, "zz-ending.example", "stale")
+        real_capability = statements.registry.with_capability
+        monkeypatch.setattr(statements.registry, "with_capability", lambda capability: [])
+        expect(client, headers, "zz-empty.example", "miss")
+        monkeypatch.setattr(statements.registry, "with_capability", real_capability)
+        expect(client, headers, "zz-empty.example", "filed", "zz-empty")
+        with app.state.session_factory() as db:
+            # `_` is a LIKE wildcard. The same stored row must not become a match.
+            like_hit = db.scalar(select(Observation.id).where(Observation.domain.like("ex_ample.zz-wild")))
+            assert like_hit == "zz-wild"
+            chosen, outcome = statements._match(db, "ex_ample.zz-wild")
+            assert chosen is None and outcome == "miss"
+    assert seen and all(count <= 1 for _name, _outcome, count, _chosen in seen)
+
+
+class _Closable:
+    """A stand-in session. These cases check when close runs, not a database."""
+
+    def __init__(self, order, loop_ident):
+        self.order = order
+        self.loop_ident = loop_ident
+
+    def close(self):
+        self.order.append("close")
+        self.loop_ident["close"] = threading.get_ident()
+
+
+def _run_member(order, idents, body, release, *, limit):
+    """Run one sign-in. Cleanup releases the worker and leaves a finished task alone."""
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        idents["loop"] = threading.get_ident()
+        member = asyncio.create_task(statements.signed_member(object(), _Closable(order, idents)))
+        try:
+            await body(member, loop)
+        finally:
+            release.set()
+            if not member.done():
+                member.cancel()
+                await asyncio.wait({member}, timeout=2)
+
+    asyncio.run(asyncio.wait_for(scenario(), limit))
+
+
+def test_a_cancelled_request_wakes_when_the_pool_ends_before_the_call(monkeypatch):
+    """A cancelled sign-in, already waiting, finishes when the pool task fails before the call.
+
+    The lookup is never called. asyncio.wait reports the request done, and that
+    result is read before any later cancel. The session is closed afterwards,
+    off the event loop.
+    """
+    order = []
+    idents = {}
+    release = asyncio.Event()
+    parked = asyncio.Event()
+    real_pool = statements.run_in_threadpool
+    first = {"open": True}
+
+    async def fail_first(func, *args):
+        if first["open"]:
+            first["open"] = False
+            parked.set()
+            await release.wait()
+            order.append("pool-end")
+            raise RuntimeError("pool ended before the call")
+        return await real_pool(func, *args)
+
+    def auth(request, db):
+        order.append("auth")
+        return None, None
+
+    monkeypatch.setattr(statements, "run_in_threadpool", fail_first)
+    monkeypatch.setattr(statements, "authenticate", auth)
+
+    async def body(member, loop):
+        await asyncio.wait_for(parked.wait(), 2)
+        member.cancel()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert not member.done()
+        assert member.cancelling() == 0
+        assert order == []
+        release.set()
+        finished, pending = await asyncio.wait({member}, timeout=1)
+        assert member in finished and member not in pending
+        assert member.cancelling() == 0
+        with pytest.raises(asyncio.CancelledError):
+            await member
+        assert order == ["pool-end", "close"]
+        assert idents["close"] != idents["loop"]
+        assert asyncio.get_running_loop() is loop
+
+    _run_member(order, idents, body, release, limit=5)
+
+
+def test_ending_the_pool_task_during_the_call_does_not_close_the_session(monkeypatch):
+    """The session stays open when the pool task ends while sign-in is still inside the worker.
+
+    The request is already cancelled and waiting. asyncio.wait leaves it pending
+    across that pool-task cancel, and does not cancel it. Close runs only after
+    the worker returns, on another thread, on the same loop.
+    """
+    order = []
+    idents = {}
+    entered = threading.Event()
+    release = threading.Event()
+    real_pool = statements.run_in_threadpool
+    seen = {}
+
+    async def capture(func, *args):
+        seen.setdefault("work", asyncio.current_task())
+        return await real_pool(func, *args)
+
+    def auth(request, db):
+        order.append("in")
+        entered.set()
+        if not release.wait(3):
+            raise TimeoutError("the sign-in wait was not released")
+        order.append("out")
+        return None, None
+
+    monkeypatch.setattr(statements, "run_in_threadpool", capture)
+    monkeypatch.setattr(statements, "authenticate", auth)
+
+    async def body(member, loop):
+        assert await asyncio.to_thread(entered.wait, 2)
+        member.cancel()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert not member.done()
+        assert member.cancelling() == 0
+        assert order == ["in"]
+        work = seen["work"]
+        work.cancel()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert work.done()
+        assert not member.done()
+        assert order == ["in"]
+        finished, pending = await asyncio.wait({member}, timeout=0.4)
+        assert member in pending and member not in finished
+        assert not member.done()
+        assert member.cancelling() == 0
+        assert order == ["in"]
+        release.set()
+        finished, pending = await asyncio.wait({member}, timeout=2)
+        assert member in finished and member not in pending
+        with pytest.raises(asyncio.CancelledError):
+            await member
+        assert order == ["in", "out", "close"]
+        assert idents["close"] != idents["loop"]
+        assert asyncio.get_running_loop() is loop
+
+    _run_member(order, idents, body, release, limit=8)
+
+
+def test_a_queued_pool_callback_does_not_close_over_a_late_claim(monkeypatch):
+    """The wait stays up while the pool callback is queued. A late claim is not closed over."""
+    order, idents, saved, held = [], {}, {}, []
+    parked, left, inside, release = asyncio.Event(), asyncio.Event(), threading.Event(), threading.Event()
+    gate, real_pool, real_wait = {"open": True}, statements.run_in_threadpool, statements._wait_for_call
+
+    async def hang(func, *args):
+        if not gate["open"]:
+            return await real_pool(func, *args)
+        gate["open"], saved["invoke"], saved["work"] = False, func, asyncio.current_task()
+        parked.set()
+        await asyncio.Event().wait()
+
+    async def watch(done, work):
+        try:
+            await real_wait(done, work)
+        finally:
+            left.set()
+
+    def auth(request, db):
+        order.append("auth-in")
+        inside.set()
+        assert release.wait(2)
+        order.append("auth-out")
+        return None, None
+
+    monkeypatch.setattr(statements, "run_in_threadpool", hang)
+    monkeypatch.setattr(statements, "_wait_for_call", watch)
+    monkeypatch.setattr(statements, "authenticate", auth)
+
+    async def body(member, loop):
+        soon = loop.call_soon
+
+        def hold(callback, *args, context=None):
+            if getattr(callback, "__name__", "") == "pool_ended":
+                held.append((callback, args, context))
+                return soon(lambda: None)
+            extra = {} if context is None else {"context": context}
+            return soon(callback, *args, **extra)
+
+        try:
+            await asyncio.wait_for(parked.wait(), 2)
+            member.cancel()
+            for _ in range(8):
+                await asyncio.sleep(0)
+            assert not member.done() and member.cancelling() == 0 and not left.is_set()
+            loop.call_soon = hold
+            saved["work"].cancel()
+            member.cancel()
+            for _ in range(2):
+                await asyncio.sleep(0)
+            assert held and not left.is_set() and not member.done() and member.cancelling() == 0
+            threading.Thread(target=saved["invoke"], daemon=True).start()
+            assert await asyncio.to_thread(inside.wait, 2)
+            assert order == ["auth-in"] and not left.is_set()
+            release.set()
+            finished, pending = await asyncio.wait({member}, timeout=2)
+            assert member in finished and member not in pending
+            with pytest.raises(asyncio.CancelledError):
+                await member
+            assert order == ["auth-in", "auth-out", "close"] and idents["close"] != idents["loop"]
+        finally:
+            loop.call_soon = soon
+            for callback, args, context in held:
+                soon(callback, *args, context=context)
+
+    _run_member(order, idents, body, release, limit=5)

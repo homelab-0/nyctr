@@ -7,23 +7,26 @@ minutes and files one request for the device they are on. It reveals only that.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import case, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from . import access, facts, peer, presence
 from .deps import device_permitted, get_db
 from .integrations import registry
-from .models import AccessRequest, Integration, Observation, StatementQuota, utc, utcnow
+from .models import AccessRequest, Integration, Observation, StatementQuota, utcnow
 from .security import audit, authenticate
 from .sites import PORTAL, seen_as, site_of
 
@@ -139,44 +142,77 @@ def _take(db: Session, user_id: str) -> bool:
     return db.execute(statement).scalar_one_or_none() is not None
 
 
-def _fresh(row: Observation, now, window) -> bool:
-    """A block observed in the window, not after now, that the inbox has not expired."""
-    observed = utc(row.observed_at)
-    return window <= observed <= now and utc(row.expires_at) > now
+def _capable(providers):
+    """Blocks from sources the registry says can block a lookup. The saved capability list is not consulted."""
+    return (
+        select(Observation.id)
+        .join(Integration, Observation.integration_id == Integration.id)
+        .where(Integration.provider.in_(providers))
+    )
 
 
-def _candidates(db: Session, name: str) -> list[Observation]:
-    """Exact history of this name, and every recent block, from a source that declares blocked lookups.
+def _fresh_bounds(now, window):
+    """Observed inside the window, including its edges, and not yet expired. `now` is the caller's clock."""
+    return (
+        Observation.observed_at >= window,
+        Observation.observed_at <= now,
+        Observation.expires_at > now,
+    )
 
-    The core names no vendor: it asks the registry which sources offer the capability.
+
+def _kin(name: str):
+    """A stored name that is a parent or a child of `name`, at a dot boundary.
+
+    The start index stays positive. PostgreSQL and SQLite disagree on a negative
+    `substr` start, and `LIKE` would treat `_` as a wildcard. Nothing here changes
+    the case or the spelling of a stored name.
+    """
+    stored_len = func.length(Observation.domain)
+    # Child: the stored name ends with "." + name.
+    child = and_(
+        stored_len >= len(name) + 1,
+        func.substr(Observation.domain, stored_len - len(name)) == "." + name,
+    )
+    # Parent: the typed name ends with "." + the stored name, which is shorter and not empty.
+    start = len(name) - stored_len
+    parent = and_(
+        stored_len > 0,
+        stored_len < len(name),
+        func.substr(name, start, 1) == ".",
+        func.substr(name, start + 1) == Observation.domain,
+    )
+    return or_(child, parent)
+
+
+def _match(db: Session, name: str):
+    """The newest fresh exact block of this name, or why there is none.
+
+    One fresh exact row is loaded. Any other exact row, of any age, is stale and
+    is not loaded. Otherwise one fresh parent or child makes the name inexact.
+    The same captured clock is bound for every check. When two fresh exact rows
+    share `observed_at`, the greater id text is filed (`id DESC`).
     """
     providers = tuple(registry.with_capability("dns.blocks"))
     if not providers:
-        return []
-    return list(db.scalars(
-        select(Observation).join(Integration, Observation.integration_id == Integration.id).where(
-            Integration.provider.in_(providers),
-            or_(Observation.domain == name, Observation.observed_at >= utcnow() - WINDOW))))
-
-
-def _match(rows: list[Observation], name: str):
-    """The newest exact block of this name in the window, or why there is none.
-
-    A parent or a child is not a match. An exact name older than the window, or
-    one the inbox has expired, is stale. The caller tells the member the same
-    plain sentence either way.
-    """
+        return None, "miss"
     now = utcnow()
     window = now - WINDOW
-    exact = [row for row in rows if row.domain == name]
-    fresh = [row for row in exact if _fresh(row, now, window)]
-    if fresh:
-        return max(fresh, key=lambda row: utc(row.observed_at)), "filed"
-    if exact:
+    fresh = _fresh_bounds(now, window)
+    chosen = db.scalars(
+        select(Observation)
+        .join(Integration, Observation.integration_id == Integration.id)
+        .where(Integration.provider.in_(providers), Observation.domain == name, *fresh)
+        .order_by(Observation.observed_at.desc(), Observation.id.desc())
+        .limit(1)
+    ).first()
+    if chosen is not None:
+        return chosen, "filed"
+    capable = _capable(providers)
+    if db.scalar(select(capable.where(Observation.domain == name).exists())):
         return None, "stale"
-    related = [row for row in rows if _fresh(row, now, window)
-               and (row.domain.endswith("." + name) or name.endswith("." + row.domain))]
-    return None, "not_exact" if related else "miss"
+    if db.scalar(select(capable.where(*fresh, _kin(name)).exists())):
+        return None, "not_exact"
+    return None, "miss"
 
 
 def _open_request(db: Session, user_id: str, device_id: str, name: str,
@@ -239,20 +275,113 @@ def _record_unsigned(db: Session, domain: str) -> None:
     db.commit()
 
 
+def _settle(future: asyncio.Future) -> None:
+    """Mark a call finished. A second notice, after the request has moved on, is ignored."""
+    if not future.done():
+        future.set_result(None)
+
+
+async def _wait_for_call(done: asyncio.Future, work: asyncio.Future) -> None:
+    """Stay until the call has left. A finished pool task is not that signal.
+
+    Raw cancel raises at a shielded wait, so each wait clears the count and the
+    caller raises only after ``done`` settles. The pool callback settles it while
+    the call is still pending. The call settles it only after it returns.
+    """
+    task = asyncio.current_task()
+    async def wait_out(future: asyncio.Future) -> None:
+        while not future.done():
+            if task is not None:
+                while task.cancelling():
+                    task.uncancel()
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+
+    await wait_out(done)
+    await wait_out(work)
+    if work.done() and not work.cancelled():
+        work.exception()
+
+
+async def _off_loop(func, *args):
+    """Run one synchronous call on the worker pool and do not return while it can still use the session.
+
+    ``run_in_threadpool`` waits out an AnyIO cancellation. Cancelling the request
+    task itself still raises at that await. This task does not leave until the
+    call has finished, or until the pool callback fences a call that never started.
+    A pool task that ends while the call is still running does not end the wait:
+    cancelling that task releases its pool slot before the thread returns.
+    """
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future = loop.create_future()
+    box: dict = {}
+    gate = threading.Lock()
+    # pending until claimed. The pool callback marks skipped and settles done.
+    # The worker marks running, then finished, and settles done after func returns.
+    phase = "pending"
+
+    def invoke():
+        nonlocal phase
+        with gate:
+            if phase != "pending":
+                return
+            phase = "running"
+        try:
+            box["value"] = func(*args)
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            with gate:
+                phase = "finished"
+            loop.call_soon_threadsafe(_settle, done)
+
+    def pool_ended(_finished: asyncio.Future) -> None:
+        # On the loop. Settle only while the call is still pending, so a claimed
+        # call cannot be closed under the thread.
+        nonlocal phase
+        with gate:
+            if phase != "pending":
+                return
+            phase = "skipped"
+        _settle(done)
+
+    work = asyncio.ensure_future(run_in_threadpool(invoke))
+    work.add_done_callback(pool_ended)
+    try:
+        await asyncio.shield(work)
+    except asyncio.CancelledError:
+        await _wait_for_call(done, work)
+        raise
+    error = box.get("error")
+    if error is not None:
+        raise error
+    return box.get("value")
+
+
 async def signed_member(request: Request, db: Session = Depends(get_db)):
     """Sign-in for this route. A missing session is audited, then refused unchanged.
 
     The shared check still returns 401 for a missing, unknown, expired or disabled
     session, and 403 when a live session has no matching mutation token. Only the
-    401 is audited, with no member attached.
+    401 is audited, with no member attached. The body is read on the event loop.
+    The session lookup and the audit commit run on the worker pool, one after the
+    other. A cancellation closes the session only after the in-flight call returns,
+    or after the pool callback fences a call that never started.
     """
     try:
-        user, session = authenticate(request, db)
-    except HTTPException as exc:
-        if exc.status_code == 401:
-            _record_unsigned(db, await _typed_domain(request))
+        try:
+            user, session = await _off_loop(authenticate, request, db)
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                await _off_loop(_record_unsigned, db, await _typed_domain(request))
+            raise
+        # The account was loaded on the worker. This reads no column and runs no query.
+        return seen_as(request, user), session
+    except asyncio.CancelledError:
+        await _off_loop(db.close)
         raise
-    return seen_as(request, user), session
 
 
 @router.post("/statements")
@@ -287,7 +416,7 @@ def state_a_site(body: StatementInput, background: BackgroundTasks, request: Req
     existing = _open_request(db, user_id, device_id, name)
     if (answer := _duplicate(db, user_id, device_id, device_name, name, existing)) is not None:
         return answer
-    chosen, outcome = _match(_candidates(db, name), name)
+    chosen, outcome = _match(db, name)
     if chosen is None:
         _record(db, user_id, device_id, device_name, name, outcome)
         db.commit()
