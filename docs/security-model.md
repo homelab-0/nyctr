@@ -258,7 +258,21 @@ of that check.
 In the demonstration the page does not ask a gateway. It chooses a permitted
 client whose stored address is this request's address, or else the first
 personal device the member may use, by name and then by id. A stored address
-on a device the member may not use is not chosen. No route files a statement.
+on a device the member may not use is not chosen.
+
+A signed-in member can file `POST /api/statements` for the device that
+recognition names for this request. Nyctr files that request only for an
+exact blocked name from the last 15 minutes that has not expired and is not
+dated after now. A parent or child name is not treated as that block, and
+the answer does not disclose another person's history. Five attempts in a
+fixed hour from the first attempt count a miss and a repeat. This member's
+open request on this device is returned before new evidence is required.
+The request then follows the stored analysis, the access rule, and an owned
+lease. `allow_statement` stays off until an administrator turns it on. Off
+or on, it does not open a deliberate block, an unknown tier, or a block
+from a model alone. A provider change still requires
+`NYCTR_PROVIDER_WRITES`. If the account or the stored device no longer
+qualifies, the request and its history stay, and one waiting notice is kept.
 
 ## Two addresses
 

@@ -224,14 +224,3 @@ def test_a_conflicting_event_returns_the_stored_event(tmp_path, database, reques
             audits = list(db.scalars(select(Audit).where(
                 Audit.action == "access.requested", Audit.target_id == "event-print")))
         assert audits == []
-
-
-def test_production_openapi_omits_statements(app, client):
-    """The production app lists no typed-site route, signed in or not."""
-    paths = app.openapi()["paths"]
-    assert not any(path == "/api/statements" or path.startswith("/api/statements/") for path in paths)
-    body = {"domain": "fonts.partner-metrics.example"}
-    unsigned = client.post("/api/statements", json=body)
-    assert unsigned.status_code == 404 and unsigned.json()["detail"] == "API endpoint not found"
-    member = client.post("/api/statements", headers=signin(client, member=True), json=body)
-    assert member.status_code == 404 and member.json()["detail"] == "API endpoint not found"
