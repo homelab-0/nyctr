@@ -282,12 +282,129 @@ function BlockRow({
   );
 }
 
+/** What the member typed, so a late answer can tell whether that text is still on screen. */
+interface StatementDraft {
+  revision: number;
+  site: string;
+}
+/** One submit. A later edit gets a new revision, so this answer cannot land on different text. */
+interface StatementFlight {
+  userId: string;
+  deviceId: string;
+  flight: number;
+  revision: number;
+  site: string;
+  phase: 'pending' | 'settled';
+  message: string | null;
+}
+/** The request a submit returned. Kept so a failed refresh cannot pretend it was never filed. */
+interface KeptStatement {
+  userId: string;
+  deviceId: string;
+  flight: number;
+  revision: number;
+  site: string;
+  request: AccessRequest;
+  refreshed: boolean;
+}
+interface StatementAnswer {
+  matched: boolean;
+  message: string;
+  request?: AccessRequest;
+}
+
+/**
+ * A site the member names for this device. Feedback is shown only for the revision that was
+ * submitted. A request filed for an earlier revision stays reachable by its own name.
+ */
+function SiteStatement({
+  site,
+  revision,
+  ask,
+  kept,
+  userId,
+  deviceId,
+  onChange,
+  onSubmit,
+}: {
+  site: string;
+  revision: number;
+  ask: StatementFlight | null;
+  kept: KeptStatement | null;
+  userId: string;
+  deviceId: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const sameAsk =
+    !!ask && ask.userId === userId && ask.deviceId === deviceId && ask.revision === revision;
+  const asking = sameAsk && ask.phase === 'pending';
+  const message = sameAsk && ask.phase === 'settled' ? ask.message : null;
+  const earlier =
+    kept && kept.userId === userId && kept.deviceId === deviceId && kept.revision !== revision
+      ? kept
+      : null;
+  return (
+    <form
+      className="m-card pad form-stack"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <h2>A site did not open</h2>
+      <p className="aside">
+        Type the site's name. Nyctr checks whether that name was blocked in the last few minutes,
+        then files a request for this device.
+      </p>
+      <label className="field">
+        <span>Site name</span>
+        <input
+          type="text"
+          value={site}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="example.com"
+          aria-label="Site that did not open"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+        />
+      </label>
+      <InlineError message={message} />
+      {earlier && (
+        <p className="aside" role="status">
+          Nyctr filed your request for <span className="dom">{earlier.request.domain}</span>.{' '}
+          <a href={`#/portal?request=${earlier.request.id}`}>Open that request</a>
+        </p>
+      )}
+      <button className="button primary large full" type="submit" disabled={asking || !site.trim()}>
+        {asking ? 'Asking…' : 'Ask about this site'}
+      </button>
+    </form>
+  );
+}
+
 /** Home: blocks on the device in hand first, then the member's other devices, plus a search. */
-function Home({ data }: { data: Data }) {
+function Home({
+  data,
+  draft,
+  ask,
+  kept,
+  onFile,
+}: {
+  data: Data;
+  draft: { current: StatementDraft };
+  ask: StatementFlight | null;
+  kept: KeptStatement | null;
+  onFile: (site: string, revision: number) => void;
+}) {
   const [text, setText] = useState('');
   const [found, setFound] = useState<Block[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [site, setSite] = useState('');
+  const [revision, setRevision] = useState(0);
+  draft.current = { revision, site };
   const now = useNow();
   // How soon a new block can show up here. No wait is promised unless a schedule is on.
   const { user } = useAuth();
@@ -418,6 +535,21 @@ function Home({ data }: { data: Data }) {
         </button>
       </form>
       <InlineError message={error} />
+      {here?.device_id && (
+        <SiteStatement
+          site={site}
+          revision={revision}
+          ask={ask}
+          kept={kept}
+          userId={user?.id ?? ''}
+          deviceId={here.device_id}
+          onChange={(value) => {
+            setSite(value);
+            setRevision((current) => current + 1);
+          }}
+          onSubmit={() => onFile(site, revision)}
+        />
+      )}
       {/* Without the list of requests, a site already asked about looks like one that was not. */}
       {data.requests.error && (
         <p className="aside" role="status">
@@ -664,15 +796,33 @@ function CheckNote({ failed, againMs }: { failed: boolean; againMs: number | nul
 }
 
 /** The outcome of a request: open (with reconnect steps), waiting, or declined. Never vague. */
-function Result({ data, id, againMs }: { data: Data; id: string; againMs: number | null }) {
+function Result({
+  data,
+  id,
+  againMs,
+  filed,
+}: {
+  data: Data;
+  id: string;
+  againMs: number | null;
+  filed: { current: KeptStatement | null };
+}) {
+  const { user } = useAuth();
   const [os, setOs] = useState<DeviceOs>(detectOs());
   const now = useNow(5000);
+  const listed = (data.requests.data || []).find((item) => item.id === id);
+  // Read during render: the ref is set before the address changes, so this paint cannot miss it.
+  const heldRequest = filed.current;
+  const fallback =
+    heldRequest && heldRequest.request.id === id && heldRequest.userId === user?.id
+      ? heldRequest.request
+      : null;
   // Both lists are already on screen. A later failure must not replace them with the error screen.
   const held = data.requests.data !== null && data.leases.data !== null;
-  if (!held && (data.requests.loading || data.leases.loading)) return <Loading />;
+  if (!held && (data.requests.loading || data.leases.loading) && !fallback) return <Loading />;
   // Without both lists the outcome is not known, so none is shown.
   const unread = data.requests.error || data.leases.error;
-  if (!held && unread)
+  if (!held && unread && !fallback)
     return (
       <div className="m-col">
         <ErrorState
@@ -684,7 +834,7 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
         />
       </div>
     );
-  const row = (data.requests.data || []).find((item) => item.id === id);
+  const row = listed || fallback;
   if (!row)
     return (
       <div className="m-col">
@@ -705,11 +855,30 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
   const simulated = lease?.execution === 'simulated' && lease.status !== 'unconfirmed';
   const remaining = lease ? left(lease.expires_at, now) : null;
   const note = writtenNote(row.review_note);
+  // The submit already returned this request. A failed or incomplete list must not call it missing.
+  const listBehind = !listed && !!fallback && !!heldRequest?.refreshed;
   return (
     <div className="m-col">
       <a className="back" href="#/portal">
         <ArrowLeft size={16} /> Blocked sites
       </a>
+      {listBehind && (
+        <p className="aside" role="status">
+          {data.requests.error
+            ? `${data.requests.error} Your request was still filed.`
+            : 'Nyctr filed this request, but it is not in the list yet.'}{' '}
+          <button
+            type="button"
+            className="linklike"
+            onClick={() => {
+              data.requests.reload();
+              data.leases.reload();
+            }}
+          >
+            Try again
+          </button>
+        </p>
+      )}
       {open ? (
         <>
           <header className="m-result ok">
@@ -980,9 +1149,128 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const { user, logout } = useAuth();
   const data = useMemberData();
   const [error, setError] = useState<string | null>(null);
+  const [ask, setAsk] = useState<StatementFlight | null>(null);
+  const [kept, setKept] = useState<KeptStatement | null>(null);
+  const statementFlight = useRef(0);
+  const statementLeft = useRef(false);
+  const statementDraft = useRef<StatementDraft>({ revision: 0, site: '' });
+  const keptRef = useRef<KeptStatement | null>(null);
+  /** The revision whose submit is in flight, so a second press of the same text does not file twice. */
+  const statementBusy = useRef<{ revision: number; deviceId: string } | null>(null);
   const block = params.get('block');
   const request = params.get('request');
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
+  const statementView = useRef({
+    section,
+    request,
+    block,
+    userId: user?.id ?? '',
+    deviceId: data.device.data?.device_id ?? '',
+  });
+  statementView.current = {
+    section,
+    request,
+    block,
+    userId: user?.id ?? '',
+    deviceId: data.device.data?.device_id ?? '',
+  };
+  useEffect(() => {
+    statementLeft.current = false;
+    return () => {
+      statementLeft.current = true;
+    };
+  }, []);
+  /** Files the typed site. A late answer cannot move the page or label a newer name. */
+  const fileStatement = (site: string, revision: number) => {
+    const seen = statementView.current;
+    if (!seen.deviceId || !seen.userId || !site.trim()) return;
+    if (
+      statementBusy.current?.revision === revision &&
+      statementBusy.current.deviceId === seen.deviceId
+    )
+      return;
+    statementBusy.current = { revision, deviceId: seen.deviceId };
+    const stamp = {
+      userId: seen.userId,
+      deviceId: seen.deviceId,
+      site,
+      revision,
+      flight: ++statementFlight.current,
+    };
+    setAsk({ ...stamp, phase: 'pending', message: null });
+    const reloadRequests = data.requests.reload;
+    const reloadLeases = data.leases.reload;
+    const releaseBusy = () => {
+      if (
+        statementBusy.current?.revision === stamp.revision &&
+        statementBusy.current.deviceId === stamp.deviceId
+      )
+        statementBusy.current = null;
+    };
+    void (async () => {
+      try {
+        const answer = await post<StatementAnswer>('/statements', { domain: site });
+        if (statementLeft.current || statementView.current.userId !== stamp.userId) {
+          releaseBusy();
+          return;
+        }
+        if (answer.request) {
+          const filed = { ...stamp, request: answer.request, refreshed: false };
+          const previous = keptRef.current;
+          const next = previous && previous.flight > stamp.flight ? previous : filed;
+          keptRef.current = next;
+          setKept(next);
+          const place = statementView.current;
+          const still =
+            place.deviceId === stamp.deviceId &&
+            place.section === 'portal' &&
+            place.request === null &&
+            place.block === null &&
+            statementDraft.current.revision === stamp.revision &&
+            statementFlight.current === stamp.flight;
+          // Move only while this submit is still the one on screen. Never again after the refresh.
+          if (still) window.location.hash = `/portal?request=${answer.request.id}`;
+          await Promise.all([reloadRequests(), reloadLeases()]);
+          if (statementLeft.current || statementView.current.userId !== stamp.userId) {
+            releaseBusy();
+            return;
+          }
+          if (keptRef.current?.flight === stamp.flight) {
+            const refreshed = { ...keptRef.current, refreshed: true };
+            keptRef.current = refreshed;
+            setKept(refreshed);
+          }
+          if (statementFlight.current === stamp.flight)
+            setAsk({ ...stamp, phase: 'settled', message: null });
+          releaseBusy();
+          return;
+        }
+        if (
+          statementFlight.current !== stamp.flight ||
+          statementView.current.deviceId !== stamp.deviceId
+        ) {
+          releaseBusy();
+          return;
+        }
+        setAsk({ ...stamp, phase: 'settled', message: answer.message });
+        releaseBusy();
+      } catch (caught) {
+        if (
+          statementLeft.current ||
+          statementFlight.current !== stamp.flight ||
+          statementView.current.userId !== stamp.userId ||
+          statementView.current.deviceId !== stamp.deviceId
+        ) {
+          releaseBusy();
+          return;
+        }
+        const message =
+          caught instanceof Error ? caught.message : 'Nyctr could not take that request.';
+        setAsk({ ...stamp, phase: 'settled', message });
+        releaseBusy();
+      }
+    })();
+  };
   // My requests and a request's own page keep reading while one of this member's
   // requests is still undecided, so the answer shows up where they are already looking.
   // After a decision, the openings are read once more, so one written with the decision
@@ -1074,12 +1362,12 @@ export default function Portal({ page, params }: { page: string; params: URLSear
         ) : section === 'devices' ? (
           <MyDevices data={data} />
         ) : request ? (
-          <Result data={data} id={request} againMs={again} />
+          <Result data={data} id={request} againMs={again} filed={keptRef} />
         ) : block ? (
           // Keyed by the block: what was read or typed for one never stands under another.
           <BlockDetail key={block} data={data} id={block} />
         ) : (
-          <Home data={data} />
+          <Home data={data} draft={statementDraft} ask={ask} kept={kept} onFile={fileStatement} />
         )}
       </main>
     </div>

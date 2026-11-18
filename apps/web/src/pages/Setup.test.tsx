@@ -13,6 +13,7 @@ const rules: Rules = {
     enabled: true,
     per_day: 4,
     daily_total: 10,
+    allow_statement: false,
     ad_tracker: { mode: 'on', max_score: 25, max_minutes: 30, analysis_required: false },
     threat_feed: { mode: 'off', max_minutes: 30, min_registered_days: 180 },
   },
@@ -165,6 +166,31 @@ describe('access rule in Setup', () => {
     expect(within(never).getByText(/newly registered, dynamic or parked address/)).toBeDefined();
     expect(within(never).getAllByText('Never automatic')).toHaveLength(5);
     expect(never.querySelectorAll('button, input, select')).toHaveLength(0);
+  });
+
+  it('saves the switch for a site a member named, and leaves it off until then', async () => {
+    const { saved, user } = openRule();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText(/a site someone on their own device names/)).toBeDefined();
+    const release = holdBack('PUT', '/rules/access');
+    await user.click(named);
+    await waitFor(() => expect(saved()).toHaveLength(1));
+    expect(saved()[0]).toMatchObject({ allow_statement: true, enabled: true, per_day: 4 });
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    expect(saved()).toHaveLength(1);
+    release();
+    await waitFor(() => expect(saved()).toHaveLength(2));
+    expect(saved()[1]).toMatchObject({ allow_statement: true, enabled: true, per_day: 3 });
+    expect(named.getAttribute('aria-checked')).toBe('true');
+    expect(
+      screen.getByRole('switch', { name: 'Automatic access' }).getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(
+      screen
+        .getByRole('switch', { name: 'Require a check of the address' })
+        .getAttribute('aria-checked'),
+    ).toBe('false');
   });
 
   it('saves record only for advertising lists and says that nothing is opened', async () => {

@@ -143,6 +143,17 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
             With this off, every request waits for you, whatever is set below.
           </span>
         </div>
+        <div className="bar">
+          <Switch
+            label="Open a site a member named"
+            checked={rule.allow_statement === true}
+            onChange={(allow_statement) => save((current) => ({ ...current, allow_statement }))}
+          />
+          <span className="aside">
+            With this off, a site someone on their own device names always waits for you. On, it
+            follows the same rule as any other request.
+          </span>
+        </div>
         <p className="rule">
           Open at most
           <Stepper
