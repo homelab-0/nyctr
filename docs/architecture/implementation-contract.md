@@ -72,10 +72,38 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   not file a second one. A statement for a device is a different request and
   is not returned. The request is assessed immediately; the access rule may
   set `auto_approved` and open a lease.
+- `POST /api/statements` with `{domain}` (signed-in member, on the device
+  that recognition names for this request). The server reduces `domain` to one
+  plain domain. It files one request, basis `statement`, only when a source
+  that reports blocked lookups has an exact block of that name observed in
+  the last 15 minutes, not after the current time, and not yet expired. A
+  parent or a child name is not that block. The answer does not include
+  another device, member, or lookup. This member's open request on this
+  device is returned before a new one is filed, including after that block
+  has left the window. The server names the device first. If it cannot, no
+  attempt is taken. It then requires one plain domain. A name it rejects
+  takes no attempt. Five attempts are then kept for each member in a fixed
+  hour from the first counted attempt. A valid name that misses, and a
+  repeat, both count. 401 `Sign in to continue` when nobody is signed in.
+  A live session without the mutation token is 403 and files nothing. The
+  filed request then follows the stored analysis, the access rule, and an
+  owned lease. `allow_statement` stays off until an administrator turns it
+  on. Off or on, it does not open a deliberate block, an unknown tier, or
+  a block on a model's word alone. A provider change still requires
+  `NYCTR_PROVIDER_WRITES`. When the rule opens the request, the account
+  must still be active and the member must still have an assignment or a
+  live tie on the stored device. If either no longer qualifies, the request
+  and its history stay, and one waiting notice is kept. An administrator's
+  `approved` on `POST /api/requests/{id}/review` is a separate decision and
+  does not repeat the account and device check. The blocked lookup must
+  still be present and not yet expired.
 - `POST /api/requests/{id}/review` with
   `{decision:"reviewed"|"denied"|"approved",note,minutes?}` is admin-only.
   `reviewed` and `denied` change nothing on the network. `approved` opens a
   temporary lease whose `execution` says whether the provider was changed.
+  For a statement, this approval does not repeat the account and device
+  check the rule uses. The blocked lookup must still be present and not yet
+  expired.
 - `POST /api/blocks/find` with `{domain}` -> Block[] among events the caller may see.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
   missing, expired or not visible to the caller answers the same 404.
@@ -162,18 +190,20 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   tier can be named. `allow_statement` defaults to false. Left out of a save, it
   is stored false. Off, a statement always waits for a person. On, the rule
   decides it as any other request. A deliberate block or an unknown score still
-  waits. A stored statement is opened only while the account is active and the
-  member still has an assignment or a live tie on the device stored with the
-  request. The account is read again from the database before the opening,
-  again after the claim on that source entry is held, and again after a
-  provider has been asked. If the account or the device no longer qualifies
-  before the provider is asked, the claim is given back and nothing is sent.
-  If it no longer qualifies after the provider has been asked, the request
-  waits, and an entry this opening added is removed on the next upkeep tick.
-  The sign-in does not have to remain. An event request, and a row whose basis
-  is empty, is left on the path that filed it. No route files a statement.
-  The statement module is not included by the application that serves requests,
-  so `POST /api/statements` is not a path there.
+  waits. The rule opens a stored statement only while the account is active
+  and the member still has an assignment or a live tie on the device stored
+  with the request. The account is read again from the database before that
+  opening, again after the claim on that source entry is held, and again
+  after a provider has been asked. If the account or the device no longer
+  qualifies before the provider is asked, the claim is given back and
+  nothing is sent. If it no longer qualifies after the provider has been
+  asked, the request waits, and an entry this opening added is removed on
+  the next upkeep tick. The sign-in does not have to remain. An
+  administrator's `approved` on `POST /api/requests/{id}/review` does not
+  repeat this account and device check. The blocked lookup must still be
+  present and not yet expired. An event request, and a row whose basis is
+  empty, is left on the path that filed it. A signed-in member files a
+  statement with `POST /api/statements`.
   The form before tiers (`{enabled,max_score,max_minutes,
   per_day}`) is read from storage and refused here. Read back, its daily total
   is the old limit for each person times the number of active accounts, from

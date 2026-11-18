@@ -1,7 +1,6 @@
 """A member on a recognised device names a site that did not open.
 
-These cases mount the statement routes on the app they build. The application
-that serves requests does not include them.
+These cases use the application that serves requests, including its statement route.
 """
 
 import asyncio
@@ -62,22 +61,6 @@ HIDDEN = ("Unknown source device", "downloads.filemirror.example", "Alex's works
           "gallery.imagehost.example", "user-admin")
 
 
-def mount_for_test(app):
-    """Include the statement routes on this app only.
-
-    The unknown-path route is already registered and matches first. These routes
-    move ahead of it on this app, so a test reaches the module. The application
-    that serves requests is left as it was built.
-    """
-    seen = {id(route) for route in app.router.routes}
-    app.include_router(statements.router)
-    added = [route for route in app.router.routes if id(route) not in seen]
-    rest = [route for route in app.router.routes if id(route) in seen]
-    index = next(i for i, route in enumerate(rest) if getattr(route, "path", None) == "/api/{path:path}")
-    app.router.routes[:] = [*rest[:index], *added, *rest[index:]]
-    return app
-
-
 def open_demo(database, tmp_path, request, name, **overrides):
     """A demo API on this case's own database. PostgreSQL is skipped when no server is named."""
     if database == "sqlite":
@@ -89,7 +72,7 @@ def open_demo(database, tmp_path, request, name, **overrides):
     values = {"mode": "demo", "database_url": url, "public_url": "http://testserver",
               "cookie_secure": False, "worker_enabled": False}
     values.update(overrides)
-    return mount_for_test(create_app(Settings(**values)))
+    return create_app(Settings(**values))
 
 
 def ask(client, headers, domain):
@@ -426,20 +409,30 @@ def test_concurrent_statements_share_one_request_and_stop_at_five(tmp_path, data
         assert rows[0].id == kept[0][1] and quota(app) == 5
 
 
-def test_the_production_app_has_no_statement_route(tmp_path):
-    """A fresh application, the one the server builds, has no typed-site path."""
+def test_the_production_app_serves_a_statement_only_after_sign_in(tmp_path):
+    """The application that serves requests lists the typed-site path and refuses a stranger.
+
+    A signed-in member without the mutation token is refused and files nothing.
+    """
     app = create_app(Settings(
-        mode="demo", database_url=f"sqlite:///{tmp_path}/absent.db",
+        mode="demo", database_url=f"sqlite:///{tmp_path}/served.db",
         public_url="http://testserver", cookie_secure=False, worker_enabled=False))
-    assert "/api/statements" not in {getattr(route, "path", "") for route in app.routes}
     with TestClient(app) as client:
         spec = client.get("/api/openapi.json").json()["paths"]
-        assert not any(path == "/api/statements" or path.startswith("/api/statements/") for path in spec)
+        assert "/api/statements" in spec
         body = {"domain": "fonts.partner-metrics.example"}
         unsigned = client.post("/api/statements", json=body)
-        assert unsigned.status_code == 404 and unsigned.json()["detail"] == "API endpoint not found"
-        member = client.post("/api/statements", headers=signin(client, member=True), json=body)
-        assert member.status_code == 404 and member.json()["detail"] == "API endpoint not found"
+        assert unsigned.status_code == 401 and unsigned.json()["detail"] == "Sign in to continue"
+        signin(client, member=True)
+        missing = client.post("/api/statements", json=body)
+        assert missing.status_code == 403 and missing.json()["detail"] == "Invalid or missing CSRF token"
+        assert filed_for(app, body["domain"]) == []
+        assert quota(app) is None
+        audits = stated(app)
+        assert len(audits) == 1 and audits[0].actor_id is None
+        assert audits[0].details == {"domain": body["domain"], "device_id": "", "device_name": "",
+                                      "outcome": "no_session"}
+
 
 def test_a_live_tie_lets_a_member_name_a_site_and_recognition_off_does_not(tmp_path):
     """Recognition off refuses. An address outside every collected network refuses too.
@@ -447,7 +440,7 @@ def test_a_live_tie_lets_a_member_name_a_site_and_recognition_off_does_not(tmp_p
     Once the network is on record, recognition ties the member and the statement is filed
     for that device. The stored address is not used while recognition has nothing to name.
     """
-    app = mount_for_test(live_app(tmp_path))
+    app = live_app(tmp_path)
     with TestClient(app, client=("10.0.0.9", 50000)) as client:
         seed_live_member(app)
         now = utcnow()
@@ -585,7 +578,6 @@ def refusal(app, client, domain, code, *hidden):
 def test_a_recognition_refusal_is_final(tmp_path, database, request, monkeypatch):
     """Recognition names the device or refuses. A stored address does not override the refusal."""
     app, gateway = home(tmp_path, monkeypatch, **live_place(database, tmp_path, request, "refusal"))
-    mount_for_test(app)
     original = dict(gateway["holds"])
     domain = "zz-named.example"
     plant_named(app, domain)
@@ -697,17 +689,14 @@ def test_a_recognition_refusal_is_final(tmp_path, database, request, monkeypatch
 
     proxy, _gateway = home(tmp_path, monkeypatch, trusted_proxies=LAPTOP,
                            **live_place(database, tmp_path, request, "proxy"))
-    mount_for_test(proxy)
     assign_device(proxy, "gw:client:laptop", "personal", ["sam"])
     with member(proxy, LAPTOP, headers={"X-Forwarded-For": LAPTOP}) as sam:
         refusal(proxy, sam, domain, "proxy", *HIDDEN_DEVICES)
     odd, _gateway = home(tmp_path, monkeypatch, trusted_proxies="198.51.100.1",
                          **live_place(database, tmp_path, request, "malformed"))
-    mount_for_test(odd)
     with member(odd, "198.51.100.1", headers={"X-Forwarded-For": "not-an-address"}) as sam:
         refusal(odd, sam, domain, "no_address", *HIDDEN_DEVICES)
     split, split_gateway = home(tmp_path, monkeypatch, **live_place(database, tmp_path, request, "split"))
-    mount_for_test(split)
     two_sites(split, "192.0.2.0/24")
     split_gateway["holds"].update(phone=None, boat=PHONE)
     assign_device(split, "gw:client:phone", "personal", ["sam"])
@@ -719,7 +708,6 @@ def test_a_recognition_refusal_is_final(tmp_path, database, request, monkeypatch
 def test_two_devices_of_one_member_keep_separate_requests(tmp_path, database, request, monkeypatch):
     """The same member on two devices gets two requests. A conflict retry stays on the device that asked."""
     app, _gateway = home(tmp_path, monkeypatch, **live_place(database, tmp_path, request, "devices"))
-    mount_for_test(app)
     own, overlap = "zz-own.example", "zz-overlap.example"
     plant_named(app, own)
     plant_named(app, overlap)
@@ -780,7 +768,6 @@ def test_two_devices_of_one_member_keep_separate_requests(tmp_path, database, re
 def test_an_open_request_returns_after_its_evidence_is_gone(tmp_path, database, request, monkeypatch):
     """This device's open request comes back after the block is old or gone. Another device is not shown it."""
     app, _gateway = home(tmp_path, monkeypatch, **live_place(database, tmp_path, request, "window"))
-    mount_for_test(app)
     held, cold = "zz-held.example", "zz-cold.example"
     plant_named(app, held)
     plant_named(app, cold)
@@ -1131,7 +1118,6 @@ def _prepared(tmp_path, monkeypatch, request, database, name):
     """A live app whose fabricated DNS source may be changed, with the laptop assigned to Sam."""
     app, _gateway = home(tmp_path, monkeypatch, provider_writes="nextdns",
                          **live_place(database, tmp_path, request, name))
-    app = mount_for_test(app)
     now = utcnow()
     with app.state.session_factory() as db:
         db.add(Integration(

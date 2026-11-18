@@ -30,6 +30,7 @@ from . import (
     query,
     removal,
     retention,
+    statements,
     worker,
 )
 from . import blocks as block_list
@@ -382,7 +383,7 @@ def create_app(settings: Settings | None = None):
         return {"ok": True}
 
     app.include_router(oidc_router)
-    for feature in (access, guests, query, assistant, presence, notices):
+    for feature in (access, guests, query, assistant, presence, notices, statements):
         app.include_router(feature.router)
 
     @app.get("/api/model")

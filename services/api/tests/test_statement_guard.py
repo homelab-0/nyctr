@@ -1,8 +1,8 @@
 """A statement is opened only while the account and the device still qualify.
 
 The rows are inserted here and finished by the real decision and lease path.
-Nothing imports or mounts the statement route. An event request, and a row
-whose basis is empty, still open. A web session is not that permission.
+This file does not mount a second copy of the route. An event request, and a
+row whose basis is empty, still open. A web session is not that permission.
 """
 
 import asyncio
@@ -608,11 +608,3 @@ def test_revoking_the_device_during_the_entry_wait_sends_nothing(
     row, leases, notes = saved(app, domain)
     assert row.status == "pending" and len(notes) == 1 and leases == []
     assert source.calls.count("POST") == 2 and "DELETE" not in source.calls
-
-
-def test_a_member_cannot_file_a_statement_and_the_route_is_absent(client, member_headers):
-    """The statement route is not served. A member's post finds nothing there."""
-    spec = client.get("/api/openapi.json").json()
-    assert "/api/statements" not in spec["paths"]
-    posted = client.post("/api/statements", headers=member_headers, json={"domain": "zz.example"})
-    assert posted.status_code == 404
