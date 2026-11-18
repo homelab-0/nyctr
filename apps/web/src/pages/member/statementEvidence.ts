@@ -15,14 +15,15 @@ import type {
 
 export interface OpeningEvidence {
   /**
-   * `unknown`: the request was approved and the lease list did not load.
+   * `unknown`: the request was approved and the lease list did not load,
+   * or the loaded lease is still unconfirmed.
    * `read`: the lease list loaded. A null lease was really absent.
    * `not-an-opening`: this request is not an approval, so a missing lease is not an opening.
    */
   availability: 'unknown' | 'read' | 'not-an-opening';
   retry: boolean;
   lease: Lease | null;
-  /** Copied from a loaded lease. Null when the list did not load or the lease is absent. */
+  /** Copied from a loaded lease that is not unconfirmed. Null otherwise. */
   execution: Execution | null;
   /** Plain words for the member. Null when this request is not an opening. */
   explanation: string | null;
@@ -50,6 +51,8 @@ export interface RefreshDecision extends RefreshNeed {
 export interface RefreshFollow {
   session: number;
   round: number;
+  /** Grows when an undecided request is seen, so an older final read cannot spend the new one. */
+  watch: number;
   saw: boolean;
   /** The trailing lease read completed with a loaded list. */
   spent: boolean;
@@ -62,6 +65,7 @@ export interface RefreshFollow {
 export interface RefreshRound {
   session: number;
   round: number;
+  watch: number;
   finalLeaseRefresh: boolean;
   confirmingIds: readonly string[];
   openingUnchecked: boolean;
@@ -103,13 +107,14 @@ export function openingEvidence(input: {
       explanation: null,
     };
   }
-  if (input.leaseList !== 'loaded') {
+  const unconfirmed = input.leaseList === 'loaded' && input.lease?.status === 'unconfirmed';
+  if (input.leaseList !== 'loaded' || unconfirmed) {
     return {
       availability: 'unknown',
       retry: true,
-      lease: null,
+      lease: unconfirmed ? input.lease : null,
       execution: null,
-      explanation: UNKNOWN_EXPLANATION,
+      explanation: unconfirmed ? 'Not confirmed yet.' : UNKNOWN_EXPLANATION,
     };
   }
   const execution = input.lease?.execution ?? null;
@@ -144,6 +149,7 @@ export function newFollow(): RefreshFollow {
   return {
     session: 1,
     round: 0,
+    watch: 0,
     saw: false,
     spent: false,
     finalFailed: false,
@@ -155,6 +161,7 @@ export function newFollow(): RefreshFollow {
 export function replaceSession(follow: RefreshFollow) {
   follow.session += 1;
   follow.round = 0;
+  follow.watch = 0;
   follow.saw = false;
   follow.spent = false;
   follow.finalFailed = false;
@@ -168,11 +175,11 @@ export function allowRetry(follow: RefreshFollow) {
 
 /** Records that a render still saw an undecided request, so one later lease read can be owed. */
 export function noteDecision(follow: RefreshFollow, decision: RefreshDecision) {
-  if (decision.undecided) {
-    follow.saw = true;
-    follow.spent = false;
-    follow.finalFailed = false;
-  }
+  if (!decision.undecided) return;
+  follow.saw = true;
+  follow.spent = false;
+  follow.finalFailed = false;
+  follow.watch += 1;
 }
 
 /**
@@ -184,6 +191,7 @@ export function startRefresh(follow: RefreshFollow, decision: RefreshDecision): 
   return {
     session: follow.session,
     round: follow.round,
+    watch: follow.watch,
     finalLeaseRefresh: decision.finalLeaseRefresh,
     confirmingIds: decision.confirmingIds.slice(),
     openingUnchecked: decision.openingUnchecked,
@@ -199,7 +207,13 @@ export function acknowledgeRefresh(
   round: RefreshRound,
   outcome: ListAvailability,
 ) {
-  if (round.session !== follow.session || round.round !== follow.round) return;
+  if (
+    round.session !== follow.session ||
+    round.round !== follow.round ||
+    round.watch !== follow.watch
+  ) {
+    return;
+  }
   const owed = round.finalLeaseRefresh || round.confirmingIds.length > 0 || round.openingUnchecked;
   if (!owed) return;
   if (outcome === 'loaded') {
@@ -270,7 +284,7 @@ export function refreshNeed(input: {
           .map((row) => row.id)
       : [];
   const finalLeaseRefresh =
-    input.sawUndecided && !undecided && listLoaded && !input.spentFinal && !input.finalFailed;
+    input.sawUndecided && !undecided && !input.spentFinal && !input.finalFailed;
   const open = input.openRequestId
     ? resolved.find((row) => row.id === input.openRequestId)?.result.request
     : undefined;

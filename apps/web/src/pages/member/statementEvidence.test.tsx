@@ -114,6 +114,7 @@ function deniesWithoutEvidence(explanation: string | null) {
   const text = explanation?.toLowerCase() ?? '';
   expect(text).not.toMatch(/simulated/);
   expect(text).not.toMatch(/not applied/);
+  expect(text).not.toMatch(/unchanged/);
   expect(text).not.toMatch(/waiting for a person/);
   expect(text).not.toMatch(/practice/);
 }
@@ -397,6 +398,156 @@ describe('lease evidence', () => {
     expect(state.spent).toBe(false);
     expect(state.finalFailed).toBe(false);
     expect([...state.checked]).toEqual([]);
+  });
+
+  it('treats a loaded unconfirmed lease as unknown, even when execution says not applied', () => {
+    const row = { ...lease('not_applied'), status: 'unconfirmed' as const, owned: false };
+    const opening = openingEvidence({
+      status: 'auto_approved',
+      lease: row,
+      leaseList: 'loaded',
+    });
+    expect(opening).toMatchObject({
+      availability: 'unknown',
+      retry: true,
+      lease: row,
+      execution: null,
+      explanation: 'Not confirmed yet.',
+    });
+    deniesWithoutEvidence(opening.explanation);
+
+    const stale = openingEvidence({
+      status: 'auto_approved',
+      lease: row,
+      leaseList: 'error',
+    });
+    expect(stale).toMatchObject({
+      availability: 'unknown',
+      retry: true,
+      lease: null,
+      execution: null,
+      explanation: 'Nyctr could not tell whether this site opened. You can try again.',
+    });
+    deniesWithoutEvidence(stale.explanation);
+
+    expect(
+      openingEvidence({
+        status: 'auto_approved',
+        lease: lease('not_applied'),
+        leaseList: 'loaded',
+      }),
+    ).toMatchObject({
+      availability: 'read',
+      retry: false,
+      execution: 'not_applied',
+      explanation: 'The network was left unchanged.',
+    });
+  });
+
+  it('does not let an in-flight lease read spend a watch a later request still owes', () => {
+    const state = follow();
+    const analysing = decide({
+      view: 'requests',
+      openRequestId: null,
+      requestsAvailability: 'loaded',
+      resolved: { 'r-a': held('analysing', 'listed', 'r-a') },
+      leases: { availability: 'loaded', rows: [] },
+    });
+    noteDecision(state, analysing);
+    const decided = decide({
+      view: 'requests',
+      openRequestId: null,
+      requestsAvailability: 'loaded',
+      resolved: { 'r-a': held('auto_approved', 'listed', 'r-a') },
+      leases: { availability: 'loaded', rows: [lease('applied', 'r-a')] },
+      saw: state.saw,
+      spent: state.spent,
+    });
+    expect(decided.finalLeaseRefresh).toBe(true);
+    const inflight = startRefresh(state, decided);
+    expect(inflight.finalLeaseRefresh).toBe(true);
+
+    const later = decide({
+      view: 'requests',
+      openRequestId: null,
+      requestsAvailability: 'loaded',
+      resolved: {
+        'r-a': held('auto_approved', 'listed', 'r-a'),
+        'r-b': held('analysing', 'listed', 'r-b'),
+      },
+      leases: { availability: 'loaded', rows: [lease('applied', 'r-a')] },
+      saw: state.saw,
+      spent: state.spent,
+    });
+    expect(later.undecided).toBe(true);
+    noteDecision(state, later);
+    expect(state.watch).toBeGreaterThan(inflight.watch);
+
+    acknowledgeRefresh(state, inflight, 'loaded');
+    expect(state.spent).toBe(false);
+    expect(state.finalFailed).toBe(false);
+
+    const bothDecided = decide({
+      view: 'requests',
+      openRequestId: null,
+      requestsAvailability: 'loaded',
+      resolved: {
+        'r-a': held('auto_approved', 'listed', 'r-a'),
+        'r-b': held('denied', 'listed', 'r-b'),
+      },
+      leases: { availability: 'loaded', rows: [lease('applied', 'r-a')] },
+      saw: state.saw,
+      spent: state.spent,
+      failed: state.finalFailed,
+    });
+    expect(bothDecided.undecided).toBe(false);
+    expect(bothDecided.finalLeaseRefresh).toBe(true);
+    expect(bothDecided.continue).toBe(true);
+    const trailing = startRefresh(state, bothDecided);
+    acknowledgeRefresh(state, inflight, 'error');
+    expect(state.spent).toBe(false);
+    expect(state.finalFailed).toBe(false);
+    acknowledgeRefresh(state, trailing, 'loaded');
+    expect(state.spent).toBe(true);
+    expect(
+      decide({
+        view: 'requests',
+        openRequestId: null,
+        requestsAvailability: 'loaded',
+        resolved: {
+          'r-a': held('auto_approved', 'listed', 'r-a'),
+          'r-b': held('denied', 'listed', 'r-b'),
+        },
+        leases: { availability: 'loaded', rows: [lease('applied', 'r-a')] },
+        saw: state.saw,
+        spent: state.spent,
+        checked: [...state.checked],
+      }).continue,
+    ).toBe(false);
+  });
+
+  it('still owes the trailing lease read when the request list fails after a listed decision', () => {
+    const approved = { 'r-ask': held('auto_approved', 'listed') };
+    for (const requestsAvailability of ['error', 'unloaded'] as const) {
+      for (const availability of ['loaded', 'unloaded'] as const) {
+        const owed = decide({
+          view: 'requests',
+          openRequestId: null,
+          requestsAvailability,
+          resolved: approved,
+          leases: {
+            availability,
+            rows: availability === 'loaded' ? [lease('applied')] : [],
+          },
+          saw: true,
+        });
+        expect(owed.undecided).toBe(false);
+        expect(owed.finalLeaseRefresh).toBe(true);
+        expect(owed.continue).toBe(true);
+        expect(owed.confirmingIds).toEqual([]);
+        expect(owed.openingUnchecked).toBe(false);
+      }
+    }
   });
 });
 
