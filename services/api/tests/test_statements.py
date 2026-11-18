@@ -1241,12 +1241,16 @@ def test_an_inactive_account_stops_a_statement_before_it_opens(tmp_path, databas
             assert statement_current(held, blank_row) is True
             held.add(User(id="gone", email="gone@example.net", name="Gone", role="member"))
             held.commit()
-            assert held.get(User, "gone").active is True
+            # This name has to stay live through the check. A clean instance is only held weakly.
+            gone = held.get(User, "gone")
+            assert gone is not None and gone.active is True
             with app.state.session_factory() as other:
                 other.delete(other.get(User, "gone"))
                 other.commit()
             missing = AccessRequest(
                 basis="statement", device_id="laptop-jamie", requester_id="gone", domain="zz-gone.example")
+            assert held.get(User, "gone") is gone
+            assert gone.active is True
             assert statement_current(held, missing) is False
             assert held.get(User, "gone") is None
         _finish(app)
