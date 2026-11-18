@@ -126,32 +126,51 @@ def _ensure_statement_indexes(connection) -> None:
             "(requester_id, device_id, block_id) WHERE device_id IS NOT NULL"))
 
 
+def _postgres_access_requests(connection):
+    """Oid and schema of the access_requests relation unqualified SQL would use.
+
+    regclass follows search_path. A same-named table in another schema is a different relation.
+    """
+    row = connection.execute(text(
+        "SELECT rel.oid AS oid, nsp.nspname AS schema_name "
+        "FROM pg_class rel "
+        "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+        "WHERE rel.oid = 'access_requests'::regclass")).one()
+    return int(row.oid), row.schema_name
+
+
 def _drop_plain_event_unique(connection) -> None:
     """Drop a unique constraint or index on member and block that does not mention the device.
 
     The partial indexes that replace it name the device and are left in place.
+    PostgreSQL scans and drops follow the one access_requests relation search_path names.
+    Another schema keeps its own constraint and any index of the same name.
     """
     if connection.dialect.name == "postgresql":
+        relation, schema_name = _postgres_access_requests(connection)
+        schema = _quote_ident(schema_name)
         constraints = connection.execute(text(
             "SELECT con.conname FROM pg_constraint con "
-            "JOIN pg_class rel ON rel.oid = con.conrelid "
-            "WHERE rel.relname = 'access_requests' AND con.contype = 'u' "
+            "WHERE con.conrelid = CAST(:relation AS oid) AND con.contype = 'u' "
             "AND pg_get_constraintdef(con.oid) ILIKE '%requester_id%' "
             "AND pg_get_constraintdef(con.oid) ILIKE '%block_id%' "
-            "AND pg_get_constraintdef(con.oid) NOT ILIKE '%device_id%'")).scalars()
+            "AND pg_get_constraintdef(con.oid) NOT ILIKE '%device_id%'"),
+            {"relation": relation}).scalars()
         for name in constraints:
-            connection.execute(text(f"ALTER TABLE access_requests DROP CONSTRAINT {_quote_ident(name)}"))
+            connection.execute(text(
+                f"ALTER TABLE {schema}.access_requests DROP CONSTRAINT {_quote_ident(name)}"))
         indexes = connection.execute(text(
             "SELECT indexrel.relname, pg_get_indexdef(indexrel.oid) "
             "FROM pg_index idx "
             "JOIN pg_class indexrel ON indexrel.oid = idx.indexrelid "
-            "JOIN pg_class tbl ON tbl.oid = idx.indrelid "
-            "WHERE tbl.relname = 'access_requests' AND idx.indisunique AND NOT idx.indisprimary")).all()
+            "WHERE idx.indrelid = CAST(:relation AS oid) "
+            "AND idx.indisunique AND NOT idx.indisprimary"),
+            {"relation": relation}).all()
         for name, definition in indexes:
             folded = " ".join(definition.lower().split())
             if ("requester_id" in folded and "block_id" in folded and "device_id" not in folded
                     and " where " not in folded):
-                connection.execute(text(f"DROP INDEX IF EXISTS {_quote_ident(name)}"))
+                connection.execute(text(f"DROP INDEX IF EXISTS {schema}.{_quote_ident(name)}"))
         return
     rows = connection.execute(text(
         "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'access_requests'")).all()
@@ -196,6 +215,30 @@ def _sqlite_rebuild_requests(connection) -> None:
     connection.execute(text("DROP TABLE access_requests_schema8"))
 
 
+def _ensure_statement_quotas(connection) -> None:
+    """Add the hourly quota table in the same schema as access_requests.
+
+    A same-named table earlier on search_path is not this one, and an unqualified create would
+    land in that schema. One already beside access_requests is left alone.
+    """
+    if connection.dialect.name != "postgresql":
+        if "statement_quotas" not in inspect(connection).get_table_names():
+            Base.metadata.create_all(connection, tables=[Base.metadata.tables["statement_quotas"]])
+        return
+    schema_name = _postgres_access_requests(connection)[1]
+    qualified = f"{_quote_ident(schema_name)}.statement_quotas"
+    present = connection.execute(text("SELECT to_regclass(:qualified)"), {"qualified": qualified}).scalar()
+    if present is not None:
+        return
+    previous = connection.execute(text("SELECT current_setting('search_path')")).scalar()
+    connection.execute(
+        text("SELECT set_config('search_path', :path, true)"), {"path": _quote_ident(schema_name)})
+    try:
+        Base.metadata.create_all(connection, tables=[Base.metadata.tables["statement_quotas"]])
+    finally:
+        connection.execute(text("SELECT set_config('search_path', :path, true)"), {"path": previous})
+
+
 def _replace_request_uniqueness(connection) -> None:
     """Keep one event request per member and block, and one statement per member, device and block."""
     if connection.dialect.name == "sqlite" and _sqlite_table_has_event_unique(connection):
@@ -213,8 +256,7 @@ def _upgrade_to_9(connection):
     """
     _add_request_column(connection, "basis")
     _add_request_column(connection, "device_id")
-    if "statement_quotas" not in inspect(connection).get_table_names():
-        Base.metadata.create_all(connection, tables=[Base.metadata.tables["statement_quotas"]])
+    _ensure_statement_quotas(connection)
     _replace_request_uniqueness(connection)
     connection.execute(SchemaVersion.__table__.insert().values(version=9))
 

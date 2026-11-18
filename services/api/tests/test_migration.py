@@ -428,3 +428,147 @@ def test_a_schema_eight_database_gains_the_statement_quota_and_keeps_every_row(t
         stored = list(db.scalars(select(AccessRequest).where(AccessRequest.block_id == "block-said")))
         assert sorted(row.device_id for row in stored) == ["laptop-jamie", "phone-jamie"]
     engine.dispose()
+
+
+def _engine_on_path(url, search_path):
+    """Connections use this search_path, so unqualified names resolve the way startup does."""
+    engine = make_engine(url)
+
+    @event.listens_for(engine, "connect")
+    def set_search_path(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET search_path TO {search_path}")
+        cursor.close()
+
+    return engine
+
+
+def _side_catalog(connection):
+    """Relations, constraints and rows in the schemas the upgrade must not touch."""
+    relations = connection.execute(text(
+        "SELECT n.nspname, c.relkind, c.relname, "
+        "CASE WHEN c.relkind = 'i' THEN pg_get_indexdef(c.oid) END "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname IN ('ahead', 'other') AND c.relkind IN ('r', 'i') "
+        "ORDER BY 1, 2, 3")).all()
+    constraints = connection.execute(text(
+        "SELECT n.nspname, rel.relname, con.conname, pg_get_constraintdef(con.oid) "
+        "FROM pg_constraint con "
+        "JOIN pg_class rel ON rel.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = rel.relnamespace "
+        "WHERE n.nspname IN ('ahead', 'other') "
+        "ORDER BY 1, 2, 3")).all()
+    rows = {
+        "ahead.statement_quotas": connection.execute(text(
+            "SELECT * FROM ahead.statement_quotas ORDER BY 1")).all(),
+        "ahead.decoy": connection.execute(text("SELECT * FROM ahead.decoy ORDER BY 1")).all(),
+        "other.access_requests": connection.execute(text(
+            "SELECT * FROM other.access_requests ORDER BY 1")).all(),
+    }
+    return relations, constraints, rows
+
+
+@pytest.mark.postgres
+def test_a_schema_eight_upgrade_leaves_another_schemas_same_names_in_place(request):
+    """Schema 8 in one schema is upgraded while another schema has the same table and names.
+
+    search_path names an earlier schema first. That schema holds an index of the same name and
+    its own quota table. A third schema holds access_requests with the old member and block
+    uniqueness. The upgrade changes only the relation search_path resolves, records schema 9
+    once, and a second start changes nothing.
+    """
+    place = postgres_database(request)
+    if not place:
+        pytest.skip(f"No PostgreSQL server is named in {POSTGRES}")
+    url = place["database_url"]
+    bootstrap = make_engine(url)
+    with bootstrap.begin() as connection:
+        connection.execute(text("CREATE SCHEMA app"))
+        connection.execute(text("CREATE SCHEMA ahead"))
+        connection.execute(text("CREATE SCHEMA other"))
+    bootstrap.dispose()
+
+    setup = _engine_on_path(url, "app")
+    with setup.begin() as connection:
+        Base.metadata.create_all(connection)
+        connection.execute(SchemaVersion.__table__.insert(), [{"version": number} for number in range(1, 9)])
+    with session_factory(setup)() as db:
+        seed_demo(db)
+        db.commit()
+    with setup.begin() as connection:
+        connection.execute(text("DROP TABLE statement_quotas"))
+        _drop_device_indexes(connection)
+        connection.execute(text("ALTER TABLE access_requests DROP COLUMN basis"))
+        connection.execute(text("ALTER TABLE access_requests DROP COLUMN device_id"))
+        _restore_schema_eight_uniqueness(connection)
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uq_plain_member_block ON access_requests (requester_id, block_id)"))
+        connection.execute(text(
+            "CREATE TABLE other.access_requests ("
+            "id text PRIMARY KEY, requester_id text NOT NULL, block_id text NOT NULL)"))
+        connection.execute(text(
+            "INSERT INTO other.access_requests VALUES ('other-row', 'member-other', 'block-other')"))
+        connection.execute(text(
+            "ALTER TABLE other.access_requests "
+            "ADD CONSTRAINT uq_other_event UNIQUE (requester_id, block_id)"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uq_other_plain ON other.access_requests (requester_id, block_id)"))
+        connection.execute(text(
+            "CREATE TABLE ahead.decoy (id text PRIMARY KEY, requester_id text, block_id text)"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uq_plain_member_block ON ahead.decoy (requester_id, block_id)"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uq_access_requests_requester_block "
+            "ON ahead.decoy (requester_id, block_id)"))
+        connection.execute(text(
+            "CREATE TABLE ahead.statement_quotas ("
+            "user_id text PRIMARY KEY, count integer NOT NULL, reset_at timestamptz)"))
+        connection.execute(text(
+            "INSERT INTO ahead.statement_quotas VALUES ('member-ahead', 4, '2026-01-01 00:00:00+00')"))
+        before_requests = connection.execute(text(
+            "SELECT * FROM access_requests ORDER BY id")).all()
+        before_side = _side_catalog(connection)
+    setup.dispose()
+    assert before_requests
+
+    migrator = _engine_on_path(url, "ahead, app")
+    migrate(migrator)
+    migrate(migrator)
+    with migrator.connect() as connection:
+        after_requests = connection.execute(text(
+            "SELECT * FROM app.access_requests ORDER BY id")).all()
+        width = len(before_requests[0])
+        assert [row[:width] for row in after_requests] == list(before_requests)
+        assert all(row[width:] == (None, None) for row in after_requests)
+        assert connection.execute(text("SELECT count(*) FROM app.statement_quotas")).scalar() == 0
+        columns = [column["name"] for column in inspect(connection).get_columns(
+            "statement_quotas", schema="app")]
+        assert columns == ["user_id", "count", "reset_at"]
+        indexes = set(connection.execute(text(
+            "SELECT indexrel.relname FROM pg_index idx "
+            "JOIN pg_class indexrel ON indexrel.oid = idx.indexrelid "
+            "JOIN pg_class tbl ON tbl.oid = idx.indrelid "
+            "JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace "
+            "WHERE nsp.nspname = 'app' AND tbl.relname = 'access_requests'")).scalars())
+        assert {"uq_access_request_event", "uq_access_request_device_block",
+                "ix_access_requests_device_id"} <= indexes
+        assert "uq_plain_member_block" not in indexes
+        assert "uq_access_requests_requester_block" not in indexes
+        uniques = set(connection.execute(text(
+            "SELECT con.conname FROM pg_constraint con "
+            "JOIN pg_class rel ON rel.oid = con.conrelid "
+            "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+            "WHERE nsp.nspname = 'app' AND rel.relname = 'access_requests' AND con.contype = 'u'")).scalars())
+        assert "uq_access_requests_requester_block" not in uniques
+        assert connection.execute(text(
+            "SELECT version FROM app.schema_versions ORDER BY version")).scalars().all() == list(range(1, 10))
+        public = connection.execute(text(
+            "SELECT to_regclass('public.access_requests'), to_regclass('public.statement_quotas')")).one()
+        assert public == (None, None)
+        assert _side_catalog(connection) == before_side
+        assert connection.execute(text(
+            "SELECT id, requester_id, block_id FROM other.access_requests")).one() == (
+                "other-row", "member-other", "block-other")
+        assert connection.execute(text(
+            "SELECT user_id, count FROM ahead.statement_quotas")).one() == ("member-ahead", 4)
+    migrator.dispose()
