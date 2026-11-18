@@ -1,11 +1,91 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useApi } from './api';
+import { api, ApiError, setCsrfToken, useApi } from './api';
 
 afterEach(() => {
   cleanup();
+  setCsrfToken('');
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('session-owned failures', () => {
+  it.each(['new-token', 'same-token'])(
+    'keeps a later session after an older 401 with %s',
+    async (next) => {
+      let release: (response: Response) => void = () => {};
+      const held = new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+      const fetchMock = vi.fn<typeof fetch>().mockReturnValueOnce(held);
+      vi.stubGlobal('fetch', fetchMock);
+      const events = vi.spyOn(window, 'dispatchEvent');
+      setCsrfToken('same-token');
+      const old = api('/statements', {
+        method: 'POST',
+        body: JSON.stringify({ domain: 'ads.example' }),
+      }).catch((error: unknown) => error);
+      setCsrfToken(next);
+      release(
+        new Response(JSON.stringify({ detail: 'Injected old session expired' }), { status: 401 }),
+      );
+      const failure = await old;
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure).toMatchObject({ status: 401, message: 'Injected old session expired' });
+      expect(events).not.toHaveBeenCalled();
+      expect(fetchMock.mock.calls[0][1]?.credentials).toBe('same-origin');
+      expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe(
+        'same-token',
+      );
+      fetchMock.mockResolvedValueOnce(new Response('{}'));
+      await api('/statements', { method: 'POST', body: '{}' });
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('X-CSRF-Token')).toBe(next);
+    },
+  );
+
+  it('still expires the current session on its own 401 and preserves its refusal', async () => {
+    const events = vi.spyOn(window, 'dispatchEvent');
+    setCsrfToken('current-token');
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ detail: 'Current session expired' }), { status: 401 }),
+        ),
+    );
+    await expect(api('/statements', { method: 'POST', body: '{}' })).rejects.toMatchObject({
+      status: 401,
+      message: 'Current session expired',
+    });
+    expect(events).toHaveBeenCalledTimes(1);
+    expect(events.mock.calls[0][0].type).toBe('nyctr:session-expired');
+  });
+
+  it.each([
+    ['/auth/login', 401],
+    ['/statements', 403],
+  ] as const)(
+    'keeps %s HTTP %s with its caller and does not expire a session',
+    async (path, status) => {
+      const events = vi.spyOn(window, 'dispatchEvent');
+      setCsrfToken('current-token');
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(
+            new Response(JSON.stringify({ detail: 'Injected refusal' }), { status }),
+          ),
+      );
+      await expect(api(path, { method: 'POST', body: '{}' })).rejects.toMatchObject({
+        status,
+        message: 'Injected refusal',
+      });
+      expect(events).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('useApi', () => {

@@ -342,14 +342,16 @@ describe('forgetting and leaving the page', () => {
     const newer = new Promise(() => {});
     const calls = statements([older.promise, newer]);
     const reloads = vi.fn(async () => {});
-    render(<Host {...props({ reloadEvidence: reloads })} />);
+    const view = render(<Host {...props({ reloadEvidence: reloads })} />);
     begin('old.example');
     send();
     const olderFlight = use().ask?.flight;
     act(() => {
       use().acceptForget('laptop');
     });
-    send('new.example');
+    view.rerender(<Host {...props({ deviceId: 'tablet', reloadEvidence: reloads })} />);
+    begin('new.example');
+    send();
     expect(calls.map((call) => call.body)).toEqual([
       { domain: 'old.example' },
       { domain: 'new.example' },
@@ -387,6 +389,48 @@ describe('forgetting and leaving the page', () => {
 });
 
 describe('remembered requests', () => {
+  it('closes eligibility synchronously at Forget and does not send another filing from that device', () => {
+    const calls = statements([new Promise(() => {})]);
+    render(<Host {...props()} />);
+    begin('old.example');
+    send();
+    act(() => {
+      use().acceptForget('laptop');
+      send('new.example');
+    });
+    expect(use().canFile).toBe(false);
+    expect(calls.map((call) => call.body)).toEqual([{ domain: 'old.example' }]);
+  });
+
+  it('lists retained owned filings, prefers committed decisions, and never lists retired or foreign rows', async () => {
+    statements([Promise.resolve(filed())]);
+    const view = render(<Host {...props()} />);
+    begin('ads.example');
+    send();
+    await waitFor(() => expect(use().rows.map((row) => row.id)).toEqual(['r-ask']));
+    const denied = request({ status: 'denied' });
+    view.rerender(<Host {...props({ requests: { availability: 'loaded', rows: [denied] } })} />);
+    expect(use().rows).toEqual([denied]);
+    view.rerender(
+      <Host
+        {...props({
+          requests: {
+            availability: 'error',
+            rows: [request({ requester_id: 'other', domain: 'private.example' })],
+          },
+        })}
+      />,
+    );
+    expect(use().rows).toEqual([denied]);
+    view.rerender(<Host {...props({ requests: { availability: 'loaded', rows: [] } })} />);
+    expect(use().rows).toEqual([]);
+    view.rerender(
+      <Host
+        {...props({ userId: 'riley', requests: { availability: 'loaded', rows: [denied] } })}
+      />,
+    );
+    expect(use().rows).toEqual([]);
+  });
   it('keeps the earlier request when a later one finishes and the list lacks it', async () => {
     const first = gate<unknown>();
     const second = gate<unknown>();

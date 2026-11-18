@@ -271,6 +271,64 @@ describe('access rule in Setup', () => {
     expect(named.getAttribute('aria-checked')).toBe('false');
   });
 
+  it('keeps the same save queue after a failed read-back while a later PUT is held', async () => {
+    let current: Rules = { ...rules, access: { ...rules.access, allow_statement: true } };
+    let failRead = false;
+    let writes = 0;
+    let releaseFirst: () => void = () => {};
+    let releaseSecond: () => void = () => {};
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const second = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const calls = mockApi({
+      'GET /rules': () =>
+        failRead ? { __status: 503, detail: 'Injected rule read-back failure' } : current,
+      'GET /users': [],
+      'GET /devices': [],
+      'GET /device-links': [],
+      'GET /presence': { items: [] },
+      'PUT /rules/access': async (body: unknown) => {
+        writes += 1;
+        if (writes === 1) await first;
+        if (writes === 2) await second;
+        current = { ...current, access: body as Rules['access'] };
+        return body;
+      },
+    });
+    render(<Setup params={new URLSearchParams('tab=rule')} />);
+    const user = userEvent.setup();
+    const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    await user.click(named);
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day' }));
+    failRead = true;
+    releaseFirst();
+    await screen.findByText(/could not read the settings again/);
+    await waitFor(() => expect(writes).toBe(2));
+    expect(screen.queryByText('Unable to load this view')).toBeNull();
+    expect(screen.getByRole('switch', { name: 'Open a site a member named' })).toBe(named);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'People and devices' }));
+    failRead = false;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await user.click(screen.getByRole('button', { name: 'Access rule' }));
+    expect(screen.getByRole('switch', { name: 'Open a site a member named' })).toBe(named);
+    await user.click(screen.getByRole('button', { name: 'Lower openings per day for everyone' }));
+    expect(writes).toBe(2);
+    releaseSecond();
+    await waitFor(() => expect(writes).toBe(3));
+    await waitFor(() => expect(current.access.daily_total).toBe(9));
+    expect(calls.filter((call) => call.method === 'PUT').map((call) => call.body)).toEqual([
+      { ...rules.access, allow_statement: false },
+      { ...rules.access, allow_statement: false, per_day: 3 },
+      { ...rules.access, allow_statement: false, per_day: 3, daily_total: 9 },
+    ]);
+    expect(current.access.allow_statement).toBe(false);
+    expect(named.getAttribute('aria-checked')).toBe('false');
+  });
+
   it('saves record only for advertising lists and says that nothing is opened', async () => {
     const { saved, user } = openRule();
     const ads = await tier('Advertising and tracker lists');

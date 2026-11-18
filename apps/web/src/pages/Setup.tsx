@@ -849,7 +849,7 @@ export default function Setup({ params }: { params: URLSearchParams }) {
   const [tab, setTab] = useState<Tab>((params.get('tab') as Tab) || 'rule');
   const [openedRule, setOpenedRule] = useState(tab === 'rule');
   if (rules.loading && !rules.data) return <Loading text="Loading setup…" />;
-  if (rules.error || !rules.data)
+  if (!rules.data)
     return (
       <ErrorState message={rules.error || 'Setup could not be loaded.'} retry={rules.reload} />
     );
@@ -874,6 +874,14 @@ export default function Setup({ params }: { params: URLSearchParams }) {
           ]}
         />
       </header>
+      {rules.error && (
+        <p className="aside" role="alert">
+          Nyctr could not read the settings again, so the last settings stay on this page.{' '}
+          <button type="button" className="linklike" onClick={rules.reload}>
+            Try again
+          </button>
+        </p>
+      )}
       {/* Keep this owner and its serialized saves alive while another tab is shown. */}
       {openedRule && (
         <div hidden={tab !== 'rule'}>

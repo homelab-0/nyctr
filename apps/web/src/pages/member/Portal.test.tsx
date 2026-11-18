@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import {
   createContext,
   startTransition,
+  StrictMode,
   Suspense,
   useContext,
   useLayoutEffect,
@@ -1880,6 +1881,196 @@ describe('a site the member names', () => {
     expect(screen.queryByLabelText('Site that did not open')).toBeNull();
   });
 
+  it.each(['loading', 'error'] as const)(
+    'keeps the recognised-device form available during injected block-history %s',
+    async (outcome) => {
+      let release: (body: unknown) => void = () => {};
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      const { calls } = open({
+        ...quiet,
+        'GET /blocks': () =>
+          outcome === 'loading'
+            ? held
+            : { __status: 503, detail: 'Injected block history failure' },
+        'POST /statements': answer,
+      });
+      const input = await screen.findByLabelText('Site that did not open');
+      expect(input).toBeDefined();
+      expect(document.body.textContent).not.toContain('Nothing has been blocked');
+      if (outcome === 'error')
+        expect(await screen.findByText('Injected block history failure')).toBeDefined();
+      await ask('ads.example');
+      expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+      expect(calls.filter((call) => call.path === '/statements').map((call) => call.body)).toEqual([
+        { domain: 'ads.example' },
+      ]);
+      await act(async () => release(blockList([])));
+    },
+  );
+
+  it.each(['empty', 'error'] as const)(
+    'shows a never-listed filing in My requests through an injected %s list, then prefers its real listed decision',
+    async (outcome) => {
+      clock();
+      let posted = false;
+      let listed = false;
+      const { calls } = open({
+        ...quiet,
+        'POST /statements': () => {
+          posted = true;
+          return answer;
+        },
+        'GET /requests': () =>
+          listed
+            ? [{ ...filed, status: 'denied' }]
+            : posted && outcome === 'error'
+              ? { __status: 503, detail: 'Injected unavailable requests' }
+              : [],
+      });
+      await paint();
+      const input = screen.getByLabelText('Site that did not open');
+      fireEvent.change(input, { target: { value: 'ads.example' } });
+      fireEvent.submit(input.closest('form')!);
+      await paint();
+      fireEvent.click(screen.getByRole('link', { name: 'My requests' }));
+      await paint();
+      expect(screen.getByRole('link', { name: /ads.example/ }).textContent).toContain('Checking');
+      expect(screen.queryByText('You have not asked for anything yet')).toBeNull();
+      listed = true;
+      await advance(5_000);
+      expect(screen.getAllByRole('link', { name: /ads.example/ })).toHaveLength(1);
+      expect(screen.getByRole('link', { name: /ads.example/ }).textContent).toContain(
+        'Not approved',
+      );
+      await advance(5_000);
+      const done = reads(calls, '/leases');
+      await advance(30_000);
+      expect(reads(calls, '/leases')).toBe(done);
+    },
+  );
+
+  it('offers a real coordinated retry after a request-only confirmation failure', async () => {
+    clock();
+    let n = 0;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () =>
+          ++n === 2 ? { __status: 503, detail: 'Injected request-only failure' } : [request({})],
+        'GET /leases': () => (n > 1 ? [lease()] : []),
+      },
+      '/requests',
+    );
+    await paint();
+    await advance(5_000);
+    expect(screen.getByRole('link', { name: /photos.example/ })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+    await advance(30_000);
+    expect(reads(calls, '/requests')).toBe(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await paint();
+    expect(reads(calls, '/requests')).toBe(3);
+    expect(reads(calls, '/leases')).toBe(3);
+    expect(document.body.textContent).not.toContain('The latest check failed');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
+  it('keeps a settled reviewed detail and retries its genuinely final failed lease read', async () => {
+    clock();
+    let decided = false;
+    let recovered = false;
+    let leaseReads = 0;
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => [
+          request(
+            decided
+              ? { status: 'reviewed', decided_by: 'admin', review_note: 'No change needed.' }
+              : pending,
+          ),
+        ],
+        'GET /leases': () =>
+          ++leaseReads === 3 && !recovered
+            ? { __status: 503, detail: 'Injected final reviewed lease failure' }
+            : [],
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    decided = true;
+    await advance(5_000);
+    const heading = screen.getByRole('heading', { name: 'Looked at, nothing changed.' });
+    await advance(5_000);
+    expect(leaseReads).toBe(3);
+    expect(screen.getByRole('heading', { name: 'Looked at, nothing changed.' })).toBe(heading);
+    expect(document.body.textContent).toContain('The latest check failed.');
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+    await advance(30_000);
+    expect(leaseReads).toBe(3);
+    recovered = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await paint();
+    expect(leaseReads).toBe(4);
+    expect(reads(calls, '/requests')).toBe(4);
+    expect(screen.getByRole('heading', { name: 'Looked at, nothing changed.' })).toBe(heading);
+    expect(document.body.textContent).not.toContain('The latest check failed');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    await advance(30_000);
+    expect(leaseReads).toBe(4);
+  });
+
+  it.each(['loaded', 'error'] as const)(
+    'gives an already-approved B its own check after A’s %s lease result and slower request GET',
+    async (outcome) => {
+      clock();
+      let requestReads = 0;
+      let leaseReads = 0;
+      let release: (rows: AccessRequest[]) => void = () => {};
+      const held = new Promise<AccessRequest[]>((resolve) => {
+        release = resolve;
+      });
+      const a = request({});
+      const b = request({ id: 'r-b', domain: 'b.example' });
+      const { calls } = open(
+        {
+          ...quiet,
+          'GET /requests': () =>
+            ++requestReads === 2 ? held : [a, ...(requestReads > 2 ? [b] : [])],
+          'GET /leases': () => {
+            leaseReads += 1;
+            if (leaseReads === 1 || (leaseReads === 2 && outcome === 'loaded')) return [];
+            if (leaseReads === 2)
+              return { __status: 503, detail: 'Injected failed A confirmation' };
+            return [lease({ id: 'l-b', request_id: 'r-b', domain: 'b.example' })];
+          },
+        },
+        '/requests',
+      );
+      await paint();
+      await advance(5_000);
+      expect(leaseReads).toBe(2);
+      await act(async () => release([a, b]));
+      await paint();
+      expect(screen.getByRole('link', { name: /b.example/ })).toBeDefined();
+      await advance(5_000);
+      expect(leaseReads).toBe(3);
+      expect(screen.getByRole('link', { name: /b.example/ }).textContent).toContain('min left');
+      expect(screen.getByRole('link', { name: /photos.example/ }).textContent).not.toContain(
+        'min left',
+      );
+      await advance(60_000);
+      expect(leaseReads).toBe(3);
+      if (outcome === 'error') {
+        fireEvent.click(screen.getByRole('button', { name: 'Check the openings again' }));
+        await paint();
+        expect(reads(calls, '/leases')).toBe(4);
+      }
+    },
+  );
+
   it('keeps a blank name on the page and shows the refusal the server sent', async () => {
     const { calls } = open({ ...quiet });
     const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
@@ -2095,7 +2286,7 @@ describe('a site the member names', () => {
       reason: 'forgotten',
       message: 'Nyctr was asked to forget this device. Sign in again to have it recognised.',
     };
-    open({
+    const { calls } = open({
       'GET /me/device': () => {
         if (tied)
           return { device_id: 'laptop', name: "Sam's laptop", simulated: false, how: 'signed_in' };
@@ -2111,13 +2302,17 @@ describe('a site the member names', () => {
       },
       'POST /statements': () => gate,
     });
-    await ask('ads.example');
+    const oldInput = await ask('ads.example');
     expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
     const hash = window.location.hash;
     await act(async () => {
       screen.getByRole('button', { name: 'Forget this device' }).click();
     });
     await deviceReadStarted;
+    expect(oldInput.isConnected).toBe(false);
+    expect(screen.queryByLabelText('Site that did not open')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Ask about this site' })).toBeNull();
+    expect(calls.filter((call) => call.path === '/statements')).toHaveLength(1);
     await act(async () => {
       release();
     });
@@ -2383,18 +2578,23 @@ describe('a site the member names', () => {
     });
     let posts = 0;
     let rows: AccessRequest[] = [];
+    let holdRead = false;
+    let releaseRead: (rows: AccessRequest[]) => void = () => {};
+    const delayedRead = new Promise<AccessRequest[]>((resolve) => {
+      releaseRead = resolve;
+    });
     const a = { ...filed, id: 'r-a', domain: 'a.example' };
     const b = { ...filed, id: 'r-b', domain: 'b.example' };
     const { user } = open({
       ...quiet,
-      'GET /requests': () => rows,
+      'GET /requests': () => (holdRead ? delayedRead : rows),
       'POST /statements': () => {
         posts += 1;
         if (posts === 1) return old.then(() => ({ ...answer, request: a }));
         if (posts === 2) return { ...answer, request: b };
         // The server normalizes the typed name to an existing request id. Its
         // returned analysing body must not replace an already listed decision.
-        rows = [{ ...a, status: 'denied', review_note: 'Please keep this closed.' }];
+        holdRead = true;
         return { ...answer, request: a };
       },
     });
@@ -2409,11 +2609,19 @@ describe('a site the member names', () => {
       window.location.hash = '/portal?request=r-a';
     });
     expect(await screen.findByText('What Nyctr found when it checked a.example')).toBeDefined();
+    rows = [{ ...a, status: 'denied', review_note: 'Please keep this closed.' }];
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('heading', { name: 'Not this time.' })).toBeDefined();
+    expect(document.body.textContent).toContain('Please keep this closed.');
     await user.click(screen.getAllByRole('link', { name: 'Blocked sites' })[0]);
     await ask('HTTPS://A.Example/path');
     expect(await screen.findByRole('heading', { name: 'Not this time.' })).toBeDefined();
     expect(document.body.textContent).toContain('Please keep this closed.');
     expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    // The analysing POST has returned, but the paired request GET is still held.
+    expect(holdRead).toBe(true);
+    await act(async () => releaseRead(rows));
+    expect(screen.getByRole('heading', { name: 'Not this time.' })).toBeDefined();
   });
 
   it('does not resurrect a listed request retired by a foreign row when an older POST finally succeeds', async () => {
@@ -2725,7 +2933,7 @@ describe('a site the member names', () => {
       'POST /statements': () => gate,
       'GET /requests': [],
     });
-    await ask('ads.example');
+    const input = await ask('ads.example');
     expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
     const before = reads(calls, '/me/device');
     await act(async () => {
@@ -2733,6 +2941,8 @@ describe('a site the member names', () => {
     });
     expect(await screen.findByText('This tie has already ended.')).toBeDefined();
     expect(reads(calls, '/me/device')).toBe(before);
+    expect(screen.getByLabelText('Site that did not open')).toBe(input);
+    expect(input.disabled).toBe(false);
     await act(async () => {
       release();
     });
@@ -2839,6 +3049,189 @@ describe('a site the member names', () => {
     expect(screen.queryByText(/filed your request/)).toBeNull();
     expect((screen.getByLabelText('Site that did not open') as HTMLInputElement).value).toBe('');
   });
+
+  it('keeps Riley signed in after Sam’s held HTTP401, then expires Riley on Riley’s own HTTP401', async () => {
+    const old = holdPost();
+    const riley = { ...member, id: 'riley', name: 'Riley', email: 'riley@example.test' };
+    let posts = 0;
+    const { user, calls } = open({
+      ...quiet,
+      'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
+      'POST /auth/logout': { ok: true },
+      'POST /auth/login': riley,
+      'POST /statements': () =>
+        ++posts === 1
+          ? old.gate.then(() => ({ __status: 401, detail: 'Injected old Sam session expired' }))
+          : { __status: 401, detail: 'Injected current Riley session expired' },
+    });
+    await ask('ads.example');
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    await screen.findByRole('heading', { name: 'Sign in' });
+    fireEvent.change(screen.getByLabelText('Email address'), { target: { value: riley.email } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'fabricated' } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!);
+    await screen.findByText('Riley');
+    await act(async () => old.release());
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).toBeNull();
+    expect(screen.getByText('Riley')).toBeDefined();
+    expect(screen.queryByText(/old Sam/)).toBeNull();
+    await ask('current.example');
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+    expect(await screen.findByText('Your session expired. Sign in to continue.')).toBeDefined();
+    expect(calls.filter((call) => call.path === '/statements').map((call) => call.body)).toEqual([
+      { domain: 'ads.example' },
+      { domain: 'current.example' },
+    ]);
+  });
+
+  it.each([false, true])(
+    'fences the old POST inside the new keyed member layout commit, StrictMode %s',
+    async (strict) => {
+      const old = holdPost();
+      const riley = { ...member, id: 'riley', name: 'Riley' };
+      const session = {
+        user: member,
+        loading: false,
+        error: null,
+        login: async () => {},
+        logout: async () => {},
+        refresh: () => {},
+      };
+      const Identity = createContext(session);
+      vi.spyOn(auth, 'useAuth').mockImplementation(() => useContext(Identity));
+      let changeMember: (who: User) => void = () => {};
+      let commit: () => void = () => {};
+      const committed = new Promise<void>((resolve) => {
+        commit = resolve;
+      });
+      let posts = 0;
+      const calls = mockApi({
+        ...quiet,
+        'GET /me/device': {
+          device_id: 'laptop',
+          name: 'Laptop',
+          how: 'assigned',
+          simulated: false,
+        },
+        'GET /blocks': blockList([]),
+        'GET /blocks/coverage': { collected: 'yes', unassigned: false },
+        'GET /devices': [{ id: 'laptop', name: 'Laptop' }],
+        'GET /requests': [],
+        'GET /leases': [],
+        'POST /statements': () =>
+          ++posts === 1
+            ? old.gate
+            : {
+                ...answer,
+                request: {
+                  ...filed,
+                  id: 'r-riley',
+                  requester_id: 'riley',
+                  domain: 'current.example',
+                },
+              },
+      });
+      function Session() {
+        const [who, update] = useState(member);
+        useLayoutEffect(() => {
+          changeMember = update;
+          if (who.id === 'riley') {
+            old.release();
+            commit();
+          }
+        }, [who]);
+        return (
+          <Identity.Provider value={{ ...session, user: who }}>
+            <Portal page="portal" params={new URLSearchParams()} />
+          </Identity.Provider>
+        );
+      }
+      window.location.hash = '/portal';
+      setCsrfToken('csrf');
+      render(
+        strict ? (
+          <StrictMode>
+            <Session />
+          </StrictMode>
+        ) : (
+          <Session />
+        ),
+      );
+      const previous = await ask('ads.example');
+      await screen.findByRole('button', { name: 'Asking…' });
+      // Let React commit naturally. act() around the update would eagerly flush
+      // passive cleanup and hide the layout-to-passive window under test.
+      startTransition(() => changeMember(riley));
+      await committed;
+      for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+      expect(screen.getByText('Riley')).toBeDefined();
+      expect(window.location.hash).toBe('#/portal');
+      expect(screen.queryByText(/filed your request/)).toBeNull();
+      expect(reads(calls, '/requests')).toBe(reads(calls, '/me/device'));
+      const current = await ask('current.example');
+      expect(current).not.toBe(previous);
+      await waitFor(() => expect(window.location.hash).toBe('#/portal?request=r-riley'));
+      expect(calls.filter((call) => call.path === '/statements')).toHaveLength(2);
+    },
+  );
+
+  it.each([false, true])(
+    'fences the old POST in the real session-expiry unmount commit, StrictMode %s',
+    async (strict) => {
+      const old = holdPost();
+      let armed = false;
+      let commit: () => void = () => {};
+      const committed = new Promise<void>((resolve) => {
+        commit = resolve;
+      });
+      const calls = mockApi({
+        ...quiet,
+        'GET /auth/me': member,
+        'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
+        'GET /me/device': {
+          device_id: 'laptop',
+          name: 'Laptop',
+          how: 'assigned',
+          simulated: false,
+        },
+        'GET /blocks': blockList([]),
+        'GET /blocks/coverage': { collected: 'yes', unassigned: false },
+        'GET /devices': [{ id: 'laptop', name: 'Laptop' }],
+        'GET /requests': [],
+        'GET /leases': [],
+        'POST /statements': () => old.gate,
+      });
+      function Observe() {
+        const { user } = auth.useAuth();
+        useLayoutEffect(() => {
+          if (armed && !user) {
+            old.release();
+            commit();
+          }
+        }, [user]);
+        return null;
+      }
+      window.location.hash = '/portal';
+      const app = (
+        <AuthProvider>
+          <App />
+          <Observe />
+        </AuthProvider>
+      );
+      render(strict ? <StrictMode>{app}</StrictMode> : app);
+      await ask('ads.example');
+      await screen.findByRole('button', { name: 'Asking…' });
+      const before = reads(calls, '/requests');
+      armed = true;
+      window.dispatchEvent(new Event('nyctr:session-expired'));
+      await committed;
+      for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+      expect(screen.getByRole('heading', { name: 'Sign in' })).toBeDefined();
+      expect(window.location.hash).toBe('#/portal');
+      expect(screen.queryByText(/filed your request/)).toBeNull();
+      expect(reads(calls, '/requests')).toBe(before);
+    },
+  );
 
   it('keeps the committed member and draft when another member render suspends and is discarded', async () => {
     const later = holdPost();

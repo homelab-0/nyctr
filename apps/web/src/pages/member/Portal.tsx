@@ -397,11 +397,10 @@ function Home({
     [data.leases.data],
   );
   // What an empty list means depends on these, so "nothing was blocked" is never shown before them.
-  if (data.blocks.loading || data.devices.loading || data.coverage.loading)
-    return <Loading text="Looking for blocked sites…" />;
-  if (data.blocks.error)
-    return <ErrorState message={data.blocks.error} retry={data.blocks.reload} />;
-  const blocks = latestPerDomain(data.blocks.data || []);
+  const historyLoading = data.blocks.loading || data.devices.loading || data.coverage.loading;
+  const historyReady = !historyLoading && !data.blocks.error;
+  const headerReady = !data.device.loading && !data.devices.loading && !data.coverage.loading;
+  const blocks = historyReady ? latestPerDomain(data.blocks.data || []) : [];
   const mine = blocks.filter((block) => here?.device_id && block.device_id === here.device_id);
   const others = blocks.filter((block) => !here?.device_id || block.device_id !== here.device_id);
   /** Looks a typed address up among blocks this person is already allowed to see. */
@@ -426,63 +425,66 @@ function Home({
     <div className="m-col">
       <header className="stack tight">
         <h1 className="display d1">What got blocked?</h1>
-        {gap && noDevices ? (
-          <p className="lede">
-            <b>{gap.title}.</b> {gap.text} {here?.message}
-          </p>
-        ) : here?.name ? (
-          <p className="lede">
-            <Laptop size={15} style={{ verticalAlign: '-2px' }} /> You're on <b>{here.name}</b>
-            {here.simulated
-              ? ' (demo: pretending this browser is that device).'
-              : here.how === 'signed_in'
-                ? ', recognised because you signed in on it. '
-                : here.how === 'assigned'
-                  ? ', a device assigned to you. '
-                  : '.'}
-            {here.device_id && (
-              <Forget
-                data={data}
-                device={here.device_id}
-                name="this device"
-                onAccepted={onForgotten}
-              />
-            )}
-          </p>
-        ) : (
-          <p className="lede">
-            {/* One sentence when lookups tied to no device are also missing, so two notes never stack. */}
-            {cover?.unassigned && !gap
-              ? `${unrecognised}, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
-              : `${unrecognised}.`}
-          </p>
-        )}
+        {headerReady &&
+          (gap && noDevices ? (
+            <p className="lede">
+              <b>{gap.title}.</b> {gap.text} {here?.message}
+            </p>
+          ) : here?.name ? (
+            <p className="lede">
+              <Laptop size={15} style={{ verticalAlign: '-2px' }} /> You're on <b>{here.name}</b>
+              {here.simulated
+                ? ' (demo: pretending this browser is that device).'
+                : here.how === 'signed_in'
+                  ? ', recognised because you signed in on it. '
+                  : here.how === 'assigned'
+                    ? ', a device assigned to you. '
+                    : '.'}
+              {here.device_id && (
+                <Forget
+                  data={data}
+                  device={here.device_id}
+                  name="this device"
+                  onAccepted={onForgotten}
+                />
+              )}
+            </p>
+          ) : (
+            <p className="lede">
+              {/* One sentence when lookups tied to no device are also missing, so two notes never stack. */}
+              {cover?.unassigned && !gap
+                ? `${unrecognised}, and some sites blocked on this network cannot be tied to a device, so one of yours may be missing here. ${ASK} if a page will not load.`
+                : `${unrecognised}.`}
+            </p>
+          ))}
         {here?.device_id && <TiesNotRead data={data} />}
       </header>
-      <form className="m-find" onSubmit={find}>
-        <Search size={18} />
-        <input
-          type="text"
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            setFound(null);
-          }}
-          placeholder="Type the address that would not load, like example.com"
-          aria-label="Address that was blocked"
-          autoCapitalize="none"
-          autoCorrect="off"
-        />
-        <button
-          className="button primary"
-          type="submit"
-          disabled={pending || text.trim().length < 3}
-        >
-          Find it
-        </button>
-      </form>
+      {historyReady && (
+        <form className="m-find" onSubmit={find}>
+          <Search size={18} />
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setFound(null);
+            }}
+            placeholder="Type the address that would not load, like example.com"
+            aria-label="Address that was blocked"
+            autoCapitalize="none"
+            autoCorrect="off"
+          />
+          <button
+            className="button primary"
+            type="submit"
+            disabled={pending || text.trim().length < 3}
+          >
+            Find it
+          </button>
+        </form>
+      )}
       <InlineError message={error} />
-      {here?.device_id && !data.device.error && user && (
+      {statements.canFile && here?.device_id && !data.device.error && user && (
         <SiteStatement
           userId={user.id}
           deviceId={here.device_id}
@@ -495,88 +497,100 @@ function Home({
           onFile={statements.file}
         />
       )}
-      {/* Without the list of requests, a site already asked about looks like one that was not. */}
-      {data.requests.error && (
-        <p className="aside" role="status">
-          Nyctr could not read your requests just now, so it cannot show which of these sites you
-          have already asked about.{' '}
-          <button className="linklike" onClick={data.requests.reload}>
-            Try again
-          </button>
-        </p>
+      {here?.device_id && !data.device.error && !statements.canFile && (
+        <p className="aside">Nyctr has forgotten this device. Sign in again to ask about a site.</p>
       )}
-      {found !== null &&
-        (found.length ? (
-          <section className="m-card">
-            <h2>Found</h2>
-            {found.map((block) => (
-              <BlockRow
-                key={block.id}
-                block={block}
-                request={requestFor.get(block.id)}
-                lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
-                now={now}
+      {historyLoading ? (
+        <Loading text="Looking for blocked sites…" />
+      ) : data.blocks.error ? (
+        <ErrorState message={data.blocks.error} retry={data.blocks.reload} />
+      ) : (
+        <>
+          {/* Without the list of requests, a site already asked about looks like one that was not. */}
+          {data.requests.error && (
+            <p className="aside" role="status">
+              Nyctr could not read your requests just now, so it cannot show which of these sites
+              you have already asked about.{' '}
+              <button className="linklike" onClick={data.requests.reload}>
+                Try again
+              </button>
+            </p>
+          )}
+          {found !== null &&
+            (found.length ? (
+              <section className="m-card">
+                <h2>Found</h2>
+                {found.map((block) => (
+                  <BlockRow
+                    key={block.id}
+                    block={block}
+                    request={requestFor.get(block.id)}
+                    lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
+                    now={now}
+                  />
+                ))}
+              </section>
+            ) : (
+              <Empty
+                title={gap?.title || 'Nyctr has not seen that blocked on your devices'}
+                text={
+                  gap?.text ||
+                  `Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here. ${partly}`.trim()
+                }
               />
             ))}
-          </section>
-        ) : (
-          <Empty
-            title={gap?.title || 'Nyctr has not seen that blocked on your devices'}
-            text={
-              gap?.text ||
-              `Try opening the page once more on this device, then ${comeBack} Blocks from the last day show up here. ${partly}`.trim()
-            }
-          />
-        ))}
-      {mine.length > 0 && (
-        <section className="m-card">
-          <h2>Blocked on this device</h2>
-          {mine.map((block) => (
-            <BlockRow
-              key={block.id}
-              block={block}
-              request={requestFor.get(block.id)}
-              lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
-              now={now}
+          {mine.length > 0 && (
+            <section className="m-card">
+              <h2>Blocked on this device</h2>
+              {mine.map((block) => (
+                <BlockRow
+                  key={block.id}
+                  block={block}
+                  request={requestFor.get(block.id)}
+                  lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
+                  now={now}
+                />
+              ))}
+            </section>
+          )}
+          {others.length > 0 && (
+            <section className="m-card">
+              <h2>{mine.length ? 'On your other devices' : 'Blocked on your devices'}</h2>
+              {others.map((block) => (
+                <BlockRow
+                  key={block.id}
+                  block={block}
+                  request={requestFor.get(block.id)}
+                  lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
+                  now={now}
+                />
+              ))}
+            </section>
+          )}
+          {blocks.length > 0 && missing && <p className="aside">{missing}</p>}
+          {data.blocks.beyond > 0 && (
+            <p className="aside">
+              These are the latest blocks on your devices.{' '}
+              {counted(data.blocks.beyond, 'older one')} {data.blocks.beyond === 1 ? 'is' : 'are'}{' '}
+              not listed here: to find one, type its address above.
+            </p>
+          )}
+          {blocks.length === 0 && found === null && !noDevices && (
+            <Empty
+              // The heading hedges whenever lookups tied to no device exist, wherever the caveat is said.
+              title={
+                gap?.title ||
+                (cover?.unassigned
+                  ? 'Nyctr has not seen anything blocked on your devices in the last day'
+                  : 'Nothing has been blocked on your devices in the last day')
+              }
+              text={
+                gap?.text ||
+                `If a page will not load, open it again, then ${comeBack} ${partly}`.trim()
+              }
             />
-          ))}
-        </section>
-      )}
-      {others.length > 0 && (
-        <section className="m-card">
-          <h2>{mine.length ? 'On your other devices' : 'Blocked on your devices'}</h2>
-          {others.map((block) => (
-            <BlockRow
-              key={block.id}
-              block={block}
-              request={requestFor.get(block.id)}
-              lease={leaseFor.get(requestFor.get(block.id)?.id ?? '')}
-              now={now}
-            />
-          ))}
-        </section>
-      )}
-      {blocks.length > 0 && missing && <p className="aside">{missing}</p>}
-      {data.blocks.beyond > 0 && (
-        <p className="aside">
-          These are the latest blocks on your devices. {counted(data.blocks.beyond, 'older one')}{' '}
-          {data.blocks.beyond === 1 ? 'is' : 'are'} not listed here: to find one, type its address
-          above.
-        </p>
-      )}
-      {blocks.length === 0 && found === null && !noDevices && (
-        <Empty
-          // The heading hedges whenever lookups tied to no device exist, wherever the caveat is said.
-          title={
-            gap?.title ||
-            (cover?.unassigned
-              ? 'Nyctr has not seen anything blocked on your devices in the last day'
-              : 'Nothing has been blocked on your devices in the last day')
-          }
-          text={
-            gap?.text || `If a page will not load, open it again, then ${comeBack} ${partly}`.trim()
-          }
-        />
+          )}
+        </>
       )}
     </div>
   );
@@ -754,12 +768,14 @@ function Result({
   againMs,
   statements,
   onRetryOpening,
+  needsRetry,
 }: {
   data: Data;
   id: string;
   againMs: number | null;
   statements: Statements;
   onRetryOpening: () => void;
+  needsRetry: boolean;
 }) {
   const [os, setOs] = useState<DeviceOs>(detectOs());
   const now = useNow(5000);
@@ -976,6 +992,11 @@ function Result({
         </header>
       )}
       <CheckNote failed={Boolean(unread)} againMs={againMs} />
+      {needsRetry && !opening.retry && !listBehind && (
+        <button type="button" className="linklike" onClick={onRetryOpening}>
+          {opening.availability === 'not-an-opening' ? 'Try again' : 'Check the opening again'}
+        </button>
+      )}
       <section className="m-card pad">
         <div className="m-score">
           <Score value={row.risk_score} big />
@@ -1003,37 +1024,41 @@ function MyRequests({
   data,
   againMs,
   onRetryOpening,
+  statements,
+  needsRetry,
 }: {
   data: Data;
   againMs: number | null;
   onRetryOpening: () => void;
+  statements: Statements;
+  needsRetry: boolean;
 }) {
-  const { user } = useAuth();
   const now = useNow();
   // The reason stands only over an empty list of blocked sites. With one listed there is
   // something to ask about, whatever the collection is doing.
   const gap = data.blocks.data?.length === 0 ? notKnown(data) : null;
   // The list is already on screen. A later failure must not replace it with the error screen.
   const held = data.requests.data !== null && data.leases.data !== null;
-  if (!held && (data.requests.loading || data.leases.loading)) return <Loading />;
+  if (!statements.rows.length && !held && (data.requests.loading || data.leases.loading))
+    return <Loading />;
   // A list that could not be read is not an empty one, and an outcome needs both lists.
   const unread = data.requests.error || data.leases.error;
-  if (!held && unread)
+  if (!statements.rows.length && !held && unread)
     return (
       <div className="m-col">
         <h1 className="display d2">My requests</h1>
         <ErrorState message={unread} retry={onRetryOpening} />
       </div>
     );
-  const rows = (data.requests.data || []).filter((row) => row.requester_id === user?.id);
+  const rows = statements.rows;
   const leaseFor = new Map(asEvidence(data.leases).rows.map((lease) => [lease.request_id, lease]));
   return (
     <div className="m-col">
       <h1 className="display d2">My requests</h1>
       <CheckNote failed={Boolean(unread)} againMs={againMs} />
-      {data.leases.error && (
+      {(unread || needsRetry) && (
         <button type="button" className="linklike" onClick={onRetryOpening}>
-          Check the openings again
+          {data.requests.error ? 'Try again' : 'Check the openings again'}
         </button>
       )}
       {rows.length === 0 ? (
@@ -1171,7 +1196,7 @@ function MemberPortal({ page, params }: { page: string; params: URLSearchParams 
     reloadEvidence,
   });
   const watchIds = new Set(watched.current);
-  if (statements.notice) watchIds.add(statements.notice.request.id);
+  for (const row of statements.rows) watchIds.add(row.id);
   if (request) watchIds.add(request);
   for (const row of asEvidence(data.requests).rows) {
     if (row.requester_id === memberId) watchIds.add(row.id);
@@ -1187,6 +1212,7 @@ function MemberPortal({ page, params }: { page: string; params: URLSearchParams 
       sawUndecided: follow.current.saw,
       spentFinal: follow.current.spent,
       finalFailed: follow.current.finalFailed,
+      failedLeaseIds: [...follow.current.failed],
       checkedLeaseIds: [...follow.current.checked],
     });
   const decision = getDecision();
@@ -1202,7 +1228,7 @@ function MemberPortal({ page, params }: { page: string; params: URLSearchParams 
     acknowledgeRefresh(follow.current, round, asEvidence(data.leases).availability);
     setTick((value) => value + 1);
   });
-  useEffect(
+  useLayoutEffect(
     () => () => {
       replaceSession(follow.current);
       awaiting.current = null;
@@ -1257,7 +1283,13 @@ function MemberPortal({ page, params }: { page: string; params: URLSearchParams 
       <main id="main-content">
         <InlineError message={error} />
         {section === 'requests' ? (
-          <MyRequests data={data} againMs={again} onRetryOpening={retryOpening} />
+          <MyRequests
+            data={data}
+            againMs={again}
+            onRetryOpening={retryOpening}
+            statements={statements}
+            needsRetry={follow.current.failed.size > 0}
+          />
         ) : section === 'devices' ? (
           <MyDevices data={data} onForgotten={statements.acceptForget} />
         ) : request ? (
@@ -1267,6 +1299,11 @@ function MemberPortal({ page, params }: { page: string; params: URLSearchParams 
             againMs={again}
             statements={statements}
             onRetryOpening={retryOpening}
+            needsRetry={
+              follow.current.finalFailed ||
+              follow.current.failed.has(request) ||
+              Boolean(data.requests.error || data.leases.error)
+            }
           />
         ) : block ? (
           // Keyed by the block: what was read or typed for one never stands under another.

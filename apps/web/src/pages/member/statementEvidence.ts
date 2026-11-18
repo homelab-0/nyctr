@@ -8,7 +8,7 @@ import type {
 
 /**
  * How a filed request is read again, and what a lease list is allowed to prove.
- * The page does not use this yet. A model score does not decide an opening.
+ * The signed-in page uses these decisions. A model score does not decide an opening.
  * Retention stays in the statement controller: pass its resolve function.
  * The round that started a read is the only round its completion may acknowledge.
  */
@@ -38,13 +38,15 @@ export interface RefreshNeed {
   listedStatusWins: boolean;
   /** The requests became decided and the one trailing lease read has not happened. */
   finalLeaseRefresh: boolean;
-  /** An approved request is open and the lease list is not loaded. */
+  /** A watched approval needs a lease read and the lease list is not loaded. */
   openingUnchecked: boolean;
 }
 
 export interface RefreshDecision extends RefreshNeed {
   undecided: boolean;
   confirmingIds: string[];
+  /** Approvals this read may acknowledge; later or previously failed ids are excluded. */
+  openingIds: string[];
 }
 
 /** One sign-in's watch. `round` is the newest read this sign-in has started. */
@@ -58,6 +60,8 @@ export interface RefreshFollow {
   spent: boolean;
   /** That read failed. Automatic watching stops. The member can retry. */
   finalFailed: boolean;
+  /** Only these approvals need a manual retry after a failed read. */
+  failed: Set<string>;
   checked: Set<string>;
 }
 
@@ -69,6 +73,7 @@ export interface RefreshRound {
   finalLeaseRefresh: boolean;
   confirmingIds: readonly string[];
   openingUnchecked: boolean;
+  openingIds: readonly string[];
 }
 
 const UNDECIDED = new Set(['pending', 'analysing']);
@@ -153,6 +158,7 @@ export function newFollow(): RefreshFollow {
     saw: false,
     spent: false,
     finalFailed: false,
+    failed: new Set(),
     checked: new Set(),
   };
 }
@@ -165,12 +171,14 @@ export function replaceSession(follow: RefreshFollow) {
   follow.saw = false;
   follow.spent = false;
   follow.finalFailed = false;
+  follow.failed = new Set();
   follow.checked = new Set();
 }
 
 /** The member asked to read the lease list again after a failed read. */
 export function allowRetry(follow: RefreshFollow) {
   follow.finalFailed = false;
+  follow.failed.clear();
 }
 
 /** Records that a render still saw an undecided request, so one later lease read can be owed. */
@@ -195,6 +203,7 @@ export function startRefresh(follow: RefreshFollow, decision: RefreshDecision): 
     finalLeaseRefresh: decision.finalLeaseRefresh,
     confirmingIds: decision.confirmingIds.slice(),
     openingUnchecked: decision.openingUnchecked,
+    openingIds: decision.openingIds.slice(),
   };
 }
 
@@ -217,13 +226,17 @@ export function acknowledgeRefresh(
   const owed = round.finalLeaseRefresh || round.confirmingIds.length > 0 || round.openingUnchecked;
   if (!owed) return;
   if (outcome === 'loaded') {
-    if (round.finalLeaseRefresh) follow.spent = true;
-    follow.finalFailed = false;
+    if (round.finalLeaseRefresh) {
+      follow.spent = true;
+      follow.finalFailed = false;
+    }
     for (const id of round.confirmingIds) follow.checked.add(id);
+    if (round.openingUnchecked) for (const id of round.openingIds) follow.checked.add(id);
     return;
   }
   follow.finalFailed = true;
   follow.spent = false;
+  for (const id of round.openingIds) follow.failed.add(id);
 }
 
 function watchedIds(watchIds: readonly string[], openRequestId: string | null) {
@@ -244,6 +257,7 @@ export function refreshNeed(input: {
   sawUndecided: boolean;
   spentFinal: boolean;
   finalFailed: boolean;
+  failedLeaseIds: readonly string[];
   checkedLeaseIds: readonly string[];
 }): RefreshDecision {
   const listLoaded = input.requestsAvailability === 'loaded';
@@ -267,35 +281,27 @@ export function refreshNeed(input: {
       ? input.leases.rows.flatMap((row) => (row.request_id ? [row.request_id] : []))
       : [],
   );
+  const openingIds = resolved
+    .filter(
+      ({ id, result }) =>
+        watching &&
+        (input.view === 'requests' || id === input.openRequestId) &&
+        !!result.request &&
+        APPROVED.has(result.request.status) &&
+        !input.failedLeaseIds.includes(id),
+    )
+    .map(({ id }) => id);
   const confirmingIds =
-    !undecided && listLoaded && leasesLoaded && !input.finalFailed
-      ? resolved
-          .filter((row) => {
-            if (!watching) return false;
-            if (input.view === 'request' && row.id !== input.openRequestId) return false;
-            const status = row.result.request?.status;
-            return (
-              !!status &&
-              APPROVED.has(status) &&
-              !leaseIds.has(row.id) &&
-              !input.checkedLeaseIds.includes(row.id)
-            );
-          })
-          .map((row) => row.id)
+    !undecided && listLoaded && leasesLoaded
+      ? openingIds.filter((id) => !leaseIds.has(id) && !input.checkedLeaseIds.includes(id))
       : [];
   const finalLeaseRefresh =
     input.sawUndecided && !undecided && !input.spentFinal && !input.finalFailed;
-  const open = input.openRequestId
-    ? resolved.find((row) => row.id === input.openRequestId)?.result.request
-    : undefined;
   const openingUnchecked = Boolean(
-    watching &&
-    input.view === 'request' &&
-    input.openRequestId &&
+    !undecided &&
     !leasesLoaded &&
-    !input.finalFailed &&
-    open &&
-    APPROVED.has(open.status),
+    (input.view === 'request' || listLoaded) &&
+    openingIds.some((id) => !input.checkedLeaseIds.includes(id)),
   );
   return {
     continue:
@@ -306,5 +312,6 @@ export function refreshNeed(input: {
     openingUnchecked,
     undecided,
     confirmingIds,
+    openingIds,
   };
 }
