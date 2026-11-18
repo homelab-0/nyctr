@@ -8,7 +8,18 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -74,6 +85,18 @@ class LoginAttempt(Base):
     """Maintain an atomic account or peer login quota until its fixed window resets."""
     __tablename__ = "login_attempts"
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class StatementQuota(Base):
+    """Count one member's site statements until a fixed hour from the first attempt resets.
+
+    Misses count. The row is the lock that keeps two first statements, and the hourly limit,
+    from both landing.
+    """
+    __tablename__ = "statement_quotas"
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     count: Mapped[int] = mapped_column(Integer, default=0)
     reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -214,8 +237,9 @@ class Finding(Base):
 class AccessRequest(Base):
     """Retain a user request and event snapshot independently of observation cleanup.
 
-    The user/event uniqueness constraint makes repeat submissions idempotent.
-    Review status records an internal decision and never authorizes execution.
+    One event stays one request per member and block. A statement also stores the
+    recognised device, so a second device files its own request. Review status
+    records an internal decision and never authorizes execution.
     """
     __tablename__ = "access_requests"
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uid)
@@ -239,8 +263,21 @@ class AccessRequest(Base):
     analysis_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     analysis_holder: Mapped[str | None] = mapped_column(String(64), nullable=True)
     analysis_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # One request per member/event preserves idempotence even under concurrent POSTs.
-    __table_args__ = (UniqueConstraint("requester_id", "block_id"),)
+    # Schema 9: why this request was filed. Null on a row from before the column.
+    # `event` is a block the member could already see. `statement` is a name they typed.
+    basis: Mapped[str | None] = mapped_column(String(16), nullable=True, default="event")
+    # Schema 9: the recognised device a statement was filed for. Null on a row from before
+    # the column, and on a request filed from a block the member could already see.
+    # `device_name` is a label. This id is the device.
+    device_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    # Event rows (no device id) stay one per member and block. Statement rows are one per
+    # member, device and block, so one device's request is not returned to another.
+    __table_args__ = (
+        Index("uq_access_request_event", "requester_id", "block_id", unique=True,
+              sqlite_where=text("device_id IS NULL"), postgresql_where=text("device_id IS NULL")),
+        Index("uq_access_request_device_block", "requester_id", "device_id", "block_id", unique=True,
+              sqlite_where=text("device_id IS NOT NULL"), postgresql_where=text("device_id IS NOT NULL")),
+    )
 
 
 class Audit(Base):
