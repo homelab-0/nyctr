@@ -6,7 +6,7 @@ sign-in ties, the guest action recorded during an analysis, the device filing
 case and the migration check on PostgreSQL. Every such test carries the
 `postgres` marker. Without a server they skip. In CI they always run, against
 PostgreSQL 17, and a marked case that does not pass fails the job. So does a run
-where fewer than 90 marked cases passed, so a test cannot lose its marker unseen.
+where fewer than 92 marked cases passed, so a test cannot lose its marker unseen.
 
 When you add a test that needs a server, mark it with `@pytest.mark.postgres`
 (or `pytest.param("postgresql", marks=pytest.mark.postgres)` in a parameter
@@ -32,7 +32,7 @@ of its own on the server and drops it when it ends.
 export NYCTR_TEST_POSTGRES='postgresql+psycopg://postgres:local-only@127.0.0.1:55432/'
 PYTHONPATH=services/api python -m pytest services/api/tests tests/release tests/acceptance \
   --junitxml=test-results/api.xml
-python scripts/postgres_cases.py test-results/api.xml --minimum 90
+python scripts/postgres_cases.py test-results/api.xml --minimum 92
 ```
 
 The last command prints how many marked cases passed and exits with an error if
