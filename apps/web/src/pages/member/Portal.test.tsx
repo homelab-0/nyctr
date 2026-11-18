@@ -2041,6 +2041,14 @@ describe('a site the member names', () => {
   it('does not attach a late answer after this device is forgotten', async () => {
     const { gate, release } = holdPost();
     let tied = true;
+    let releaseDevice: (value: unknown) => void = () => {};
+    const deviceGate = new Promise((resolve) => {
+      releaseDevice = resolve;
+    });
+    let markDeviceRead: () => void = () => {};
+    const deviceReadStarted = new Promise<void>((resolve) => {
+      markDeviceRead = resolve;
+    });
     const tie = {
       id: 't1',
       kind: 'tie',
@@ -2048,19 +2056,21 @@ describe('a site the member names', () => {
       device_name: "Sam's laptop",
       ended_at: null,
     };
+    const forgotten = {
+      device_id: null,
+      name: null,
+      simulated: false,
+      how: null,
+      reason: 'forgotten',
+      message: 'Nyctr was asked to forget this device. Sign in again to have it recognised.',
+    };
     open({
-      'GET /me/device': () =>
-        tied
-          ? { device_id: 'laptop', name: "Sam's laptop", simulated: false, how: 'signed_in' }
-          : {
-              device_id: null,
-              name: null,
-              simulated: false,
-              how: null,
-              reason: 'forgotten',
-              message:
-                'Nyctr was asked to forget this device. Sign in again to have it recognised.',
-            },
+      'GET /me/device': () => {
+        if (tied)
+          return { device_id: 'laptop', name: "Sam's laptop", simulated: false, how: 'signed_in' };
+        markDeviceRead();
+        return deviceGate;
+      },
       'GET /devices': () =>
         tied ? [{ id: 'laptop', name: "Sam's laptop", classification: 'unassigned' }] : [],
       'GET /presence': () => ({ items: tied ? [tie] : [] }),
@@ -2072,13 +2082,19 @@ describe('a site the member names', () => {
     });
     await ask('ads.example');
     expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    const hash = window.location.hash;
     await act(async () => {
       screen.getByRole('button', { name: 'Forget this device' }).click();
     });
-    expect(await screen.findByText(/Sign in again to have it recognised/)).toBeDefined();
+    await deviceReadStarted;
     await act(async () => {
       release();
     });
+    expect(window.location.hash).toBe(hash);
+    await act(async () => {
+      releaseDevice(forgotten);
+    });
+    expect(await screen.findByText(/Sign in again to have it recognised/)).toBeDefined();
     expect(window.location.hash).not.toContain('request=');
     expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
     expect(screen.queryByText('That request could not be found')).toBeNull();
@@ -2141,4 +2157,39 @@ describe('a site the member names', () => {
     expect(note.textContent).not.toContain('new.example');
     expect(screen.getByRole('link', { name: 'Open that request' })).toBeDefined();
   });
+
+  it.each(['miss', 'filed'] as const)(
+    'a form opened again does not take the %s answer from the one that was left',
+    async (kind) => {
+      let posts = 0;
+      let releaseFirst: (value: unknown) => void = () => {};
+      const first = new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+      const { user, calls } = open({
+        ...quiet,
+        'POST /statements': () => (++posts === 1 ? first : new Promise(() => {})),
+        'GET /requests': () => (posts > 0 ? [filed] : []),
+      });
+      await ask('old.example');
+      await user.click(await screen.findByRole('link', { name: 'My requests' }));
+      await user.click((await screen.findAllByRole('link', { name: 'Blocked sites' }))[0]);
+      const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: 'new.example' } });
+      expect(screen.queryByRole('button', { name: 'Asking…' })).toBeNull();
+      fireEvent.submit(input.closest('form')!);
+      expect(calls.filter((call) => call.path === '/statements')).toHaveLength(2);
+      await act(async () => {
+        releaseFirst(
+          kind === 'miss'
+            ? { matched: false, message: 'Nyctr saw no recent block of that name.' }
+            : answer,
+        );
+      });
+      expect(input.value).toBe('new.example');
+      expect(window.location.hash).not.toContain('request=');
+      expect(screen.queryByText(/saw no recent block/)).toBeNull();
+      if (kind === 'filed') expect(screen.getByRole('status').textContent).toContain('ads.example');
+    },
+  );
 });

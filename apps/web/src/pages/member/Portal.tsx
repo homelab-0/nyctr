@@ -186,7 +186,17 @@ function TiesNotRead({ data }: { data: Data }) {
 }
 
 /** A plain button that ends the tie a sign-in made to a device. Shown only where there is such a tie. */
-function Forget({ data, device, name }: { data: Data; device: string; name: string }) {
+function Forget({
+  data,
+  device,
+  name,
+  onAccepted,
+}: {
+  data: Data;
+  device: string;
+  name: string;
+  onAccepted: (deviceId: string) => void;
+}) {
   const [error, setError] = useState<string | null>(null);
   const tie = data.ties.data?.items.find((row) => row.kind === 'tie' && row.device_id === device);
   if (!tie) return null;
@@ -194,6 +204,7 @@ function Forget({ data, device, name }: { data: Data; device: string; name: stri
     setError(null);
     try {
       await api(`/presence/${encodeURIComponent(tie.id)}`, { method: 'DELETE' });
+      onAccepted(device);
       for (const read of [data.ties, data.device, data.devices, data.blocks]) read.reload();
     } catch (e) {
       setError((e as Error).message);
@@ -282,30 +293,31 @@ function BlockRow({
   );
 }
 
-/** What the member typed, so a late answer can tell whether that text is still on screen. */
 interface StatementDraft {
+  formId: number;
   revision: number;
   site: string;
 }
-/** One submit. A later edit gets a new revision, so this answer cannot land on different text. */
 interface StatementFlight {
   userId: string;
   deviceId: string;
+  formId: number;
   flight: number;
   revision: number;
   site: string;
   phase: 'pending' | 'settled';
   message: string | null;
 }
-/** The request a submit returned. Kept so a failed refresh cannot pretend it was never filed. */
 interface KeptStatement {
   userId: string;
   deviceId: string;
+  formId: number;
   flight: number;
   revision: number;
   site: string;
   request: AccessRequest;
   refreshed: boolean;
+  parked: boolean;
 }
 interface StatementAnswer {
   matched: boolean;
@@ -313,13 +325,10 @@ interface StatementAnswer {
   request?: AccessRequest;
 }
 
-/**
- * A site the member names for this device. Feedback is shown only for the revision that was
- * submitted. A request filed for an earlier revision stays reachable by its own name.
- */
 function SiteStatement({
   site,
   revision,
+  formId,
   ask,
   kept,
   userId,
@@ -329,6 +338,7 @@ function SiteStatement({
 }: {
   site: string;
   revision: number;
+  formId: number;
   ask: StatementFlight | null;
   kept: KeptStatement | null;
   userId: string;
@@ -337,11 +347,18 @@ function SiteStatement({
   onSubmit: () => void;
 }) {
   const sameAsk =
-    !!ask && ask.userId === userId && ask.deviceId === deviceId && ask.revision === revision;
+    !!ask &&
+    ask.userId === userId &&
+    ask.deviceId === deviceId &&
+    ask.formId === formId &&
+    ask.revision === revision;
   const asking = sameAsk && ask.phase === 'pending';
   const message = sameAsk && ask.phase === 'settled' ? ask.message : null;
   const earlier =
-    kept && kept.userId === userId && kept.deviceId === deviceId && kept.revision !== revision
+    kept &&
+    kept.userId === userId &&
+    kept.deviceId === deviceId &&
+    (kept.parked || kept.formId !== formId || kept.revision !== revision)
       ? kept
       : null;
   return (
@@ -391,12 +408,16 @@ function Home({
   ask,
   kept,
   onFile,
+  forms,
+  onForgotten,
 }: {
   data: Data;
   draft: { current: StatementDraft };
   ask: StatementFlight | null;
   kept: KeptStatement | null;
-  onFile: (site: string, revision: number) => void;
+  onFile: (site: string, revision: number, formId: number) => void;
+  forms: { current: { next: number; mounted: number } };
+  onForgotten: (deviceId: string) => void;
 }) {
   const [text, setText] = useState('');
   const [found, setFound] = useState<Block[] | null>(null);
@@ -404,7 +425,17 @@ function Home({
   const [pending, setPending] = useState(false);
   const [site, setSite] = useState('');
   const [revision, setRevision] = useState(0);
-  draft.current = { revision, site };
+  const formId = useRef(0);
+  if (formId.current === 0) formId.current = ++forms.current.next;
+  forms.current.mounted = formId.current;
+  draft.current = { formId: formId.current, revision, site };
+  useEffect(() => {
+    const id = formId.current;
+    forms.current.mounted = id;
+    return () => {
+      if (forms.current.mounted === id) forms.current.mounted = 0;
+    };
+  }, [forms]);
   const now = useNow();
   // How soon a new block can show up here. No wait is promised unless a schedule is on.
   const { user } = useAuth();
@@ -500,7 +531,14 @@ function Home({
                 : here.how === 'assigned'
                   ? ', a device assigned to you. '
                   : '.'}
-            {here.device_id && <Forget data={data} device={here.device_id} name="this device" />}
+            {here.device_id && (
+              <Forget
+                data={data}
+                device={here.device_id}
+                name="this device"
+                onAccepted={onForgotten}
+              />
+            )}
           </p>
         ) : (
           <p className="lede">
@@ -539,6 +577,7 @@ function Home({
         <SiteStatement
           site={site}
           revision={revision}
+          formId={formId.current}
           ask={ask}
           kept={kept}
           userId={user?.id ?? ''}
@@ -547,7 +586,7 @@ function Home({
             setSite(value);
             setRevision((current) => current + 1);
           }}
-          onSubmit={() => onFile(site, revision)}
+          onSubmit={() => onFile(site, revision, formId.current)}
         />
       )}
       {/* Without the list of requests, a site already asked about looks like one that was not. */}
@@ -811,7 +850,6 @@ function Result({
   const [os, setOs] = useState<DeviceOs>(detectOs());
   const now = useNow(5000);
   const listed = (data.requests.data || []).find((item) => item.id === id);
-  // Read during render: the ref is set before the address changes, so this paint cannot miss it.
   const heldRequest = filed.current;
   const fallback =
     heldRequest && heldRequest.request.id === id && heldRequest.userId === user?.id
@@ -855,7 +893,6 @@ function Result({
   const simulated = lease?.execution === 'simulated' && lease.status !== 'unconfirmed';
   const remaining = lease ? left(lease.expires_at, now) : null;
   const note = writtenNote(row.review_note);
-  // The submit already returned this request. A failed or incomplete list must not call it missing.
   const listBehind = !listed && !!fallback && !!heldRequest?.refreshed;
   return (
     <div className="m-col">
@@ -1100,7 +1137,7 @@ function MyRequests({ data, againMs }: { data: Data; againMs: number | null }) {
   );
 }
 
-function MyDevices({ data }: { data: Data }) {
+function MyDevices({ data, onForgotten }: { data: Data; onForgotten: (deviceId: string) => void }) {
   const devices = data.devices;
   if (devices.loading) return <Loading />;
   if (devices.error) return <ErrorState message={devices.error} retry={devices.reload} />;
@@ -1129,7 +1166,7 @@ function MyDevices({ data }: { data: Data }) {
                     ? 'Yours'
                     : 'You signed in on it'}
               </span>
-              <Forget data={data} device={device.id} name={device.name} />
+              <Forget data={data} device={device.id} name={device.name} onAccepted={onForgotten} />
             </span>
             {data.device.data?.device_id === device.id && (
               <span className="tag blue">This device</span>
@@ -1153,10 +1190,14 @@ export default function Portal({ page, params }: { page: string; params: URLSear
   const [kept, setKept] = useState<KeptStatement | null>(null);
   const statementFlight = useRef(0);
   const statementLeft = useRef(false);
-  const statementDraft = useRef<StatementDraft>({ revision: 0, site: '' });
+  const statementDraft = useRef<StatementDraft>({ formId: 0, revision: 0, site: '' });
   const keptRef = useRef<KeptStatement | null>(null);
-  /** The revision whose submit is in flight, so a second press of the same text does not file twice. */
-  const statementBusy = useRef<{ revision: number; deviceId: string } | null>(null);
+  const statementBusy = useRef<{ formId: number; revision: number; deviceId: string } | null>(null);
+  const forms = useRef({ next: 0, mounted: 0 });
+  const statementRevoked = useRef(new Set<string>());
+  const acceptForget = (deviceId: string) => {
+    statementRevoked.current.add(deviceId);
+  };
   const block = params.get('block');
   const request = params.get('request');
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
@@ -1180,21 +1221,22 @@ export default function Portal({ page, params }: { page: string; params: URLSear
       statementLeft.current = true;
     };
   }, []);
-  /** Files the typed site. A late answer cannot move the page or label a newer name. */
-  const fileStatement = (site: string, revision: number) => {
+  const fileStatement = (site: string, revision: number, formId: number) => {
     const seen = statementView.current;
     if (!seen.deviceId || !seen.userId || !site.trim()) return;
     if (
-      statementBusy.current?.revision === revision &&
+      statementBusy.current?.formId === formId &&
+      statementBusy.current.revision === revision &&
       statementBusy.current.deviceId === seen.deviceId
     )
       return;
-    statementBusy.current = { revision, deviceId: seen.deviceId };
+    statementBusy.current = { formId, revision, deviceId: seen.deviceId };
     const stamp = {
       userId: seen.userId,
       deviceId: seen.deviceId,
       site,
       revision,
+      formId,
       flight: ++statementFlight.current,
     };
     setAsk({ ...stamp, phase: 'pending', message: null });
@@ -1202,10 +1244,29 @@ export default function Portal({ page, params }: { page: string; params: URLSear
     const reloadLeases = data.leases.reload;
     const releaseBusy = () => {
       if (
-        statementBusy.current?.revision === stamp.revision &&
+        statementBusy.current?.formId === stamp.formId &&
+        statementBusy.current.revision === stamp.revision &&
         statementBusy.current.deviceId === stamp.deviceId
       )
         statementBusy.current = null;
+    };
+    const stillHere = () => {
+      const place = statementView.current;
+      const draftNow = statementDraft.current;
+      return (
+        !statementLeft.current &&
+        !statementRevoked.current.has(stamp.deviceId) &&
+        forms.current.mounted === stamp.formId &&
+        draftNow.formId === stamp.formId &&
+        draftNow.revision === stamp.revision &&
+        place.deviceId === stamp.deviceId &&
+        place.userId === stamp.userId &&
+        statementFlight.current === stamp.flight
+      );
+    };
+    const clearRevoked = () => {
+      if (statementRevoked.current.has(stamp.deviceId) && statementFlight.current === stamp.flight)
+        setAsk(null);
     };
     void (async () => {
       try {
@@ -1215,20 +1276,17 @@ export default function Portal({ page, params }: { page: string; params: URLSear
           return;
         }
         if (answer.request) {
-          const filed = { ...stamp, request: answer.request, refreshed: false };
+          const place = statementView.current;
+          const still =
+            stillHere() &&
+            window.location.hash === '#/portal' &&
+            place.request === null &&
+            place.block === null;
+          const filed = { ...stamp, request: answer.request, refreshed: false, parked: !still };
           const previous = keptRef.current;
           const next = previous && previous.flight > stamp.flight ? previous : filed;
           keptRef.current = next;
           setKept(next);
-          const place = statementView.current;
-          const still =
-            place.deviceId === stamp.deviceId &&
-            place.section === 'portal' &&
-            place.request === null &&
-            place.block === null &&
-            statementDraft.current.revision === stamp.revision &&
-            statementFlight.current === stamp.flight;
-          // Move only while this submit is still the one on screen. Never again after the refresh.
           if (still) window.location.hash = `/portal?request=${answer.request.id}`;
           await Promise.all([reloadRequests(), reloadLeases()]);
           if (statementLeft.current || statementView.current.userId !== stamp.userId) {
@@ -1240,27 +1298,21 @@ export default function Portal({ page, params }: { page: string; params: URLSear
             keptRef.current = refreshed;
             setKept(refreshed);
           }
-          if (statementFlight.current === stamp.flight)
-            setAsk({ ...stamp, phase: 'settled', message: null });
+          if (stillHere()) setAsk({ ...stamp, phase: 'settled', message: null });
+          else clearRevoked();
           releaseBusy();
           return;
         }
-        if (
-          statementFlight.current !== stamp.flight ||
-          statementView.current.deviceId !== stamp.deviceId
-        ) {
+        if (!stillHere()) {
+          clearRevoked();
           releaseBusy();
           return;
         }
         setAsk({ ...stamp, phase: 'settled', message: answer.message });
         releaseBusy();
       } catch (caught) {
-        if (
-          statementLeft.current ||
-          statementFlight.current !== stamp.flight ||
-          statementView.current.userId !== stamp.userId ||
-          statementView.current.deviceId !== stamp.deviceId
-        ) {
+        if (!stillHere()) {
+          clearRevoked();
           releaseBusy();
           return;
         }
@@ -1360,14 +1412,22 @@ export default function Portal({ page, params }: { page: string; params: URLSear
         {section === 'requests' ? (
           <MyRequests data={data} againMs={again} />
         ) : section === 'devices' ? (
-          <MyDevices data={data} />
+          <MyDevices data={data} onForgotten={acceptForget} />
         ) : request ? (
           <Result data={data} id={request} againMs={again} filed={keptRef} />
         ) : block ? (
           // Keyed by the block: what was read or typed for one never stands under another.
           <BlockDetail key={block} data={data} id={block} />
         ) : (
-          <Home data={data} draft={statementDraft} ask={ask} kept={kept} onFile={fileStatement} />
+          <Home
+            data={data}
+            draft={statementDraft}
+            ask={ask}
+            kept={kept}
+            onFile={fileStatement}
+            forms={forms}
+            onForgotten={acceptForget}
+          />
         )}
       </main>
     </div>
