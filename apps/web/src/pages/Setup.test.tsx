@@ -171,6 +171,10 @@ describe('access rule in Setup', () => {
   it('saves the switch for a site a member named, and leaves it off until then', async () => {
     const { saved, user } = openRule();
     const named = await screen.findByRole('switch', { name: 'Open a site a member named' });
+    const visible = screen.getByText('Open a site a member named');
+    expect(visible.closest('[role="switch"]')).toBeNull();
+    expect(visible.closest('.bar')).toBe(named.closest('.bar'));
+    expect(named.parentElement?.textContent).toContain('Off');
     expect(named.getAttribute('aria-checked')).toBe('false');
     expect(screen.getByText(/a site someone on their own device names/)).toBeDefined();
     const release = holdBack('PUT', '/rules/access');

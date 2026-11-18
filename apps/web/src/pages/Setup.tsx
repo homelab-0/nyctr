@@ -144,11 +144,14 @@ function RulePanel({ rules, reload }: { rules: Rules; reload: () => void }) {
           </span>
         </div>
         <div className="bar">
-          <Switch
-            label="Open a site a member named"
-            checked={rule.allow_statement === true}
-            onChange={(allow_statement) => save((current) => ({ ...current, allow_statement }))}
-          />
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+            <span>Open a site a member named</span>
+            <Switch
+              label="Open a site a member named"
+              checked={rule.allow_statement === true}
+              onChange={(allow_statement) => save((current) => ({ ...current, allow_statement }))}
+            />
+          </span>
           <span className="aside">
             With this off, a site someone on their own device names always waits for you. On, it
             follows the same rule as any other request.
