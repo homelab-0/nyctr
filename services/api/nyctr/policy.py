@@ -53,6 +53,8 @@ class AccessRule(BaseModel):
     enabled: bool = False
     per_day: int = Field(default=4, ge=1, le=20)  # Automatic openings a day for each person.
     daily_total: int = Field(default=10, ge=1, le=100)  # And for everyone together.
+    # A site a member named. Off, which is the start, always leaves that request to a person.
+    allow_statement: bool = False
     ad_tracker: AdTier = Field(default_factory=AdTier)
     threat_feed: ThreatTier = Field(default_factory=ThreatTier)
 
@@ -189,7 +191,7 @@ def may_open(rule: AccessRule, facts: Facts) -> Decision:
         ("mode", lambda: limits.mode in ("shadow", "on")),
         ("can_open", lambda: facts.can_open),
         ("changes_on", lambda: facts.changes_on),
-        ("match", lambda: facts.match in MATCHES),
+        ("match", lambda: facts.match in MATCHES or (facts.match == "statement" and rule.allow_statement)),
         ("conditions", conditions),
         ("declined", lambda: not facts.declined),
         ("analysis", analysis),

@@ -217,7 +217,12 @@ audit record (`rule.access_checked`):
    before anything else about the block is looked at.
 3. The tier is switched on (record only goes on, and opens nothing).
 4. Nyctr can open the address where it is blocked, and changes are allowed there.
-5. The block is tied to the device by an assignment or an administrator's link.
+5. The block is tied to the device by an assignment or an administrator's link,
+   or the request's match is `statement` and the rule's `allow_statement` switch
+   is on. The switch is off until an administrator turns it on. Off, that match
+   waits for a person even when every later check would pass. On, this check
+   passes and the rest of the rule decides. A deliberate block, or one Nyctr
+   cannot score, still fails at check 2, so the switch cannot open it.
 6. The tier's own conditions hold: for advertising lists, a score at or below
    the written limit (never above 60). An unknown score fails.
 7. No administrator said no to that address before.

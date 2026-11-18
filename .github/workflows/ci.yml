@@ -48,7 +48,7 @@ jobs:
           # The cases that need a PostgreSQL server make and drop a database of their own on this one.
           NYCTR_TEST_POSTGRES: postgresql+psycopg://postgres:ci-fabricated-only@127.0.0.1:5432/
       - name: Fail if a PostgreSQL case did not pass, and count the ones that did
-        run: python scripts/postgres_cases.py test-results/api.xml --minimum 88
+        run: python scripts/postgres_cases.py test-results/api.xml --minimum 90
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()
         with:

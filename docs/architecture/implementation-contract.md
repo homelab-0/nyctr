@@ -147,12 +147,15 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   or demo. `PUT /api/collection` (admin) with
   `{enabled,minutes}` where minutes is one of `choices`; 409 in demo mode.
   `writes` maps `nextdns` and `unifi_network` to simulated, enabled or disabled.
-- `PUT /api/rules/access` with `{enabled,per_day 1–20,daily_total 1–100,
+- `PUT /api/rules/access` with `{enabled,allow_statement,per_day 1–20,daily_total 1–100,
   ad_tracker:{mode,max_score 0–60,max_minutes 15–240},
   threat_feed:{mode,max_minutes 15–240,min_registered_days 30–3650}}`. `mode` is
   off, shadow (record only) or on for `ad_tracker`, and only off for
   `threat_feed`, whose `max_minutes` cannot be above `ad_tracker`'s. No other
-  tier can be named. The form before tiers (`{enabled,max_score,max_minutes,
+  tier can be named. `allow_statement` defaults to false. Left out of a save, it
+  is stored false. Off, a statement always waits for a person. On, the rule
+  decides it as any other request. A deliberate block or an unknown score still
+  waits. The form before tiers (`{enabled,max_score,max_minutes,
   per_day}`) is read from storage and refused here. Read back, its daily total
   is the old limit for each person times the number of active accounts, from
   1 to 100. A rule written with this route starts at 10 when the total is left
