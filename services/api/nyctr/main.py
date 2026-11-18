@@ -215,6 +215,18 @@ async def _finish_request(app, request_id: str) -> None:
         raise
 
 
+def _stored_event(db: Session, user_id: str, block_id: str) -> AccessRequest | None:
+    """The one event for this member and block.
+
+    An event has no device id. A row stored before the basis column is still
+    that event. A statement names a device, so it is not this row.
+    """
+    return db.scalar(select(AccessRequest).where(
+        AccessRequest.requester_id == user_id,
+        AccessRequest.block_id == block_id,
+        AccessRequest.device_id.is_(None)))
+
+
 def create_app(settings: Settings | None = None):
     """Build the configured API, authorization dependencies, database lifecycle, and optional static host.
 
@@ -922,7 +934,9 @@ def create_app(settings: Settings | None = None):
 
         The analysis and the rule run as a claimed job after the answer. Hidden or missing events
         return 404; expired events return 409. The stored domain and device survive inbox expiry.
-        A duplicate submit returns the stored request and does not start a second job.
+        A duplicate submit returns the stored event for this member and block and does not start
+        a second job. That event is the row with no device id, including one stored before the
+        basis column. A statement filed for a device is a different request.
         """
         user = auth[0]
         observation = db.get(Observation, body.block_id)
@@ -931,8 +945,7 @@ def create_app(settings: Settings | None = None):
         if utc(observation.expires_at) <= utcnow():
             raise HTTPException(409, "This block event has expired. Try accessing the site again.")
         administrator = user.role == "admin"
-        existing = db.scalar(select(AccessRequest).where(AccessRequest.requester_id == user.id,
-                                                        AccessRequest.block_id == observation.id))
+        existing = _stored_event(db, user.id, observation.id)
         if existing:
             return access.shown(db, existing, admin=administrator)
         row = AccessRequest(block_id=observation.id, domain=observation.domain, device_name=observation.device_name,
@@ -946,8 +959,7 @@ def create_app(settings: Settings | None = None):
             db.commit()
         except IntegrityError:
             db.rollback()
-            existing = db.scalar(select(AccessRequest).where(AccessRequest.requester_id == user.id,
-                                                            AccessRequest.block_id == observation.id))
+            existing = _stored_event(db, user.id, observation.id)
             if not existing:
                 raise
             return access.shown(db, existing, admin=administrator)
