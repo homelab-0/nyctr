@@ -172,6 +172,8 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   waits, and an entry this opening added is removed on the next upkeep tick.
   The sign-in does not have to remain. An event request, and a row whose basis
   is empty, is left on the path that filed it. No route files a statement.
+  The statement module is not included by the application that serves requests,
+  so `POST /api/statements` is not a path there.
   The form before tiers (`{enabled,max_score,max_minutes,
   per_day}`) is read from storage and refused here. Read back, its daily total
   is the old limit for each person times the number of active accounts, from
