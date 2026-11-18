@@ -94,7 +94,8 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   A live session with a bad mutation token stays 403 and does not write that
   audit. The answer never includes another device, member or lookup. The stored
   device id is not part of the AccessRequest JSON below. A statement whose
-  member may no longer use that device waits for a person. Nothing is opened.
+  member may no longer use that device, or whose account is missing or
+  inactive, waits for a person. Nothing is opened.
 - `GET /api/blocks/one?id=` -> Block, for an event on any page of the list. An event that is
   missing, expired or not visible to the caller answers the same 404.
 - `GET /api/me/device` -> `{device_id,name,simulated,how,reason,message}`; only among the

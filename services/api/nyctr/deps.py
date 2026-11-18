@@ -147,16 +147,27 @@ def statement_current(db, row) -> bool:
 
     An event request is left to the path that filed it. A statement needs the
     device id from when it was filed, and that member must still be allowed to
-    use the device by an assignment or a live tie. A sign-in session is not
-    that permission. A missing device cannot prove it.
+    use the device by an assignment or a live tie. The account is read again
+    from the database, so a copy already held in this session cannot hide a
+    disable or a removal. A sign-in session is not that permission. A missing
+    device cannot prove it.
     """
     if getattr(row, "basis", None) != "statement":
         return True
     if not row.device_id or not row.requester_id:
         return False
-    user = db.get(User, row.requester_id)
+    user = db.scalar(select(User).where(User.id == row.requester_id)
+                     .execution_options(populate_existing=True))
+    if user is None:
+        # Removed since this session loaded it, the row can still sit in the identity map.
+        cached = db.get(User, row.requester_id)
+        if cached is not None:
+            db.expire(cached)
+            user = db.get(User, row.requester_id)
+    if user is None or not user.active:
+        return False
     device = db.get(Resource, row.device_id)
-    return user is not None and device_permitted(db, device, user)
+    return device_permitted(db, device, user)
 
 
 def device_permitted(db, resource, user, when=None):

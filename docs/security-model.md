@@ -222,8 +222,8 @@ audit record (`rule.access_checked`):
    The switch is off until an administrator turns it on. Off, a request a member
    filed by naming a site waits for a person even when every later check would
    pass. On, this check passes and the rest of the rule decides. A deliberate
-   block, or one Nyctr cannot score, still fails at check 2, so the switch
-   cannot open it.
+   block, or a tier Nyctr does not recognise, still fails at check 2, so the
+   switch cannot open it. A block Nyctr cannot score fails at check 6.
 6. The tier's own conditions hold: for advertising lists, a score at or below
    the written limit (never above 60). An unknown score fails.
 7. No administrator said no to that address before.
@@ -256,10 +256,13 @@ Assignment or a live tie is checked only after that device is known. The
 demonstration uses the same device the member's page shows. The request stores
 that device's id. The device's display name is only a label. Before the rule
 opens a statement, Nyctr checks again that this member may still use that
-device. If not, the request waits for a person and nothing is opened. An
-assignment or a live tie is enough for that check. The sign-in does not have
-to still be open. A request filed from a block the member could already see
-is not part of that check. Without a portal address the one address is used.
+device and that the account is still there and active. The account is read
+again from the database, including after the provider has been asked. If
+the device or the account no longer qualifies, the request waits for a
+person and nothing is opened. An assignment or a live tie is enough for
+the device. The sign-in does not have to still be open. A request filed
+from a block the member could already see is not part of that check.
+Without a portal address the one address is used.
 With one, the console address is refused. Five attempts are kept for each
 member in a fixed hour that starts at the first attempt, including a name
 that matches nothing and a repeat of an open request, and each is audited
