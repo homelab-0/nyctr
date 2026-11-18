@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react';
 import {
   ArrowLeft,
   Check,
@@ -46,6 +54,23 @@ import type {
   Resource,
   ThisDevice,
 } from '../../types';
+import { SiteStatement } from './SiteStatement';
+import {
+  acknowledgeRefresh,
+  allowRetry,
+  newFollow,
+  noteDecision,
+  openingEvidence,
+  refreshNeed,
+  replaceSession,
+  startRefresh,
+  type RefreshRound,
+} from './statementEvidence';
+import {
+  useStatementRequests,
+  type EvidenceList,
+  type StatementView,
+} from './useStatementRequests';
 
 /** Steps to make a device forget that an address was blocked. Wording is deliberately non-technical. */
 const RECONNECT: Record<DeviceOs, { name: string; steps: string[] }> = {
@@ -131,6 +156,18 @@ function useMemberData() {
   return { blocks, requests, leases, device, devices, coverage, ties };
 }
 type Data = ReturnType<typeof useMemberData>;
+type Statements = ReturnType<typeof useStatementRequests>;
+
+/**
+ * A failed read is not an empty list, even when the previous rows are still on screen.
+ * Those rows stay visible in the page that already had them. They are not new evidence.
+ */
+function asEvidence<T>(read: { data: readonly T[] | null; error: string | null }): EvidenceList<T> {
+  if (read.error || read.data === null) {
+    return { availability: read.error ? 'error' : 'unloaded', rows: [] };
+  }
+  return { availability: 'loaded', rows: read.data };
+}
 
 const ASK = 'Ask whoever runs Nyctr';
 
@@ -186,7 +223,17 @@ function TiesNotRead({ data }: { data: Data }) {
 }
 
 /** A plain button that ends the tie a sign-in made to a device. Shown only where there is such a tie. */
-function Forget({ data, device, name }: { data: Data; device: string; name: string }) {
+function Forget({
+  data,
+  device,
+  name,
+  onAccepted,
+}: {
+  data: Data;
+  device: string;
+  name: string;
+  onAccepted: (deviceId: string) => void;
+}) {
   const [error, setError] = useState<string | null>(null);
   const tie = data.ties.data?.items.find((row) => row.kind === 'tie' && row.device_id === device);
   if (!tie) return null;
@@ -194,6 +241,8 @@ function Forget({ data, device, name }: { data: Data; device: string; name: stri
     setError(null);
     try {
       await api(`/presence/${encodeURIComponent(tie.id)}`, { method: 'DELETE' });
+      // The acceptance is dropped before the device is read again. A failed delete does not do this.
+      onAccepted(device);
       for (const read of [data.ties, data.device, data.devices, data.blocks]) read.reload();
     } catch (e) {
       setError((e as Error).message);
@@ -283,7 +332,15 @@ function BlockRow({
 }
 
 /** Home: blocks on the device in hand first, then the member's other devices, plus a search. */
-function Home({ data }: { data: Data }) {
+function Home({
+  data,
+  statements,
+  onForgotten,
+}: {
+  data: Data;
+  statements: Statements;
+  onForgotten: (deviceId: string) => void;
+}) {
   const [text, setText] = useState('');
   const [found, setFound] = useState<Block[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -383,7 +440,14 @@ function Home({ data }: { data: Data }) {
                 : here.how === 'assigned'
                   ? ', a device assigned to you. '
                   : '.'}
-            {here.device_id && <Forget data={data} device={here.device_id} name="this device" />}
+            {here.device_id && (
+              <Forget
+                data={data}
+                device={here.device_id}
+                name="this device"
+                onAccepted={onForgotten}
+              />
+            )}
           </p>
         ) : (
           <p className="lede">
@@ -418,6 +482,19 @@ function Home({ data }: { data: Data }) {
         </button>
       </form>
       <InlineError message={error} />
+      {here?.device_id && !data.device.error && user && (
+        <SiteStatement
+          userId={user.id}
+          deviceId={here.device_id}
+          ask={statements.ask}
+          notice={statements.notice}
+          draft={statements.draft}
+          openForm={statements.openForm}
+          closeForm={statements.closeForm}
+          editDraft={statements.editDraft}
+          onFile={statements.file}
+        />
+      )}
       {/* Without the list of requests, a site already asked about looks like one that was not. */}
       {data.requests.error && (
         <p className="aside" role="status">
@@ -506,7 +583,15 @@ function Home({ data }: { data: Data }) {
 }
 
 /** One block: why it was blocked, the score and what went into it, and the form to ask. */
-function BlockDetail({ data, id }: { data: Data; id: string }) {
+function BlockDetail({
+  data,
+  id,
+  reloadEvidence,
+}: {
+  data: Data;
+  id: string;
+  reloadEvidence: () => Promise<void>;
+}) {
   const [reason, setReason] = useState('');
   const [minutes, setMinutes] = useState('60');
   const [pending, setPending] = useState(false);
@@ -567,8 +652,7 @@ function BlockDetail({ data, id }: { data: Data; id: string }) {
         reason: reason.trim(),
         duration_minutes: Number(minutes),
       });
-      data.requests.reload();
-      data.leases.reload();
+      void reloadEvidence();
       window.location.hash = `/portal?request=${row.id}`;
     } catch (e) {
       setError((e as Error).message);
@@ -664,27 +748,35 @@ function CheckNote({ failed, againMs }: { failed: boolean; againMs: number | nul
 }
 
 /** The outcome of a request: open (with reconnect steps), waiting, or declined. Never vague. */
-function Result({ data, id, againMs }: { data: Data; id: string; againMs: number | null }) {
+function Result({
+  data,
+  id,
+  againMs,
+  statements,
+  onRetryOpening,
+}: {
+  data: Data;
+  id: string;
+  againMs: number | null;
+  statements: Statements;
+  onRetryOpening: () => void;
+}) {
   const [os, setOs] = useState<DeviceOs>(detectOs());
   const now = useNow(5000);
+  const resolved = statements.resolve(id);
+  const kept = statements.kept(id);
+  const row = resolved.request;
   // Both lists are already on screen. A later failure must not replace them with the error screen.
   const held = data.requests.data !== null && data.leases.data !== null;
-  if (!held && (data.requests.loading || data.leases.loading)) return <Loading />;
-  // Without both lists the outcome is not known, so none is shown.
   const unread = data.requests.error || data.leases.error;
-  if (!held && unread)
+  const reloadLists = onRetryOpening;
+  if (!row && !held && (data.requests.loading || data.leases.loading)) return <Loading />;
+  if (!row && !held && unread)
     return (
       <div className="m-col">
-        <ErrorState
-          message={unread}
-          retry={() => {
-            data.requests.reload();
-            data.leases.reload();
-          }}
-        />
+        <ErrorState message={unread} retry={reloadLists} />
       </div>
     );
-  const row = (data.requests.data || []).find((item) => item.id === id);
   if (!row)
     return (
       <div className="m-col">
@@ -699,7 +791,14 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
         />
       </div>
     );
-  const lease = (data.leases.data || []).find((item) => item.request_id === row.id);
+  const leaseList = asEvidence(data.leases).availability;
+  const lease =
+    leaseList === 'loaded'
+      ? ((data.leases.data || []).find((item) => item.request_id === row.id) ?? null)
+      : null;
+  const opening = openingEvidence({ status: row.status, lease, leaseList });
+  const listBehind = resolved.source === 'retained' && !!kept?.refreshed;
+  const unknown = opening.availability === 'unknown' && lease?.status !== 'unconfirmed';
   // Open only when the source was changed. A simulated opening opened nothing, and says so.
   const open = !!lease && isOpen(lease);
   const simulated = lease?.execution === 'simulated' && lease.status !== 'unconfirmed';
@@ -710,6 +809,16 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
       <a className="back" href="#/portal">
         <ArrowLeft size={16} /> Blocked sites
       </a>
+      {listBehind && (
+        <p className="aside" role="status">
+          {data.requests.error
+            ? `${data.requests.error} Your request was still filed.`
+            : 'Nyctr filed this request, but it is not in the list yet.'}{' '}
+          <button type="button" className="linklike" onClick={reloadLists}>
+            Try again
+          </button>
+        </p>
+      )}
       {open ? (
         <>
           <header className="m-result ok">
@@ -775,6 +884,9 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
             Nyctr could not confirm whether {row.domain} was opened, so it may or may not work.
             Check back in a little while.
           </p>
+          <button type="button" className="linklike" onClick={onRetryOpening}>
+            Check the opening again
+          </button>
         </header>
       ) : row.status === 'analysing' ? (
         <header className="m-result wait">
@@ -837,6 +949,19 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
               : 'Someone looked at this request and did not open the address.'}
           </p>
         </header>
+      ) : unknown ? (
+        <header className="m-result wait">
+          <span className="m-badge">
+            <Hourglass size={24} />
+          </span>
+          <h1 className="display d1">Nyctr could not check whether this opened.</h1>
+          <p className="lede">
+            The request for <b className="dom">{row.domain}</b> is filed. {opening.explanation}
+          </p>
+          <button type="button" className="linklike" onClick={onRetryOpening}>
+            Check the opening again
+          </button>
+        </header>
       ) : (
         <header className="m-result wait">
           <span className="m-badge">
@@ -844,7 +969,9 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
           </span>
           <h1 className="display d1">Approved, but not switched on yet.</h1>
           <p className="lede">
-            An administrator said yes and still has to turn it on. Check back in a little while.
+            {opening.availability === 'read' && opening.explanation
+              ? opening.explanation
+              : 'An administrator said yes and still has to turn it on. Check back in a little while.'}
           </p>
         </header>
       )}
@@ -872,7 +999,16 @@ function Result({ data, id, againMs }: { data: Data; id: string; againMs: number
   );
 }
 
-function MyRequests({ data, againMs }: { data: Data; againMs: number | null }) {
+function MyRequests({
+  data,
+  againMs,
+  onRetryOpening,
+}: {
+  data: Data;
+  againMs: number | null;
+  onRetryOpening: () => void;
+}) {
+  const { user } = useAuth();
   const now = useNow();
   // The reason stands only over an empty list of blocked sites. With one listed there is
   // something to ask about, whatever the collection is doing.
@@ -886,21 +1022,20 @@ function MyRequests({ data, againMs }: { data: Data; againMs: number | null }) {
     return (
       <div className="m-col">
         <h1 className="display d2">My requests</h1>
-        <ErrorState
-          message={unread}
-          retry={() => {
-            data.requests.reload();
-            data.leases.reload();
-          }}
-        />
+        <ErrorState message={unread} retry={onRetryOpening} />
       </div>
     );
-  const rows = data.requests.data || [];
-  const leaseFor = new Map((data.leases.data || []).map((lease) => [lease.request_id, lease]));
+  const rows = (data.requests.data || []).filter((row) => row.requester_id === user?.id);
+  const leaseFor = new Map(asEvidence(data.leases).rows.map((lease) => [lease.request_id, lease]));
   return (
     <div className="m-col">
       <h1 className="display d2">My requests</h1>
       <CheckNote failed={Boolean(unread)} againMs={againMs} />
+      {data.leases.error && (
+        <button type="button" className="linklike" onClick={onRetryOpening}>
+          Check the openings again
+        </button>
+      )}
       {rows.length === 0 ? (
         <Empty
           title="You have not asked for anything yet"
@@ -931,7 +1066,7 @@ function MyRequests({ data, againMs }: { data: Data; againMs: number | null }) {
   );
 }
 
-function MyDevices({ data }: { data: Data }) {
+function MyDevices({ data, onForgotten }: { data: Data; onForgotten: (deviceId: string) => void }) {
   const devices = data.devices;
   if (devices.loading) return <Loading />;
   if (devices.error) return <ErrorState message={devices.error} retry={devices.reload} />;
@@ -960,7 +1095,7 @@ function MyDevices({ data }: { data: Data }) {
                     ? 'Yours'
                     : 'You signed in on it'}
               </span>
-              <Forget data={data} device={device.id} name={device.name} />
+              <Forget data={data} device={device.id} name={device.name} onAccepted={onForgotten} />
             </span>
             {data.device.data?.device_id === device.id && (
               <span className="tag blue">This device</span>
@@ -976,58 +1111,110 @@ function MyDevices({ data }: { data: Data }) {
  * The member portal. One calm column: what was blocked, why, and a single way to ask.
  * Members see only their own devices' blocks; the server enforces that, not this page.
  */
-export default function Portal({ page, params }: { page: string; params: URLSearchParams }) {
+export default function Portal(props: { page: string; params: URLSearchParams }) {
+  const { user } = useAuth();
+  // API reads and refresh rounds belong to one committed sign-in. A discarded render
+  // for another member never replaces this member's mounted page or controller.
+  return user ? <MemberPortal key={user.id} {...props} /> : null;
+}
+
+function MemberPortal({ page, params }: { page: string; params: URLSearchParams }) {
   const { user, logout } = useAuth();
   const data = useMemberData();
   const [error, setError] = useState<string | null>(null);
   const block = params.get('block');
   const request = params.get('request');
   const section = page === 'requests' || page === 'devices' ? page : 'portal';
-  // My requests and a request's own page keep reading while one of this member's
-  // requests is still undecided, so the answer shows up where they are already looking.
-  // After a decision, the openings are read once more, so one written with the decision
-  // is not missed. Each yes has its own later read: a second ask does not reuse the first.
-  // That read happens once, then stops, even when no opening is there. A no does not ask
-  // again. A failed lease read keeps reading until one succeeds.
-  const undecided = (data.requests.data ?? []).some(
-    (row) => row.status === 'pending' || row.status === 'analysing',
-  );
-  const follow = useRef({ saw: false, sawSpent: false, checked: new Set<string>() });
-  if (undecided) {
-    follow.current.saw = true;
-    follow.current.sawSpent = false;
-  }
-  const leaseFor = new Set((data.leases.data ?? []).map((item) => item.request_id));
-  const onList = section === 'requests';
-  const onRequest = section === 'portal' && request !== null;
-  const owed = (data.requests.data ?? []).filter(
-    (row) =>
-      (onList || onRequest) &&
-      data.leases.data !== null &&
-      !data.leases.error &&
-      (onList || row.id === request) &&
-      (row.status === 'approved' || row.status === 'auto_approved') &&
-      !leaseFor.has(row.id) &&
-      !follow.current.checked.has(row.id),
-  );
-  const needSaw =
-    follow.current.saw && !undecided && !follow.current.sawSpent && data.requests.data !== null;
-  // The later read waits until nothing is undecided, so a request that is still
-  // waiting does not use up the read meant for its own decision.
-  const needExtra = !undecided && data.requests.data !== null && (needSaw || owed.length > 0);
-  const waiting =
-    (section === 'requests' || (section === 'portal' && request !== null)) &&
-    (undecided || (data.requests.data !== null && Boolean(data.leases.error)) || needExtra);
-  const again = useRefreshWhile(waiting, () => {
-    const finishing = needExtra;
-    const spendSaw = needSaw;
-    const confirming = owed.map((row) => row.id);
-    return Promise.all([data.requests.reload(), data.leases.reload()]).finally(() => {
-      if (!finishing) return;
-      if (spendSaw) follow.current.sawSpent = true;
-      for (const id of confirming) follow.current.checked.add(id);
+  const memberId = user?.id ?? '';
+  const view: StatementView =
+    section === 'requests'
+      ? 'requests'
+      : section === 'devices'
+        ? 'devices'
+        : block
+          ? 'block'
+          : request
+            ? 'request'
+            : 'home';
+  // The controller owns retained requests. The evidence helper owns refresh debt;
+  // this page only schedules reads and acknowledges the lease result after commit.
+  const follow = useRef(newFollow());
+  const awaiting = useRef<RefreshRound | null>(null);
+  const watched = useRef(new Set<string>());
+  const decisionRef = useRef<(() => ReturnType<typeof refreshNeed>) | null>(null);
+  const [, setTick] = useState(0);
+  const reloadEvidence = useCallback(() => {
+    const decision = decisionRef.current?.();
+    const round = decision ? startRefresh(follow.current, decision) : null;
+    const requestsRead = data.requests.reload();
+    const leasesRead = data.leases.reload().then(() => {
+      // Superseded reloads settle too. Only the newest round may acknowledge its
+      // committed result; its request and lease state updates precede this tick.
+      if (
+        !round ||
+        round.session !== follow.current.session ||
+        round.round !== follow.current.round
+      )
+        return;
+      awaiting.current = round;
+      setTick((value) => value + 1);
     });
+    return Promise.all([requestsRead, leasesRead]).then(() => undefined);
+  }, [data.leases.reload, data.requests.reload]);
+  const statements = useStatementRequests({
+    userId: memberId,
+    deviceId: data.device.error ? '' : (data.device.data?.device_id ?? ''),
+    view,
+    openRequestId: request,
+    blockId: block,
+    requests: asEvidence(data.requests),
+    reloadEvidence,
   });
+  const watchIds = new Set(watched.current);
+  if (statements.notice) watchIds.add(statements.notice.request.id);
+  if (request) watchIds.add(request);
+  for (const row of asEvidence(data.requests).rows) {
+    if (row.requester_id === memberId) watchIds.add(row.id);
+  }
+  const getDecision = () =>
+    refreshNeed({
+      view,
+      openRequestId: request,
+      resolve: statements.resolve,
+      watchIds: [...watchIds],
+      requestsAvailability: asEvidence(data.requests).availability,
+      leases: asEvidence(data.leases),
+      sawUndecided: follow.current.saw,
+      spentFinal: follow.current.spent,
+      finalFailed: follow.current.finalFailed,
+      checkedLeaseIds: [...follow.current.checked],
+    });
+  const decision = getDecision();
+  useLayoutEffect(() => {
+    // Observe only committed requests, before a lease completion can acknowledge
+    // its round. Newly observed undecided work fences an older completion.
+    watched.current = watchIds;
+    decisionRef.current = getDecision;
+    noteDecision(follow.current, decision);
+    const round = awaiting.current;
+    if (!round || data.leases.loading) return;
+    awaiting.current = null;
+    acknowledgeRefresh(follow.current, round, asEvidence(data.leases).availability);
+    setTick((value) => value + 1);
+  });
+  useEffect(
+    () => () => {
+      replaceSession(follow.current);
+      awaiting.current = null;
+      decisionRef.current = null;
+    },
+    [],
+  );
+  const again = useRefreshWhile(decision.continue, reloadEvidence);
+  const retryOpening = () => {
+    allowRetry(follow.current);
+    void reloadEvidence();
+  };
   useEffect(() => {
     document.title = 'Blocked sites · Nyctr';
     window.scrollTo?.(0, 0);
@@ -1070,16 +1257,22 @@ export default function Portal({ page, params }: { page: string; params: URLSear
       <main id="main-content">
         <InlineError message={error} />
         {section === 'requests' ? (
-          <MyRequests data={data} againMs={again} />
+          <MyRequests data={data} againMs={again} onRetryOpening={retryOpening} />
         ) : section === 'devices' ? (
-          <MyDevices data={data} />
+          <MyDevices data={data} onForgotten={statements.acceptForget} />
         ) : request ? (
-          <Result data={data} id={request} againMs={again} />
+          <Result
+            data={data}
+            id={request}
+            againMs={again}
+            statements={statements}
+            onRetryOpening={retryOpening}
+          />
         ) : block ? (
           // Keyed by the block: what was read or typed for one never stands under another.
-          <BlockDetail key={block} data={data} id={block} />
+          <BlockDetail key={block} data={data} id={block} reloadEvidence={reloadEvidence} />
         ) : (
-          <Home data={data} />
+          <Home data={data} statements={statements} onForgotten={statements.acceptForget} />
         )}
       </main>
     </div>

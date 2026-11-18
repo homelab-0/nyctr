@@ -1,12 +1,22 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import {
+  createContext,
+  startTransition,
+  Suspense,
+  useContext,
+  useLayoutEffect,
+  useState,
+} from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App';
 import { setCsrfToken } from '../../api';
 import { AuthProvider } from '../../auth';
+import * as auth from '../../auth';
 import { blockList, mockApi } from '../../test/mock-api';
 import { memberSchedule } from '../../test/schedule';
 import type { AccessRequest, Block, Lease, User } from '../../types';
+import Portal from './Portal';
 
 const member: User = {
   id: 'sam',
@@ -105,6 +115,7 @@ const scrollTo = window.scrollTo.bind(window);
 beforeEach(() => setCsrfToken(''));
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   window.scrollTo = scrollTo;
   vi.useRealTimers();
   Reflect.deleteProperty(document, 'visibilityState');
@@ -624,7 +635,11 @@ describe('what the member portal says happened', () => {
       { 'GET /requests': [request({})], 'GET /leases': { __status: 500, detail: 'Unavailable' } },
       '/portal?request=r1',
     );
-    expect(await screen.findByRole('button', { name: 'Try again' })).toBeDefined();
+    expect(await screen.findByRole('button', { name: 'Check the opening again' })).toBeDefined();
+    expect(
+      screen.getByRole('heading', { name: 'Nyctr could not check whether this opened.' }),
+    ).toBeDefined();
+    expect(document.body.textContent).toContain('photos.example');
     expect(document.body.textContent).not.toMatch(/It's open|not switched on|could not be found/);
   });
 
@@ -1389,7 +1404,7 @@ describe('an answer while the member page stays open', () => {
     phase = 'approved';
     await advance(5_000);
     expect(
-      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+      screen.getByRole('heading', { name: 'Nyctr could not check whether this opened.' }),
     ).toBeDefined();
     expect(document.body.textContent).toContain(
       'The latest check failed. Trying again in 5 seconds.',
@@ -1399,10 +1414,18 @@ describe('an answer while the member page stays open', () => {
     expect(reads(calls, '/leases')).toBe(during + 1);
     expect(reads(calls, '/requests')).toBe(during + 1);
     expect(
-      screen.getByRole('heading', { name: 'Approved, but not switched on yet.' }),
+      screen.getByRole('heading', { name: 'Nyctr could not check whether this opened.' }),
     ).toBeDefined();
+    // The first failure began before the decision. The fresh, final read also
+    // fails, so automatic watching stops with unknown evidence and a real retry.
+    const stopped = reads(calls, '/leases');
+    await advance(30_000);
+    expect(reads(calls, '/leases')).toBe(stopped);
+    expect(document.body.textContent).toContain('The latest check failed.');
+    expect(document.body.textContent).not.toContain('Trying again');
     phase = 'open';
-    await advance(5_000);
+    fireEvent.click(screen.getByRole('button', { name: 'Check the opening again' }));
+    await paint();
     expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
     expect(document.body.textContent).not.toContain('The latest check failed');
     const settled = reads(calls, '/leases');
@@ -1658,6 +1681,7 @@ describe('independent confirmation: stop and retry boundaries', () => {
     async (path) => {
       clock();
       let count = 0;
+      const applied = lease();
       const { calls } = open(
         {
           ...quiet,
@@ -1666,7 +1690,7 @@ describe('independent confirmation: stop and retry boundaries', () => {
             count += 1;
             if (count === 1) return [];
             if (count <= 3) return { __status: 500, detail: 'Fabricated lease failure' };
-            return [lease()];
+            return [applied];
           },
         },
         path,
@@ -1675,10 +1699,17 @@ describe('independent confirmation: stop and retry boundaries', () => {
       await advance(5_000);
       await paint();
       expect(count).toBe(2);
-      await advance(5_000);
+      await advance(25_000);
+      expect(count).toBe(2);
+      const retryName = path.startsWith('/portal')
+        ? 'Check the opening again'
+        : 'Check the openings again';
+      fireEvent.click(screen.getByRole('button', { name: retryName }));
       await paint();
       expect(count).toBe(3);
-      await advance(5_000);
+      await advance(25_000);
+      expect(count).toBe(3);
+      fireEvent.click(screen.getByRole('button', { name: retryName }));
       await paint();
       expect(count).toBe(4);
       if (path.startsWith('/portal'))
@@ -1807,4 +1838,1134 @@ describe('independent confirmation: stop and retry boundaries', () => {
         );
     },
   );
+});
+
+describe('a site the member names', () => {
+  const filed = request({
+    id: 'r-ask',
+    domain: 'ads.example',
+    status: 'analysing',
+    reason: 'The page did not open.',
+    decided_by: null,
+    decision_note: null,
+    risk_score: null,
+    risk_category: null,
+    risk_factors: null,
+  });
+  const answer = {
+    matched: true,
+    message: 'That name was blocked recently. Nyctr has filed your request.',
+    request: filed,
+  };
+
+  function holdPost() {
+    let release: (value: typeof answer) => void = () => {};
+    const gate = new Promise<typeof answer>((resolve) => {
+      release = resolve;
+    });
+    return { gate, release: () => release(answer) };
+  }
+
+  const ask = async (value: string) => {
+    const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+    fireEvent.change(input, { target: { value } });
+    fireEvent.submit(input.closest('form')!);
+    return input;
+  };
+
+  it('does not offer the form when this device is not recognised', async () => {
+    open({ 'GET /me/device': { device_id: null, name: null, simulated: false } });
+    await screen.findByRole('heading', { name: 'What got blocked?' });
+    expect(screen.queryByRole('heading', { name: 'A site did not open' })).toBeNull();
+    expect(screen.queryByLabelText('Site that did not open')).toBeNull();
+  });
+
+  it('keeps a blank name on the page and shows the refusal the server sent', async () => {
+    const { calls } = open({ ...quiet });
+    const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '   ' } });
+    expect(
+      (screen.getByRole('button', { name: 'Ask about this site' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.submit(input.closest('form')!);
+    expect(calls.filter((call) => call.path === '/statements')).toHaveLength(0);
+
+    const refusals = [
+      [422, 'Give the site as a name, like example.com.', 'https://'],
+      [
+        429,
+        'You have asked about five sites since the first one in this hour. Try again when that hour resets.',
+        'sixth.example',
+      ],
+      [
+        403,
+        'Nyctr does not recognise this device as yours, so it cannot take this request.',
+        'blocked.example',
+      ],
+    ] as const;
+    for (const [status, detail, typed] of refusals) {
+      cleanup();
+      open({ ...quiet, 'POST /statements': { __status: status, detail } });
+      const field = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: typed } });
+      fireEvent.submit(field.closest('form')!);
+      expect((await screen.findByRole('alert')).textContent).toContain(detail);
+      expect(field.value).toBe(typed);
+      expect(screen.queryByText('That request could not be found')).toBeNull();
+    }
+  });
+
+  it('says there was no recent block and keeps what was typed', async () => {
+    open({
+      ...quiet,
+      'POST /statements': {
+        matched: false,
+        message:
+          'Nyctr saw no recent block of that name. Open the page once more on this device, then try again in a few minutes.',
+      },
+    });
+    const input = await ask('missing.example');
+    expect(await screen.findByText(/saw no recent block/)).toBeDefined();
+    expect(input.value).toBe('missing.example');
+    expect(screen.getByRole('heading', { name: 'A site did not open' })).toBeDefined();
+  });
+
+  it('keeps the typed name while asking, then follows the request through to an opening', async () => {
+    clock();
+    const { gate, release } = holdPost();
+    let phase: 'empty' | 'checking' | 'open' = 'empty';
+    const opened = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'auto_approved',
+      reason: 'The page did not open.',
+      decision_note: 'Opened for 60 minutes by the access rule.',
+    });
+    const { calls } = open({
+      ...quiet,
+      'POST /statements': () =>
+        gate.then((body) => {
+          phase = 'checking';
+          return body;
+        }),
+      'GET /requests': () => (phase === 'empty' ? [] : phase === 'checking' ? [filed] : [opened]),
+      'GET /leases': () =>
+        phase === 'open'
+          ? [lease({ request_id: 'r-ask', domain: 'ads.example', execution: 'applied' })]
+          : [],
+    });
+    await paint();
+    const input = screen.getByLabelText('Site that did not open') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'HTTPS://Ads.Example/path' } });
+    fireEvent.submit(input.closest('form')!);
+    await paint();
+    expect(input.value).toBe('HTTPS://Ads.Example/path');
+    expect(input.disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Asking…' })).toBeDefined();
+    await act(async () => {
+      release();
+    });
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    phase = 'open';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).toContain('ads.example');
+    const posted = calls.filter((call) => call.method === 'POST' && call.path === '/statements');
+    expect(posted.map((call) => call.body)).toEqual([{ domain: 'HTTPS://Ads.Example/path' }]);
+  });
+
+  it('shows a demonstration opening as nothing opened', async () => {
+    let posted = false;
+    const decided = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'auto_approved',
+      reason: 'The page did not open.',
+    });
+    open({
+      ...quiet,
+      'POST /statements': () => {
+        posted = true;
+        return answer;
+      },
+      'GET /requests': () => (posted ? [decided] : []),
+      'GET /leases': () =>
+        posted
+          ? [lease({ request_id: 'r-ask', domain: 'ads.example', execution: 'simulated' })]
+          : [],
+    });
+    await ask('ads.example');
+    expect(await screen.findByRole('heading', { name: 'This is a demonstration.' })).toBeDefined();
+    expect(screen.queryByRole('heading', { name: "It's open." })).toBeNull();
+  });
+
+  it('still shows the filed request when the list cannot be read afterwards', async () => {
+    let posted = false;
+    open({
+      ...quiet,
+      'POST /statements': () => {
+        posted = true;
+        return answer;
+      },
+      'GET /requests': () =>
+        posted ? { __status: 500, detail: 'The request list could not be read.' } : [],
+    });
+    await ask('ads.example');
+    expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(screen.queryByText('That request could not be found')).toBeNull();
+    expect(document.body.textContent).toContain('The request list could not be read.');
+    expect(document.body.textContent).toContain('Your request was still filed.');
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+  });
+
+  it('does not come back to the request after the member has left, and keeps it when they return', async () => {
+    const { gate, release } = holdPost();
+    let posted = false;
+    const { user } = open({
+      ...quiet,
+      'POST /statements': () =>
+        gate.then((body) => {
+          posted = true;
+          return body;
+        }),
+      'GET /requests': () => (posted ? [filed] : []),
+    });
+    await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    await user.click(screen.getByRole('link', { name: 'My requests' }));
+    expect(await screen.findByRole('heading', { name: 'My requests' })).toBeDefined();
+    await act(async () => {
+      release();
+    });
+    expect(await screen.findByText('ads.example')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'My requests' })).toBeDefined();
+    expect(window.location.hash).not.toContain('request=');
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    await user.click(screen.getAllByRole('link', { name: 'Blocked sites' })[0]);
+    expect(await screen.findByText(/Nyctr filed your request for/)).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Open that request' }).getAttribute('href')).toBe(
+      '#/portal?request=r-ask',
+    );
+    expect(window.location.hash).not.toContain('request=');
+  });
+
+  it('does not open the request after the session has ended', async () => {
+    const { gate, release } = holdPost();
+    open({ ...quiet, 'POST /statements': () => gate });
+    await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    const hash = window.location.hash;
+    await act(async () => {
+      window.dispatchEvent(new Event('nyctr:session-expired'));
+    });
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+    await act(async () => {
+      release();
+    });
+    expect(window.location.hash).toBe(hash);
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    expect(screen.queryByText(/filed your request/)).toBeNull();
+    expect(screen.queryByText('ads.example')).toBeNull();
+  });
+
+  it('does not attach a late answer after this device is forgotten', async () => {
+    const { gate, release } = holdPost();
+    let tied = true;
+    let releaseDevice: (value: unknown) => void = () => {};
+    const deviceGate = new Promise((resolve) => {
+      releaseDevice = resolve;
+    });
+    let markDeviceRead: () => void = () => {};
+    const deviceReadStarted = new Promise<void>((resolve) => {
+      markDeviceRead = resolve;
+    });
+    const tie = {
+      id: 't1',
+      kind: 'tie',
+      device_id: 'laptop',
+      device_name: "Sam's laptop",
+      ended_at: null,
+    };
+    const forgotten = {
+      device_id: null,
+      name: null,
+      simulated: false,
+      how: null,
+      reason: 'forgotten',
+      message: 'Nyctr was asked to forget this device. Sign in again to have it recognised.',
+    };
+    open({
+      'GET /me/device': () => {
+        if (tied)
+          return { device_id: 'laptop', name: "Sam's laptop", simulated: false, how: 'signed_in' };
+        markDeviceRead();
+        return deviceGate;
+      },
+      'GET /devices': () =>
+        tied ? [{ id: 'laptop', name: "Sam's laptop", classification: 'unassigned' }] : [],
+      'GET /presence': () => ({ items: tied ? [tie] : [] }),
+      'DELETE /presence/t1': () => {
+        tied = false;
+        return { ok: true };
+      },
+      'POST /statements': () => gate,
+    });
+    await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    const hash = window.location.hash;
+    await act(async () => {
+      screen.getByRole('button', { name: 'Forget this device' }).click();
+    });
+    await deviceReadStarted;
+    await act(async () => {
+      release();
+    });
+    expect(window.location.hash).toBe(hash);
+    await act(async () => {
+      releaseDevice(forgotten);
+    });
+    expect(await screen.findByText(/Sign in again to have it recognised/)).toBeDefined();
+    expect(window.location.hash).not.toContain('request=');
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    expect(screen.queryByText('That request could not be found')).toBeNull();
+    expect(screen.queryByText(/filed your request/)).toBeNull();
+    expect(screen.queryByLabelText('Site that did not open')).toBeNull();
+  });
+
+  it('does not put an earlier answer on a name typed while that answer was still coming', async () => {
+    const { gate, release } = holdPost();
+    let posted = false;
+    open({
+      ...quiet,
+      'POST /statements': () =>
+        gate.then((body) => {
+          posted = true;
+          return {
+            ...body,
+            matched: false,
+            message:
+              'Nyctr saw no recent block of that name. Open the page once more on this device, then try again in a few minutes.',
+            request: undefined,
+          };
+        }),
+      'GET /requests': () => (posted ? [filed] : []),
+    });
+    const input = await ask('old.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    fireEvent.change(input, { target: { value: 'new.example' } });
+    await act(async () => {
+      release();
+    });
+    expect(input.value).toBe('new.example');
+    expect(screen.queryByText(/saw no recent block/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Asking…' })).toBeNull();
+    expect(window.location.hash).not.toContain('request=');
+
+    cleanup();
+    const second = holdPost();
+    let ready = false;
+    open({
+      ...quiet,
+      'POST /statements': () =>
+        second.gate.then((body) => {
+          ready = true;
+          return body;
+        }),
+      'GET /requests': () => (ready ? [filed] : []),
+    });
+    const again = await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    fireEvent.change(again, { target: { value: 'new.example' } });
+    await act(async () => {
+      second.release();
+    });
+    expect(again.value).toBe('new.example');
+    expect(window.location.hash).not.toContain('request=');
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    const note = await screen.findByText(/Nyctr filed your request for/);
+    expect(note.textContent).toContain('ads.example');
+    expect(note.textContent).not.toContain('new.example');
+    expect(screen.getByRole('link', { name: 'Open that request' })).toBeDefined();
+  });
+
+  it.each(['miss', 'filed'] as const)(
+    'a form opened again does not take the %s answer from the one that was left',
+    async (kind) => {
+      let posts = 0;
+      let releaseFirst: (value: unknown) => void = () => {};
+      const first = new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+      const { user, calls } = open({
+        ...quiet,
+        'POST /statements': () => (++posts === 1 ? first : new Promise(() => {})),
+        'GET /requests': () => (posts > 0 ? [filed] : []),
+      });
+      await ask('old.example');
+      await user.click(await screen.findByRole('link', { name: 'My requests' }));
+      await user.click((await screen.findAllByRole('link', { name: 'Blocked sites' }))[0]);
+      const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: 'new.example' } });
+      expect(screen.queryByRole('button', { name: 'Asking…' })).toBeNull();
+      fireEvent.submit(input.closest('form')!);
+      expect(calls.filter((call) => call.path === '/statements')).toHaveLength(2);
+      await act(async () => {
+        releaseFirst(
+          kind === 'miss'
+            ? { matched: false, message: 'Nyctr saw no recent block of that name.' }
+            : answer,
+        );
+      });
+      expect(input.value).toBe('new.example');
+      expect(window.location.hash).not.toContain('request=');
+      expect(screen.queryByText(/saw no recent block/)).toBeNull();
+      if (kind === 'filed') expect(screen.getByRole('status').textContent).toContain('ads.example');
+    },
+  );
+
+  it('does not call an opening unapplied when the injected lease read fails', async () => {
+    let leases: 'fail' | 'empty' | 'open' = 'fail';
+    const approved = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'auto_approved',
+      reason: 'The page did not open.',
+    });
+    const { user } = open({
+      ...quiet,
+      'POST /statements': { ...answer, request: approved },
+      'GET /requests': [],
+      'GET /leases': () => {
+        if (leases === 'fail') return { __status: 503, detail: 'The openings could not be read.' };
+        if (leases === 'open')
+          return [lease({ request_id: 'r-ask', domain: 'ads.example', execution: 'applied' })];
+        return [];
+      },
+    });
+    await ask('ads.example');
+    expect(
+      await screen.findByRole('heading', { name: 'Nyctr could not check whether this opened.' }),
+    ).toBeDefined();
+    expect(
+      screen.queryByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeNull();
+    expect(screen.queryByRole('heading', { name: "It's open." })).toBeNull();
+    expect(document.body.textContent).toContain('ads.example');
+    leases = 'empty';
+    await user.click(screen.getByRole('button', { name: 'Check the opening again' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(document.body.textContent).toContain(
+      'Nyctr found no opening recorded for this request.',
+    );
+    leases = 'open';
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('heading', { name: "It's open." })).toBeDefined();
+  });
+
+  it('keeps the first request on screen when a later one finishes and the list is unavailable', async () => {
+    let posts = 0;
+    const first = request({
+      id: 'r-a',
+      domain: 'a.example',
+      status: 'auto_approved',
+      reason: 'The page did not open.',
+    });
+    const second = request({
+      id: 'r-b',
+      domain: 'b.example',
+      status: 'analysing',
+      reason: 'The page did not open.',
+      decided_by: null,
+      decision_note: null,
+      risk_score: null,
+      risk_category: null,
+      risk_factors: null,
+    });
+    const { user } = open({
+      ...quiet,
+      'POST /statements': () => ({
+        matched: true,
+        message: 'filed',
+        request: ++posts === 1 ? first : second,
+      }),
+      'GET /requests': () =>
+        posts < 2 ? [] : { __status: 503, detail: 'The request list could not be read.' },
+      'GET /leases': [],
+    });
+    await ask('a.example');
+    expect(
+      await screen.findByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    await user.click(screen.getAllByRole('link', { name: 'Blocked sites' })[0]);
+    const input = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'b.example' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(document.body.textContent).toContain('b.example');
+    await act(async () => {
+      window.location.hash = '#/portal?request=r-a';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Approved, but not switched on yet.' }),
+    ).toBeDefined();
+    expect(document.body.textContent).toContain('a.example');
+    expect(screen.queryByText('That request could not be found')).toBeNull();
+    expect(document.body.textContent).not.toContain('b.example');
+  });
+
+  it.each(['empty', 'error'] as const)(
+    'keeps never-listed A visible while B completes against an injected %s request list',
+    async (list) => {
+      const later = holdPost();
+      const first = { ...filed, id: 'r-a', domain: 'a.example' };
+      const second = { ...filed, id: 'r-b', domain: 'b.example' };
+      let posts = 0;
+      const { user } = open({
+        ...quiet,
+        'GET /requests': () =>
+          list === 'empty' ? [] : { __status: 503, detail: 'Injected unavailable requests' },
+        'POST /statements': () =>
+          ++posts === 1
+            ? { ...answer, request: first }
+            : later.gate.then(() => ({ ...answer, request: second })),
+      });
+      await ask('a.example');
+      expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+      await user.click(screen.getAllByRole('link', { name: 'Blocked sites' })[0]);
+      await ask('b.example');
+      expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+      await user.click(screen.getByRole('link', { name: 'Open that request' }));
+      const heading = await screen.findByRole('heading', { name: 'Nyctr is checking this.' });
+      expect(document.body.textContent).toContain('a.example');
+      await act(async () => later.release());
+      expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBe(heading);
+      expect(window.location.hash).toBe('#/portal?request=r-a');
+      expect(document.body.textContent).toContain('a.example');
+      expect(document.body.textContent).not.toContain('b.example');
+      expect(screen.queryByText('That request could not be found')).toBeNull();
+    },
+  );
+
+  it('retains reversed completions without letting the older miss release the current busy form', async () => {
+    const first = holdPost();
+    const second = holdPost();
+    let posts = 0;
+    const { calls } = open({
+      ...quiet,
+      'POST /statements': () =>
+        ++posts === 1
+          ? first.gate.then(() => ({ matched: false, message: 'Injected old miss' }))
+          : second.gate,
+    });
+    const input = await ask('old.example');
+    fireEvent.change(input, { target: { value: 'ads.example' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(calls.filter((call) => call.path === '/statements')).toHaveLength(2);
+    await act(async () => first.release());
+    expect(input.value).toBe('ads.example');
+    expect(screen.queryByText('Injected old miss')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Asking…' })).toBeDefined();
+    fireEvent.submit(input.closest('form')!);
+    expect(calls.filter((call) => call.path === '/statements')).toHaveLength(2);
+    await act(async () => second.release());
+    expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(window.location.hash).toBe('#/portal?request=r-ask');
+  });
+
+  it('keeps both reversed successes and prefers a current owned list decision over a duplicate filing', async () => {
+    let releaseOld: () => void = () => {};
+    const old = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    let posts = 0;
+    let rows: AccessRequest[] = [];
+    const a = { ...filed, id: 'r-a', domain: 'a.example' };
+    const b = { ...filed, id: 'r-b', domain: 'b.example' };
+    const { user } = open({
+      ...quiet,
+      'GET /requests': () => rows,
+      'POST /statements': () => {
+        posts += 1;
+        if (posts === 1) return old.then(() => ({ ...answer, request: a }));
+        if (posts === 2) return { ...answer, request: b };
+        // The server normalizes the typed name to an existing request id. Its
+        // returned analysing body must not replace an already listed decision.
+        rows = [{ ...a, status: 'denied', review_note: 'Please keep this closed.' }];
+        return { ...answer, request: a };
+      },
+    });
+    const input = await ask('a.example');
+    fireEvent.change(input, { target: { value: 'b.example' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(window.location.hash).toBe('#/portal?request=r-b');
+    await act(async () => releaseOld());
+    expect(window.location.hash).toBe('#/portal?request=r-b');
+    await act(async () => {
+      window.location.hash = '/portal?request=r-a';
+    });
+    expect(await screen.findByText('What Nyctr found when it checked a.example')).toBeDefined();
+    await user.click(screen.getAllByRole('link', { name: 'Blocked sites' })[0]);
+    await ask('HTTPS://A.Example/path');
+    expect(await screen.findByRole('heading', { name: 'Not this time.' })).toBeDefined();
+    expect(document.body.textContent).toContain('Please keep this closed.');
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+  });
+
+  it('does not resurrect a listed request retired by a foreign row when an older POST finally succeeds', async () => {
+    const older = holdPost();
+    let posts = 0;
+    let foreign = false;
+    const approved = { ...filed, status: 'auto_approved' };
+    const { calls } = open({
+      ...quiet,
+      'POST /statements': () => (++posts === 1 ? older.gate : { ...answer, request: approved }),
+      'GET /requests': () =>
+        posts < 2
+          ? []
+          : [
+              {
+                ...approved,
+                ...(foreign
+                  ? {
+                      requester_id: 'another-member',
+                      domain: 'private.example',
+                    }
+                  : {}),
+              },
+            ],
+      'GET /leases': () =>
+        posts === 0 ? [] : { __status: 503, detail: 'Injected unavailable leases' },
+    });
+    const input = await ask('ads.example');
+    fireEvent.change(input, { target: { value: 'HTTPS://Ads.Example/path' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(
+      await screen.findByRole('heading', { name: 'Nyctr could not check whether this opened.' }),
+    ).toBeDefined();
+    foreign = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Check the opening again' }));
+    expect(await screen.findByText('That request could not be found')).toBeDefined();
+    const before = reads(calls, '/requests');
+    await act(async () => older.release());
+    expect(screen.getByText('That request could not be found')).toBeDefined();
+    expect(document.body.textContent).not.toContain('private.example');
+    expect(document.body.textContent).not.toContain('ads.example');
+    expect(reads(calls, '/requests')).toBe(before);
+  });
+
+  it.each(['loaded', 'error'] as const)(
+    'does not let A’s held final lease %s spend the read owed to B introduced by its request GET',
+    async (outcome) => {
+      clock();
+      let count = 0;
+      let release: (body: unknown) => void = () => {};
+      const oldLease = new Promise((resolve) => {
+        release = resolve;
+      });
+      const a = request({});
+      const b = request({ id: 'r-b', domain: 'b.example', status: 'analysing', decided_by: null });
+      const { calls } = open(
+        {
+          ...quiet,
+          'GET /requests': () => {
+            count += 1;
+            if (count === 1) return [request(pending)];
+            if (count === 2) return [a];
+            return [a, { ...b, ...(count >= 4 ? { status: 'denied' } : {}) }];
+          },
+          'GET /leases': () => (count === 3 ? oldLease : count === 1 ? [] : [lease()]),
+        },
+        '/requests',
+      );
+      await paint();
+      await advance(5_000);
+      await advance(5_000);
+      expect(reads(calls, '/leases')).toBe(3);
+      expect(screen.getByRole('link', { name: /b.example/ }).textContent).toContain('Checking');
+      // B was committed while A's final lease GET was still in flight. No newer
+      // lease GET starts before this injected old success or failure lands.
+      await act(async () =>
+        release(
+          outcome === 'loaded'
+            ? [lease()]
+            : { __status: 503, detail: 'Injected old A lease failure' },
+        ),
+      );
+      await paint();
+      expect(reads(calls, '/leases')).toBe(3);
+      await advance(5_000);
+      expect(screen.getByRole('link', { name: /b.example/ }).textContent).toContain('Not approved');
+      expect(reads(calls, '/leases')).toBe(4);
+      await advance(5_000);
+      expect(reads(calls, '/leases')).toBe(5);
+      await advance(60_000);
+      expect(reads(calls, '/leases')).toBe(5);
+      expect(reads(calls, '/requests')).toBe(5);
+    },
+  );
+
+  it('keeps checking a filed request the list does not have, then stops once it is decided', async () => {
+    clock();
+    let posted = false;
+    let phase: 'hide' | 'empty' | 'yes' = 'hide';
+    const checking = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'analysing',
+      reason: 'The page did not open.',
+      decided_by: null,
+      decision_note: null,
+      risk_score: null,
+      risk_category: null,
+      risk_factors: null,
+    });
+    const yes = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'auto_approved',
+      reason: 'The page did not open.',
+    });
+    const { calls } = open({
+      ...quiet,
+      'POST /statements': () => {
+        posted = true;
+        return { ...answer, request: checking };
+      },
+      'GET /requests': () => {
+        if (!posted || phase === 'hide')
+          return { __status: 503, detail: 'The request list could not be read.' };
+        if (phase === 'empty') return [];
+        return [yes];
+      },
+      'GET /leases': () =>
+        phase === 'yes'
+          ? [lease({ request_id: 'r-ask', domain: 'ads.example', execution: 'applied' })]
+          : [],
+    });
+    await paint();
+    const input = screen.getByLabelText('Site that did not open') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'ads.example' } });
+    fireEvent.submit(input.closest('form')!);
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    const afterPost = reads(calls, '/leases');
+    await advance(5_000);
+    expect(reads(calls, '/leases')).toBeGreaterThan(afterPost);
+    phase = 'empty';
+    const duringEmpty = reads(calls, '/leases');
+    await advance(5_000);
+    expect(reads(calls, '/leases')).toBeGreaterThan(duringEmpty);
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    phase = 'yes';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    await advance(5_000);
+    const settled = reads(calls, '/leases');
+    await advance(30_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+  });
+
+  it('still reads the opening after the decision when later request lists fail', async () => {
+    clock();
+    let phase: 'pending' | 'decided' | 'requests-down' = 'pending';
+    const { calls } = open(
+      {
+        ...quiet,
+        'GET /requests': () => {
+          if (phase === 'pending') return [request(pending)];
+          if (phase === 'requests-down')
+            return { __status: 503, detail: 'The request list could not be read.' };
+          return [request({ status: 'approved', decided_by: 'admin' })];
+        },
+        'GET /leases': () => (phase === 'pending' ? [] : [lease()]),
+      },
+      '/portal?request=r1',
+    );
+    await paint();
+    phase = 'decided';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    phase = 'requests-down';
+    const before = reads(calls, '/leases');
+    await advance(5_000);
+    expect(reads(calls, '/leases')).toBe(before + 1);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).toContain('photos.example');
+    expect(screen.queryByText('That request could not be found')).toBeNull();
+    const settled = reads(calls, '/leases');
+    await advance(60_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+  });
+
+  it('does not let an in-flight opening read clear a second request filed while it was out', async () => {
+    clock();
+    let posts = 0;
+    let requestReads = 0;
+    let leaseReads = 0;
+    let releaseRequests: (rows: AccessRequest[]) => void = () => {};
+    let releaseLeases: (rows: Lease[]) => void = () => {};
+    const holdRequest = { at: 0 };
+    const holdLease = { at: 0 };
+    const blank = {
+      reason: 'The page did not open.',
+      decided_by: null,
+      decision_note: null,
+      risk_score: null,
+      risk_category: null,
+      risk_factors: null,
+    };
+    const first = request({ id: 'r-a', domain: 'a.example', status: 'analysing', ...blank });
+    const second = request({ id: 'r-b', domain: 'b.example', status: 'analysing', ...blank });
+    let mode: 'retain' | 'open-b' = 'retain';
+    const { calls } = open({
+      ...quiet,
+      'POST /statements': () => {
+        posts += 1;
+        return { matched: true, message: 'filed', request: posts === 1 ? first : second };
+      },
+      'GET /requests': () => {
+        requestReads += 1;
+        if (holdRequest.at === requestReads)
+          return new Promise<AccessRequest[]>((resolve) => {
+            releaseRequests = resolve;
+          });
+        if (mode === 'open-b')
+          return [
+            request({
+              id: 'r-a',
+              domain: 'a.example',
+              status: 'denied',
+              decided_by: 'admin',
+              decision_note: null,
+              reason: 'The page did not open.',
+            }),
+            request({
+              id: 'r-b',
+              domain: 'b.example',
+              status: 'auto_approved',
+              reason: 'The page did not open.',
+            }),
+          ];
+        return [];
+      },
+      'GET /leases': () => {
+        leaseReads += 1;
+        if (holdLease.at === leaseReads)
+          return new Promise<Lease[]>((resolve) => {
+            releaseLeases = resolve;
+          });
+        if (mode === 'open-b') return [lease({ id: 'lb', request_id: 'r-b', domain: 'b.example' })];
+        return [];
+      },
+    });
+    await paint();
+    const input = screen.getByLabelText('Site that did not open') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'a.example' } });
+    fireEvent.submit(input.closest('form')!);
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    holdRequest.at = requestReads + 1;
+    holdLease.at = leaseReads + 1;
+    await advance(5_000);
+    expect(reads(calls, '/requests')).toBe(holdRequest.at);
+    expect(reads(calls, '/leases')).toBe(holdLease.at);
+    await act(async () => {
+      window.location.hash = '#/portal';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    await paint();
+    const again = screen.getByLabelText('Site that did not open') as HTMLInputElement;
+    fireEvent.change(again, { target: { value: 'b.example' } });
+    fireEvent.submit(again.closest('form')!);
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(document.body.textContent).toContain('b.example');
+    await act(async () => {
+      releaseRequests([]);
+      releaseLeases([]);
+    });
+    await paint();
+    expect(screen.getByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(document.body.textContent).toContain('b.example');
+    expect(screen.queryByText('That request could not be found')).toBeNull();
+    mode = 'open-b';
+    await advance(5_000);
+    expect(screen.getByRole('heading', { name: "It's open." })).toBeDefined();
+    expect(document.body.textContent).toContain('b.example');
+    await advance(5_000);
+    const settled = reads(calls, '/leases');
+    await advance(30_000);
+    expect(reads(calls, '/leases')).toBe(settled);
+  });
+
+  it('shows a failed forget and still accepts the request that was already being filed', async () => {
+    const { gate, release } = holdPost();
+    const tie = {
+      id: 't1',
+      kind: 'tie',
+      device_id: 'laptop',
+      device_name: "Sam's laptop",
+      ended_at: null,
+    };
+    const { calls } = open({
+      'GET /me/device': {
+        device_id: 'laptop',
+        name: "Sam's laptop",
+        simulated: false,
+        how: 'signed_in',
+      },
+      'GET /devices': [{ id: 'laptop', name: "Sam's laptop", classification: 'unassigned' }],
+      'GET /presence': { items: [tie] },
+      'DELETE /presence/t1': { __status: 409, detail: 'This tie has already ended.' },
+      'POST /statements': () => gate,
+      'GET /requests': [],
+    });
+    await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    const before = reads(calls, '/me/device');
+    await act(async () => {
+      screen.getByRole('button', { name: 'Forget this device' }).click();
+    });
+    expect(await screen.findByText('This tie has already ended.')).toBeDefined();
+    expect(reads(calls, '/me/device')).toBe(before);
+    await act(async () => {
+      release();
+    });
+    expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    expect(window.location.hash).toContain('request=r-ask');
+    expect(document.body.textContent).toContain('ads.example');
+  });
+
+  it('does not follow a filing after the address changed and before the page did', async () => {
+    const { gate, release } = holdPost();
+    open({ ...quiet, 'POST /statements': () => gate, 'GET /requests': [] });
+    await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    await act(async () => {
+      window.location.hash = '#/devices';
+    });
+    await act(async () => {
+      release();
+    });
+    expect(window.location.hash).toBe('#/devices');
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(await screen.findByRole('heading', { name: 'My devices' })).toBeDefined();
+    expect(window.location.hash).not.toContain('request=');
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+  });
+
+  it('checks the live hash with Portal route props deliberately held at the committed home', async () => {
+    const later = holdPost();
+    window.location.hash = '/portal';
+    const calls = mockApi({
+      ...quiet,
+      'GET /auth/me': member,
+      'GET /me/device': {
+        device_id: 'laptop',
+        name: "Sam's laptop",
+        how: 'assigned',
+        simulated: false,
+      },
+      'GET /blocks': blockList([]),
+      'GET /requests': [],
+      'GET /leases': [],
+      'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
+      'GET /blocks/coverage': { collected: 'yes', unassigned: false },
+      'POST /statements': () => later.gate,
+    });
+    // No router here: changing the address cannot rerender the supplied home props.
+    render(
+      <AuthProvider>
+        <Portal page="portal" params={new URLSearchParams()} />
+      </AuthProvider>,
+    );
+    const input = await ask('ads.example');
+    expect(await screen.findByRole('button', { name: 'Asking…' })).toBeDefined();
+    await act(async () => {
+      window.location.hash = '/devices';
+      later.release();
+    });
+    expect(window.location.hash).toBe('#/devices');
+    expect(screen.getByRole('heading', { name: 'What got blocked?' })).toBeDefined();
+    expect(input.value).toBe('ads.example');
+    expect(await screen.findByText(/Nyctr filed your request for/)).toBeDefined();
+    expect(screen.queryByRole('heading', { name: 'Nyctr is checking this.' })).toBeNull();
+    expect(reads(calls, '/requests')).toBe(2);
+    const sent = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([path, options]) => path === '/api/statements' && options.method === 'POST',
+    )!;
+    expect(sent[1].credentials).toBe('same-origin');
+    expect(new Headers(sent[1].headers).get('X-CSRF-Token')).toBe('csrf');
+    expect(JSON.parse(sent[1].body)).toEqual({ domain: 'ads.example' });
+  });
+
+  it('does not keep the first member filing after another member signs in', async () => {
+    const riley: User = {
+      id: 'riley',
+      email: 'riley@example.test',
+      name: 'Riley',
+      role: 'member',
+      mode: 'live',
+      csrf_token: 'csrf',
+    };
+    const { user } = open({
+      ...quiet,
+      'GET /auth/config': { mode: 'live', local_enabled: true, oidc_enabled: false },
+      'POST /auth/logout': { ok: true },
+      'POST /auth/login': riley,
+      'POST /statements': answer,
+      'GET /requests': [],
+    });
+    await ask('ads.example');
+    expect(await screen.findByRole('heading', { name: 'Nyctr is checking this.' })).toBeDefined();
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+    fireEvent.change(screen.getByLabelText('Email address'), {
+      target: { value: 'riley@example.test' },
+    });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'fabricated' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByRole('heading', { name: 'What got blocked?' })).toBeDefined();
+    expect(document.body.textContent).toContain('Riley');
+    expect(screen.queryByText('ads.example')).toBeNull();
+    expect(screen.queryByText(/filed your request/)).toBeNull();
+    expect((screen.getByLabelText('Site that did not open') as HTMLInputElement).value).toBe('');
+  });
+
+  it('keeps the committed member and draft when another member render suspends and is discarded', async () => {
+    const later = holdPost();
+    const riley = { ...member, id: 'riley', name: 'Riley' };
+    const session = {
+      user: member,
+      loading: false,
+      error: null,
+      logout: async () => {},
+      login: async () => {},
+      refresh: () => {},
+    };
+    // Only identity input is controlled here. Portal, the form, controller,
+    // evidence helpers and cookie/CSRF transport all run their real code.
+    const Identity = createContext(session);
+    vi.spyOn(auth, 'useAuth').mockImplementation(() => useContext(Identity));
+    let changeMember: (who: User) => void = () => {};
+    let speculative = 0;
+    let suspendRiley = true;
+    const never = new Promise<void>(() => {});
+    function Halt({ who }: { who: User }) {
+      if (who.id === 'riley' && suspendRiley) {
+        speculative += 1;
+        throw never;
+      }
+      return null;
+    }
+    function Session() {
+      const [who, setWho] = useState(member);
+      useLayoutEffect(() => {
+        changeMember = setWho;
+      }, []);
+      return (
+        <Identity.Provider value={{ ...session, user: who }}>
+          <Portal page="portal" params={new URLSearchParams()} />
+          <Halt who={who} />
+        </Identity.Provider>
+      );
+    }
+    window.location.hash = '/portal';
+    setCsrfToken('csrf');
+    const calls = mockApi({
+      ...quiet,
+      'GET /me/device': {
+        device_id: 'laptop',
+        name: "Sam's laptop",
+        how: 'assigned',
+        simulated: false,
+      },
+      'GET /blocks': blockList([]),
+      'GET /requests': [],
+      'GET /leases': [],
+      'GET /devices': [{ id: 'laptop', name: "Sam's laptop" }],
+      'GET /blocks/coverage': { collected: 'yes', unassigned: false },
+      'POST /statements': () => later.gate,
+    });
+    render(
+      <Suspense fallback={<p>Waiting for another member</p>}>
+        <Session />
+      </Suspense>,
+    );
+    const input = await ask('ads.example');
+    await act(async () => {
+      startTransition(() => changeMember(riley));
+    });
+    await waitFor(() => expect(speculative).toBeGreaterThan(0));
+    expect(screen.queryByText('Waiting for another member')).toBeNull();
+    expect(screen.queryByText('Riley')).toBeNull();
+    expect(screen.getByLabelText('Site that did not open')).toBe(input);
+    expect(input.value).toBe('ads.example');
+    expect(screen.getByRole('button', { name: 'Asking…' })).toBeDefined();
+    await act(async () => {
+      changeMember(member);
+      later.release();
+    });
+    await waitFor(() => expect(window.location.hash).toBe('#/portal?request=r-ask'));
+    expect(reads(calls, '/me/device')).toBe(1);
+    expect(reads(calls, '/requests')).toBe(2);
+    expect(input.value).toBe('ads.example');
+    expect(screen.queryByRole('button', { name: 'Asking…' })).toBeNull();
+    expect(screen.queryByText('Riley')).toBeNull();
+    await act(async () => {
+      suspendRiley = false;
+      changeMember(riley);
+    });
+    const next = (await screen.findByLabelText('Site that did not open')) as HTMLInputElement;
+    expect(next).not.toBe(input);
+    expect(next.value).toBe('');
+    expect(screen.getByText('Riley')).toBeDefined();
+    expect(screen.queryByText(/filed your request/)).toBeNull();
+    expect(reads(calls, '/me/device')).toBe(2);
+  });
+
+  it('says a failed opening, an unchanged network, and a missing record apart', async () => {
+    const outcomes = [
+      {
+        name: 'failed',
+        lease: lease({ execution: 'failed', owned: false }),
+        text: 'Nyctr tried to open this site, and the network was left unchanged.',
+      },
+      {
+        name: 'not applied',
+        lease: lease({ execution: 'not_applied', owned: false }),
+        text: 'The network was left unchanged.',
+      },
+      {
+        name: 'no lease',
+        lease: null,
+        text: 'Nyctr found no opening recorded for this request.',
+      },
+    ] as const;
+    for (const outcome of outcomes) {
+      cleanup();
+      open(
+        {
+          ...quiet,
+          'GET /requests': [request({ status: 'approved', decided_by: 'admin' })],
+          'GET /leases': outcome.lease ? [outcome.lease] : [],
+        },
+        '/portal?request=r1',
+      );
+      expect(
+        await screen.findByRole('heading', { name: 'Approved, but not switched on yet.' }),
+      ).toBeDefined();
+      expect(screen.getByText(outcome.text)).toBeDefined();
+      expect(screen.queryByRole('heading', { name: "It's open." })).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'This is a demonstration.' })).toBeNull();
+    }
+  });
 });
