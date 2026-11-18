@@ -5,15 +5,19 @@ that serves requests does not include them.
 """
 
 import asyncio
+import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import timedelta
 
+import httpx
 import pytest
 from conftest import LIVE_MEMBER, live_app, live_signin, seed_live_member, signin
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
+from test_access import put_rule
 from test_presence import KIM, LAPTOP, PHONE, PRINTER, TABLET, browser, change, home, two_sites
 from test_tiers import postgres_database
 
@@ -21,6 +25,8 @@ from nyctr import access, presence, statements
 from nyctr.access import STATEMENT_WAITING
 from nyctr.collection import holder_id
 from nyctr.config import Settings
+from nyctr.deps import statement_current
+from nyctr.integrations import core
 from nyctr.main import create_app
 from nyctr.models import (
     AccessRequest,
@@ -45,6 +51,9 @@ from nyctr.statements import CONSOLE, DUPLICATE, FILED, LIMITED, MISSED, NO_DEVI
 
 BOTH = pytest.mark.parametrize("database", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
 PRIVACY = ["blocklist:hagezi-multi-pro-plusplus"]
+# Long enough for the checks made while a provider call is paused, short enough that a missed release ends.
+PAUSE_LIMIT = 30
+ALLOWLIST = "/profiles/abc123/allowlist"
 OFF = WHY["off"]
 # Nothing a statement may repeat from someone else's lookup.
 HIDDEN = ("Unknown source device", "downloads.filemirror.example", "Alex's workstation",
@@ -1070,3 +1079,310 @@ def test_losing_the_device_stops_the_opening_and_keeps_the_request(tmp_path, dat
         _finish(app)
         _waiting(app, during_id, "zz-during.example")
         assert len(filed_for(app, "zz-during.example")) == 1
+
+
+def wait_for_release(event, what, limit=PAUSE_LIMIT):
+    """Block until the test releases the pause. A missed release ends the wait."""
+    if not event.wait(limit):
+        raise TimeoutError(f"{what} was not released within {limit} seconds")
+
+
+def release_paused(thread, event):
+    """Let the paused request continue, and wait until that thread has stopped."""
+    event.set()
+    thread.join(PAUSE_LIMIT)
+
+
+class HeldAllowlist:
+    """A fabricated allowlist. One call can wait after it has already changed the list.
+
+    The wait is bounded. The test releases it in a finally, so a failed assertion
+    cannot leave the provider thread parked.
+    """
+
+    def __init__(self, monkeypatch, hold=None):
+        self.listed, self.calls, self.hold = [], [], hold
+        self.paused = None
+        self.reached, self.go = threading.Event(), threading.Event()
+        monkeypatch.setenv("NYCTR_CONNECTOR_SECRET_DNS", "dns-secret")
+        monkeypatch.setattr(core, "make_http_client", lambda key, **_: httpx.AsyncClient(
+            transport=httpx.MockTransport(self.answer), headers={"X-Api-Key": key}, trust_env=False))
+
+    async def answer(self, request):
+        call = len(self.calls)
+        path = request.url.path
+        name = path.rsplit("/", 1)[1]
+        self.calls.append(request.method)
+        if request.method == "POST":
+            self.listed.append(json.loads(request.content)["id"])
+        elif request.method == "DELETE" and name in self.listed:
+            self.listed.remove(name)
+        response = httpx.Response(200, json={"data": [{"id": item, "active": True} for item in self.listed]})
+        if self.hold == call:
+            self.paused = (request.method, path)
+            self.reached.set()
+            await asyncio.to_thread(wait_for_release, self.go, "the paused provider call")
+        return response
+
+
+def _prepared(tmp_path, monkeypatch, request, database, name):
+    """A live app whose fabricated DNS source may be changed, with the laptop assigned to Sam."""
+    app, _gateway = home(tmp_path, monkeypatch, provider_writes="nextdns",
+                         **live_place(database, tmp_path, request, name))
+    app = mount_for_test(app)
+    now = utcnow()
+    with app.state.session_factory() as db:
+        db.add(Integration(
+            id="dns", provider="nextdns", name="Office DNS", config={"profile_id": "abc123"},
+            secret_ref="NYCTR_CONNECTOR_SECRET_DNS", status="connected", last_sync=now))
+        for device_id in ("gw:client:laptop", "gw:client:phone"):
+            device = db.get(Resource, device_id)
+            device.owner_id = "sam"
+            device.classification = "personal"
+            db.add(DeviceGrant(device_id=device_id, user_id="sam", valid_from=now - timedelta(days=1)))
+        db.commit()
+    with TestClient(app) as client:
+        put_rule(client, live_signin(client), per_day=20, allow_statement=True)
+    return app
+
+
+def _plant_live(app, domain):
+    """One fresh exact block of this name, on the laptop, from the fabricated DNS source."""
+    now = utcnow()
+    with app.state.session_factory() as db:
+        db.add(Observation(
+            id=f"dns:block:{domain}", integration_id="dns", device_id="gw:client:laptop",
+            device_name="Laptop", domain=domain, source="nextdns", reason="HaGeZi Multi PRO++",
+            reason_codes=list(PRIVACY), observed_at=now - timedelta(minutes=2),
+            expires_at=now + timedelta(hours=20), evidence_kind="observed", attribution="assigned",
+            risk_score=None, risk_explanation=""))
+        db.commit()
+
+
+def _set_active(app, user_id, active):
+    """Commit the account flag from a session of its own."""
+    with app.state.session_factory() as db:
+        db.get(User, user_id).active = active
+        db.commit()
+
+
+def _post_live(app, domain):
+    """File a statement from the laptop while this thread waits on the provider call."""
+    box = {}
+
+    def run():
+        try:
+            with TestClient(app, client=(LAPTOP, 50000)) as client:
+                headers = live_signin(client, LIVE_MEMBER)
+                box["response"] = client.post("/api/statements", headers=headers, json={"domain": domain})
+        except Exception as exc:  # The assertion reports it. A hung client is the timeout below.
+            box["error"] = repr(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def _saved(app, domain):
+    """The request, its leases and its notices."""
+    with app.state.session_factory() as db:
+        row = db.scalar(select(AccessRequest).where(AccessRequest.domain == domain))
+        leases = [] if row is None else list(db.scalars(select(Lease).where(Lease.domain == domain)))
+        notes = [] if row is None else list(db.scalars(select(Notice).where(Notice.subject == row.id)))
+        return row, leases, notes
+
+
+@BOTH
+def test_an_inactive_account_stops_a_statement_before_it_opens(tmp_path, database, request, monkeypatch):
+    """A disabled account waits before anything is opened. An event, and a row with no basis, still open.
+
+    A stored request cannot lose its account: the user is a foreign key. The missing account is the
+    same read, on a copy this session already holds, after another session has removed the row.
+    """
+    app = open_demo(database, tmp_path, request, "inactive-before")
+
+    async def paused(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("nyctr.main._finish_request", paused)
+    with TestClient(app) as client:
+        allow(client, True)
+        admin = signin(client)
+        rule = client.get("/api/rules", headers=admin).json()["access"]
+        rule["per_day"] = 20
+        assert client.put("/api/rules/access", headers=admin, json=rule).status_code == 200
+        headers = signin(client, member=True)
+        add_block(app, "stmt-inactive", "zz-inactive.example")
+        filed = ask(client, headers, "zz-inactive.example")
+        assert filed.status_code == 201, filed.text
+        statement_id = filed.json()["request"]["id"]
+        event = client.post("/api/requests", headers=headers, json={
+            "block_id": "block-gallery", "reason": "Need the picture", "duration_minutes": 60})
+        assert event.status_code == 201, event.text
+        event_id = event.json()["id"]
+        blank = client.post("/api/requests", headers=headers, json={
+            "block_id": "block-fonts", "reason": "Need the fonts", "duration_minutes": 60})
+        assert blank.status_code == 201, blank.text
+        blank_id = blank.json()["id"]
+        with app.state.session_factory() as db:
+            db.execute(text("UPDATE access_requests SET basis = NULL WHERE id = :id"), {"id": blank_id})
+            db.commit()
+        with app.state.session_factory() as held:
+            cached = held.get(User, "user-jamie")
+            assert cached.active is True
+            statement = held.get(AccessRequest, statement_id)
+            event_row = held.get(AccessRequest, event_id)
+            blank_row = held.get(AccessRequest, blank_id)
+            assert event_row.basis == "event" and blank_row.basis is None
+            held.commit()  # The copy stays. The other session can commit while this one holds no lock.
+            _set_active(app, "user-jamie", False)
+            assert statement_current(held, statement) is False
+            assert statement_current(held, event_row) is True
+            assert statement_current(held, blank_row) is True
+            held.add(User(id="gone", email="gone@example.net", name="Gone", role="member"))
+            held.commit()
+            assert held.get(User, "gone").active is True
+            with app.state.session_factory() as other:
+                other.delete(other.get(User, "gone"))
+                other.commit()
+            missing = AccessRequest(
+                basis="statement", device_id="laptop-jamie", requester_id="gone", domain="zz-gone.example")
+            assert statement_current(held, missing) is False
+            assert held.get(User, "gone") is None
+        _finish(app)
+        _waiting(app, statement_id, "zz-inactive.example")
+        with app.state.session_factory() as db:
+            opened = db.get(AccessRequest, event_id)
+            assert opened.status == "auto_approved" and opened.basis == "event"
+            assert opened.decided_by == "rule"
+            emptied = db.get(AccessRequest, blank_id)
+            assert emptied.status == "auto_approved" and emptied.basis is None
+            assert emptied.decided_by == "rule"
+        assert len(_rows(app, Lease, event_id)) == 1 and len(_rows(app, Lease, blank_id)) == 1
+        _finish(app)
+        _waiting(app, statement_id, "zz-inactive.example")
+        assert len(_rows(app, Lease, statement_id)) == 0
+
+        _set_active(app, "user-jamie", True)
+        headers = signin(client, member=True)
+        add_block(app, "stmt-active", "zz-active.example")
+        again = ask(client, headers, "zz-active.example")
+        assert again.status_code == 201, again.text
+        active_id = again.json()["request"]["id"]
+        with app.state.session_factory() as db:
+            db.query(LoginSession).delete()
+            db.commit()
+        _finish(app)
+        with app.state.session_factory() as db:
+            row = db.get(AccessRequest, active_id)
+            assert row.status == "auto_approved" and row.decided_by == "rule"
+            assert row.basis == "statement" and row.requester_id == "user-jamie"
+            assert row.device_id == "laptop-jamie"
+        kept = _rows(app, Lease, active_id)
+        assert len(kept) == 1 and kept[0].execution == "simulated" and kept[0].owned is True
+
+
+@BOTH
+def test_disabling_the_account_during_the_provider_add_compensates(tmp_path, database, request, monkeypatch):
+    """The account is read again after the add.
+
+    What this opening added is removed, and a later pass adds nothing.
+    """
+    app = _prepared(tmp_path, monkeypatch, request, database, "during-add")
+    source = HeldAllowlist(monkeypatch, hold=2)
+    domain = "zz-disabled.example"
+    _plant_live(app, domain)
+    thread, box = _post_live(app, domain)
+    try:
+        assert source.reached.wait(20), {"calls": source.calls, "box": box}
+        assert source.calls == ["GET", "GET", "POST"] and source.listed == [domain], source.calls
+        # The add itself, after the claim's read and the fresh eligibility check. Not an earlier GET.
+        assert source.paused == ("POST", ALLOWLIST), source.paused
+        _set_active(app, "sam", False)
+    finally:
+        release_paused(thread, source.go)
+    assert not thread.is_alive(), box
+    assert "error" not in box, box
+    assert box["response"].status_code == 201, box["response"].text
+    row, leases, notes = _saved(app, domain)
+    assert row.status == "pending" and row.decision_note == STATEMENT_WAITING, (row.status, row.decision_note)
+    assert row.basis == "statement" and row.device_id == "gw:client:laptop" and row.requester_id == "sam"
+    assert len(notes) == 1 and notes[0].kind == "request_waiting"
+    assert not any(lease.status == "active" for lease in leases), [lease.status for lease in leases]
+    compensation = [lease for lease in leases
+                    if lease.status == "unconfirmed" and lease.owned and lease.request_id is None]
+    assert len(compensation) == 1, [(lease.status, lease.owned, lease.request_id) for lease in leases]
+    with app.state.session_factory() as db:
+        closed = asyncio.run(access.reconcile(db, app.state.settings))
+    assert closed == 1, (closed, source.calls, source.listed)
+    assert source.listed == [] and source.calls.count("POST") == 1 and source.calls.count("DELETE") == 1
+    before = list(source.calls)
+    _finish(app)
+    row, leases, notes = _saved(app, domain)
+    assert row.status == "pending" and len(notes) == 1 and source.calls == before
+    assert not any(lease.status == "active" for lease in leases)
+
+
+@BOTH
+def test_an_entry_already_there_stays_when_the_account_is_disabled(tmp_path, database, request, monkeypatch):
+    """A disable while the provider is being read does not remove an entry this opening did not add."""
+    app = _prepared(tmp_path, monkeypatch, request, database, "already-there")
+    source = HeldAllowlist(monkeypatch, hold=1)
+    domain = "zz-kept.example"
+    source.listed.append(domain)
+    _plant_live(app, domain)
+    thread, box = _post_live(app, domain)
+    try:
+        assert source.reached.wait(20), {"calls": source.calls, "box": box}
+        assert source.calls == ["GET", "GET"] and source.listed == [domain] and "POST" not in source.calls
+        # The add's own read, after the claim's read. The entry was already listed, so nothing is posted.
+        assert source.paused == ("GET", ALLOWLIST), source.paused
+        _set_active(app, "sam", False)
+    finally:
+        release_paused(thread, source.go)
+    assert not thread.is_alive(), box
+    assert "error" not in box, box
+    assert box["response"].status_code == 201, box["response"].text
+    row, leases, notes = _saved(app, domain)
+    assert row.status == "pending" and row.decision_note == STATEMENT_WAITING, (row.status, row.decision_note)
+    assert len(notes) == 1 and notes[0].kind == "request_waiting"
+    assert leases == [], [(lease.status, lease.owned, lease.execution) for lease in leases]
+    assert source.listed == [domain] and "DELETE" not in source.calls and source.calls.count("POST") == 0
+    before = list(source.calls)
+    _finish(app)
+    row, leases, notes = _saved(app, domain)
+    assert row.status == "pending" and len(notes) == 1 and leases == [] and source.calls == before
+    assert source.listed == [domain]
+
+
+@BOTH
+def test_an_active_account_still_opens_through_the_provider(tmp_path, database, request, monkeypatch):
+    """An active account with a current assignment opens. Taking away only the sign-in leaves that opening."""
+    app = _prepared(tmp_path, monkeypatch, request, database, "stays-active")
+
+    async def paused(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("nyctr.main._finish_request", paused)
+    source = HeldAllowlist(monkeypatch, hold=None)
+    domain = "zz-open.example"
+    _plant_live(app, domain)
+    with TestClient(app, client=(LAPTOP, 50000)) as client:
+        headers = live_signin(client, LIVE_MEMBER)
+        filed = client.post("/api/statements", headers=headers, json={"domain": domain})
+        assert filed.status_code == 201, filed.text
+        with app.state.session_factory() as db:
+            db.query(LoginSession).delete()
+            assert db.get(User, "sam").active is True
+            db.commit()
+    _finish(app)
+    row, leases, _notes = _saved(app, domain)
+    assert row.status == "auto_approved" and row.decided_by == "rule", (row.status, row.decision_note)
+    assert row.basis == "statement" and row.device_id == "gw:client:laptop" and row.requester_id == "sam"
+    assert len(leases) == 1 and leases[0].status == "active" and leases[0].execution == "applied"
+    assert leases[0].owned is True and leases[0].request_id == row.id
+    assert source.listed == [domain] and source.calls.count("POST") == 1 and "DELETE" not in source.calls
+    before = list(source.calls)
+    _finish(app)
+    again, leases, _notes = _saved(app, domain)
+    assert again.status == "auto_approved" and len(leases) == 1 and source.calls == before
