@@ -221,8 +221,9 @@ audit record (`rule.access_checked`):
    or the request's match is `statement` and the rule's `allow_statement` switch
    is on. The switch is off until an administrator turns it on. Off, that match
    waits for a person even when every later check would pass. On, this check
-   passes and the rest of the rule decides. A deliberate block, or one Nyctr
-   cannot score, still fails at check 2, so the switch cannot open it.
+   passes and the rest of the rule decides. A deliberate block, or a tier
+   Nyctr does not recognise, still fails at check 2, so the switch cannot
+   open it. A block Nyctr cannot score fails at check 6.
 6. The tier's own conditions hold: for advertising lists, a score at or below
    the written limit (never above 60). An unknown score fails.
 7. No administrator said no to that address before.
@@ -239,6 +240,25 @@ audit record (`rule.access_checked`):
    recorded. What was added at the source is removed by the next upkeep tick,
    not at once.
 10. The time is the shorter of what was asked and the tier's limit.
+
+A statement stores the device it was filed for. Before it is opened, again
+after the claim on that source entry is held, and again after a provider has
+been asked, Nyctr reads that member's account from the database and requires
+the account to be active and the member to still have an assignment or a live
+tie on the stored device. A session that already holds the account still sees
+a disable or a removal committed by another session. If the account or the
+device no longer qualifies before the provider is asked, the claim is given
+back and nothing is sent. If it no longer qualifies after the provider has
+been asked, the request waits and an entry this opening added is removed by
+the next upkeep tick, not at once. An entry that was already there is left.
+An assignment or a live tie is enough for the device. The sign-in does not
+have to remain. An event request, and a row whose basis is empty, is not part
+of that check.
+
+In the demonstration the page does not ask a gateway. It chooses a permitted
+client whose stored address is this request's address, or else the first
+personal device the member may use, by name and then by id. A stored address
+on a device the member may not use is not chosen. No route files a statement.
 
 ## Two addresses
 

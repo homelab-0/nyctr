@@ -86,6 +86,10 @@ strings. Unsupported providers appear in the UI as planned, never connected.
   sentence to show (never whose a device is). A request over IPv6 is refused by rule with the
   reason `ipv6`, an address that two sites or two sources both use with `two_networks`, and a
   tie the database was too busy to write with `busy`; none is an error.
+  In the demonstration the page does not ask a gateway. It chooses a permitted
+  client whose stored address is this request's address, or else the first
+  personal device the member may use, by name and then by id. A stored address
+  on a device the member may not use is not chosen.
 - `GET /api/presence` -> `{items}`: a member's own ties in force; for an administrator every
   tie and conflict on record, with `enabled` and `reach_back_hours`. An item is
   `{id,kind,user_id,user_name,device_id,device_name,basis,first_at,last_at,ended_at}`, `kind`
@@ -158,7 +162,17 @@ decision_note}`. Status: pending, auto_approved, approved, denied or reviewed.
   tier can be named. `allow_statement` defaults to false. Left out of a save, it
   is stored false. Off, a statement always waits for a person. On, the rule
   decides it as any other request. A deliberate block or an unknown score still
-  waits. The form before tiers (`{enabled,max_score,max_minutes,
+  waits. A stored statement is opened only while the account is active and the
+  member still has an assignment or a live tie on the device stored with the
+  request. The account is read again from the database before the opening,
+  again after the claim on that source entry is held, and again after a
+  provider has been asked. If the account or the device no longer qualifies
+  before the provider is asked, the claim is given back and nothing is sent.
+  If it no longer qualifies after the provider has been asked, the request
+  waits, and an entry this opening added is removed on the next upkeep tick.
+  The sign-in does not have to remain. An event request, and a row whose basis
+  is empty, is left on the path that filed it. No route files a statement.
+  The form before tiers (`{enabled,max_score,max_minutes,
   per_day}`) is read from storage and refused here. Read back, its daily total
   is the old limit for each person times the number of active accounts, from
   1 to 100. A rule written with this route starts at 10 when the total is left
