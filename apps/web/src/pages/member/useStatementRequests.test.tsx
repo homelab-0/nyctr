@@ -1,4 +1,4 @@
-import { Suspense, startTransition, useState } from 'react';
+import { Suspense, startTransition, useLayoutEffect, useState } from 'react';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../../api';
@@ -235,6 +235,23 @@ describe('filing a typed site', () => {
     expect(use().ask).toMatchObject({ site: 'new.example', phase: 'pending' });
   });
 
+  it('refuses a site, revision, or visit that is not the open draft', () => {
+    const calls = statements([new Promise(() => {})]);
+    render(<Host {...props()} />);
+    const form = begin('ads.example');
+    const revision = use().draft.current.revision;
+    use().file('other.example', revision, form);
+    use().file('ads.example', revision + 1, form);
+    use().file('ads.example', revision, form + 1);
+    use().file('ads.example', revision, 0);
+    expect(calls).toHaveLength(0);
+    expect(use().ask).toBeNull();
+    send();
+    expect(calls.map((call) => call.body)).toEqual([{ domain: 'ads.example' }]);
+    expect(use().visits.current.mounted).toBe(form);
+    expect(use().draft.current).toMatchObject({ formId: form, site: 'ads.example' });
+  });
+
   it('drops an old answer after the form is left, and the new visit can still ask', async () => {
     const missed = gate<unknown>();
     const calls = statements([missed.promise, new Promise(() => {})]);
@@ -285,7 +302,8 @@ describe('forgetting and leaving the page', () => {
   it('drops a late answer after Forget is accepted, and opens one when it was not', async () => {
     const pending = gate<unknown>();
     const calls = statements([pending.promise]);
-    render(<Host {...props()} />);
+    const reloads = vi.fn(async () => {});
+    render(<Host {...props({ reloadEvidence: reloads })} />);
     begin('old.example');
     send();
     act(() => {
@@ -296,13 +314,17 @@ describe('forgetting and leaving the page', () => {
     });
     await waitFor(() => expect(use().ask).toBeNull());
     expect(window.location.hash).toBe('#/portal');
-    expect(calls.some((call) => call.path.includes('/me/device'))).toBe(false);
+    expect(use().kept('r-forget')).toBeNull();
+    expect(use().notice).toBeNull();
+    expect(reloads).not.toHaveBeenCalled();
+    expect(calls.map((call) => call.path)).toEqual(['/statements']);
 
     cleanup();
     window.location.hash = '/portal';
     const late = gate<unknown>();
     const failed = statements([late.promise]);
-    render(<Host {...props()} />);
+    const keptReloads = vi.fn(async () => {});
+    render(<Host {...props({ reloadEvidence: keptReloads })} />);
     begin('old.example');
     send();
     await act(async () => {
@@ -310,6 +332,38 @@ describe('forgetting and leaving the page', () => {
     });
     await waitFor(() => expect(window.location.hash).toBe('#/portal?request=r-kept'));
     expect(failed.map((call) => call.path)).toEqual(['/statements']);
+    expect(use().kept('r-kept')?.request.id).toBe('r-kept');
+    expect(use().notice?.request.id).toBe('r-kept');
+    expect(keptReloads).toHaveBeenCalledTimes(1);
+  });
+
+  it('a newer ask stays when an older answer returns after Forget', async () => {
+    const older = gate<unknown>();
+    const newer = new Promise(() => {});
+    const calls = statements([older.promise, newer]);
+    const reloads = vi.fn(async () => {});
+    render(<Host {...props({ reloadEvidence: reloads })} />);
+    begin('old.example');
+    send();
+    const olderFlight = use().ask?.flight;
+    act(() => {
+      use().acceptForget('laptop');
+    });
+    send('new.example');
+    expect(calls.map((call) => call.body)).toEqual([
+      { domain: 'old.example' },
+      { domain: 'new.example' },
+    ]);
+    await act(async () => {
+      older.resolve(filed({ id: 'r-old' }));
+    });
+    expect(use().ask).toMatchObject({ site: 'new.example', phase: 'pending' });
+    expect(use().ask?.flight).not.toBe(olderFlight);
+    expect(use().kept('r-old')).toBeNull();
+    expect(use().notice).toBeNull();
+    expect(reloads).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/portal');
+    expect(calls.some((call) => call.path.includes('/me/device'))).toBe(false);
   });
 
   it('drops a late acceptance when the page is gone and does not read again', async () => {
@@ -401,10 +455,15 @@ describe('remembered requests', () => {
       const calls = statements([old.promise, new Promise(() => {})]);
       const base = props();
       const view = render(<Host {...base} />);
-      begin('ads.example');
+      const first = begin('ads.example');
       send();
       view.rerender(<Host {...base} userId={away} />);
       view.rerender(<Host {...base} userId="sam" />);
+      expect(use().visits.current.mounted).toBe(0);
+      expect(use().draft.current).toEqual({ formId: 0, revision: 0, site: '' });
+      expect(use().visits.current.next).toBe(first);
+      const next = begin('ads.example');
+      expect(next).toBeGreaterThan(first);
       send();
       await act(async () => {
         old.resolve(filed({ id: 'r-old', domain: 'ads.example' }));
@@ -460,6 +519,132 @@ describe('remembered requests', () => {
     view.rerender(<Host {...base} requests={{ availability: 'unloaded', rows: [] }} />);
     expect(use().resolve('r-a').request?.status).toBe('denied');
     expect(use().kept('r-b')?.request.status).toBe('analysing');
+  });
+
+  it('keeps a listed decision when a newer filing of that request finishes during a list error', async () => {
+    const again = gate<unknown>();
+    statements([
+      Promise.resolve(filed({ id: 'r-ask', domain: 'ads.example', status: 'analysing' })),
+      again.promise,
+      Promise.resolve(filed({ id: 'r-new', domain: 'new.example', status: 'analysing' })),
+    ]);
+    const base = props();
+    const view = render(<Host {...base} />);
+    begin('ads.example');
+    send();
+    await waitFor(() => expect(use().kept('r-ask')?.request.status).toBe('analysing'));
+    const firstFlight = use().kept('r-ask')?.flight ?? 0;
+    const denied = request({
+      id: 'r-ask',
+      domain: 'ads.example',
+      status: 'denied',
+      decision_note: 'A person declined',
+    });
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [denied] }} />);
+    expect(use().resolve('r-ask').request).toBe(denied);
+    const hostile = request({ id: 'r-ask', domain: 'ads.example', status: 'approved' });
+    const foreign = request({
+      id: 'r-ask',
+      domain: 'other.example',
+      status: 'approved',
+      requester_id: 'kim',
+    });
+    view.rerender(
+      <Host {...base} requests={{ availability: 'error', rows: [hostile, foreign] }} />,
+    );
+    send('later.example');
+    await act(async () => {
+      again.resolve(filed({ id: 'r-ask', domain: 'later.example', status: 'analysing' }));
+    });
+    await waitFor(() => expect(use().kept('r-ask')?.site).toBe('later.example'));
+    expect(use().kept('r-ask')?.flight).toBeGreaterThan(firstFlight);
+    expect(use().kept('r-ask')?.request).toBe(denied);
+    expect(use().notice?.request).toBe(denied);
+    expect(use().notice?.site).toBe('later.example');
+    expect(use().notice?.flight).toBe(use().kept('r-ask')?.flight);
+    expect(use().resolve('r-ask')).toMatchObject({
+      source: 'listed',
+      request: { status: 'denied', decision_note: 'A person declined' },
+    });
+    const planted = request({ id: 'r-new', domain: 'planted.example', status: 'approved' });
+    view.rerender(
+      <Host {...base} requests={{ availability: 'unloaded', rows: [hostile, planted] }} />,
+    );
+    expect(use().kept('r-ask')?.request).toBe(denied);
+    expect(use().resolve('r-ask').request?.status).toBe('denied');
+    expect(use().notice?.request.status).toBe('denied');
+    send('new.example');
+    await waitFor(() => expect(use().kept('r-new')?.request.domain).toBe('new.example'));
+    expect(use().kept('r-new')?.request.status).toBe('analysing');
+    expect(use().resolve('r-new')).toMatchObject({
+      source: 'retained',
+      request: { id: 'r-new', status: 'analysing' },
+    });
+    expect(use().notice?.request.id).toBe('r-new');
+    expect(use().kept('r-ask')?.request).toBe(denied);
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(use().kept('r-ask')).toBeNull();
+    expect(use().resolve('r-ask')).toEqual({
+      request: null,
+      source: 'none',
+      filedButUnlisted: false,
+    });
+    expect(use().kept('r-new')?.request.status).toBe('analysing');
+    expect(use().notice?.request.id).toBe('r-new');
+  });
+
+  it('shows the newest request the current list still contains', async () => {
+    statements([
+      Promise.resolve(filed({ id: 'r-a', domain: 'a.example', status: 'analysing' })),
+      Promise.resolve(filed({ id: 'r-b', domain: 'b.example', status: 'analysing' })),
+    ]);
+    const frames: string[] = [];
+    function Page(input: StatementModelInput) {
+      const api = useStatementRequests(input);
+      model.current = api;
+      const noted = api.notice?.request.id ?? 'none';
+      frames.push(noted);
+      return <p>{noted}</p>;
+    }
+    const base = props();
+    const view = render(<Page {...base} />);
+    begin('a.example');
+    send();
+    await waitFor(() => expect(screen.getByText('r-a')).toBeTruthy());
+    send('b.example');
+    await waitFor(() => expect(screen.getByText('r-b')).toBeTruthy());
+    const listedA = request({ id: 'r-a', domain: 'a.example', status: 'denied' });
+    const listedB = request({ id: 'r-b', domain: 'b.example', status: 'approved' });
+    view.rerender(
+      <Page {...base} requests={{ availability: 'loaded', rows: [listedA, listedB] }} />,
+    );
+    expect(screen.getByText('r-b')).toBeTruthy();
+    expect(use().notice?.flight).toBeGreaterThan(use().kept('r-a')?.flight ?? 0);
+    const foreignB = request({
+      id: 'r-b',
+      domain: 'b.example',
+      status: 'approved',
+      requester_id: 'kim',
+    });
+    frames.length = 0;
+    view.rerender(
+      <Page {...base} requests={{ availability: 'loaded', rows: [listedA, foreignB] }} />,
+    );
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.every((id) => id === 'r-a')).toBe(true);
+    expect(screen.getByText('r-a')).toBeTruthy();
+    expect(use().notice?.request).toBe(listedA);
+    expect(use().kept('r-b')).toBeNull();
+    frames.length = 0;
+    view.rerender(<Page {...base} requests={{ availability: 'loaded', rows: [listedA] }} />);
+    expect(frames.every((id) => id === 'r-a')).toBe(true);
+    expect(screen.getByText('r-a')).toBeTruthy();
+    frames.length = 0;
+    view.rerender(<Page {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(frames.every((id) => id === 'none')).toBe(true);
+    expect(screen.getByText('none')).toBeTruthy();
+    expect(use().notice).toBeNull();
+    expect(use().kept('r-a')).toBeNull();
   });
 
   it('shows a loaded decision in the notice and on the page', async () => {
@@ -564,7 +749,7 @@ describe('remembered requests', () => {
 
   it('a discarded sign-in render does not drop the member who is still signed in', async () => {
     const pending = gate<unknown>();
-    statements([pending.promise]);
+    const calls = statements([pending.promise]);
     let change: (user: string) => void = () => {};
     const signedIn = { current: null as ReturnType<typeof useStatementRequests> | null };
     const read = () => {
@@ -572,6 +757,8 @@ describe('remembered requests', () => {
       return signedIn.current;
     };
     let attempted = false;
+    let form = 0;
+    let revision = 0;
     const never = new Promise<void>(() => {});
     function Child({ user }: { user: string }) {
       const api = useStatementRequests(props({ userId: user }));
@@ -593,8 +780,8 @@ describe('remembered requests', () => {
     }
     render(<Parent />);
     act(() => {
-      const form = read().openForm();
-      const revision = read().editDraft('ads.example');
+      form = read().openForm();
+      revision = read().editDraft('ads.example');
       read().file('ads.example', revision, form);
     });
     await act(async () => {
@@ -602,6 +789,10 @@ describe('remembered requests', () => {
     });
     expect(attempted).toBe(true);
     expect(screen.getByText('Committed sam')).toBeTruthy();
+    expect(calls).toHaveLength(1);
+    expect(read().visits.current.mounted).toBe(form);
+    expect(read().visits.current.next).toBe(form);
+    expect(read().draft.current).toEqual({ formId: form, revision, site: 'ads.example' });
     await act(async () => {
       change('sam');
     });
@@ -614,15 +805,29 @@ describe('remembered requests', () => {
 
   it('a committed sign-in change still drops the previous member answer', async () => {
     const pending = gate<unknown>();
-    statements([pending.promise]);
+    const calls = statements([pending.promise, new Promise(() => {})]);
     let change: (user: string) => void = () => {};
     const signedIn = { current: null as ReturnType<typeof useStatementRequests> | null };
     const read = () => {
       if (!signedIn.current) throw new Error('the form controller is not mounted');
       return signedIn.current;
     };
+    let samForm = 0;
+    let samRevision = 0;
+    let postedDuringLayout = -1;
+    let layoutMounted = -1;
+    let layoutSite = 'unset';
     function Child({ user }: { user: string }) {
-      signedIn.current = useStatementRequests(props({ userId: user }));
+      const api = useStatementRequests(props({ userId: user }));
+      signedIn.current = api;
+      useLayoutEffect(() => {
+        if (user !== 'kim') return;
+        const before = calls.length;
+        api.file('ads.example', samRevision, samForm);
+        postedDuringLayout = calls.length - before;
+        layoutMounted = api.visits.current.mounted;
+        layoutSite = api.draft.current.site;
+      });
       return <p>Committed {user}</p>;
     }
     function Parent() {
@@ -632,23 +837,48 @@ describe('remembered requests', () => {
     }
     render(<Parent />);
     act(() => {
-      const form = read().openForm();
-      const revision = read().editDraft('ads.example');
-      read().file('ads.example', revision, form);
+      samForm = read().openForm();
+      samRevision = read().editDraft('ads.example');
+      read().file('ads.example', samRevision, samForm);
     });
+    expect(calls).toHaveLength(1);
     await act(async () => {
       startTransition(() => change('kim'));
     });
     expect(screen.getByText('Committed kim')).toBeTruthy();
+    expect(postedDuringLayout).toBe(0);
+    expect(layoutMounted).toBe(0);
+    expect(layoutSite).toBe('');
+    expect(calls).toHaveLength(1);
+    expect(read().visits.current.next).toBe(samForm);
+    read().file('ads.example', samRevision, samForm);
+    expect(calls).toHaveLength(1);
+    let kimForm = 0;
+    act(() => {
+      kimForm = read().openForm();
+      const revision = read().editDraft('kim.example');
+      read().file('kim.example', revision, kimForm);
+    });
+    expect(kimForm).toBeGreaterThan(samForm);
+    expect(read().visits.current.next).toBe(kimForm);
+    expect(calls.map((call) => call.body)).toEqual([
+      { domain: 'ads.example' },
+      { domain: 'kim.example' },
+    ]);
     await act(async () => {
       pending.resolve(filed({ id: 'r-ask' }));
     });
     expect(window.location.hash).toBe('#/portal');
+    expect(read().kept('r-ask')).toBeNull();
+    expect(read().ask).toMatchObject({ site: 'kim.example', phase: 'pending' });
     await act(async () => {
       startTransition(() => change('sam'));
     });
     expect(screen.getByText('Committed sam')).toBeTruthy();
     expect(read().kept('r-ask')).toBeNull();
+    expect(read().visits.current.mounted).toBe(0);
+    expect(read().draft.current.site).toBe('');
+    expect(read().visits.current.next).toBe(kimForm);
   });
 
   it('a late duplicate does not restore a request a loaded list retired', async () => {

@@ -51,14 +51,23 @@ export type StatementView = 'home' | 'request' | 'requests' | 'devices' | 'block
 
 /**
  * `loaded` is the only state whose rows are evidence.
- * `error` and `unloaded` are not an empty result.
+ * `error` and `unloaded` are not an empty result, and their rows are not read.
  * A loaded row belongs to this sign-in only when its requester is the signed-in member.
  * A row taken from such a list stays until a later loaded list omits it, or this sign-in ends.
  * Omitting it drops the remembered copy, and a submit already started cannot put it back.
  * A submit started after that omission can file the same request again.
- * A request this sign-in accepted, and no loaded list has shown, stays.
+ * A request this sign-in accepted, and no loaded list has shown, stays as filed.
  * While a loaded list is on screen, the remembered request shows that list's row.
+ * While the list is not loaded, a request the list has shown keeps that decision.
+ * A newer filing of that request keeps the visit it was sent from.
+ * The notice is the newest request this list still shows for the signed-in member.
+ * If none remain, there is no notice.
  * The signed-in member changes only when that render commits.
+ * That commit closes the open visit and clears its draft. The caller starts a new visit afterward.
+ * Visit ids only grow. A render that is thrown away leaves the visit and the draft in place.
+ * Filing sends only the open visit, and only its current text, revision, and id.
+ * An accepted Forget drops that device's returned request before it is kept, noted, or followed.
+ * A newer ask on that device stays. Clearing one flight does not clear the other.
  */
 export type ListAvailability = 'loaded' | 'error' | 'unloaded';
 
@@ -136,6 +145,23 @@ function withLoadedBody(
   return { ...stored, request: listed };
 }
 
+/**
+ * A loaded list supplies the body. When the list is unavailable, the body last taken
+ * from a loaded list stays, and the filing keeps its own visit. Rows on an error or
+ * unloaded list are ignored. A request no loaded list has shown keeps the filed answer.
+ */
+function shownFiling(
+  stored: KeptStatement,
+  userId: string,
+  requests: EvidenceList<AccessRequest>,
+  remembered: ReadonlyMap<string, AccessRequest>,
+): KeptStatement {
+  if (requests.availability === 'loaded') return withLoadedBody(stored, userId, requests);
+  const earlier = remembered.get(keptKey(userId, stored.request.id)) ?? null;
+  if (!earlier || earlier.requester_id !== userId || earlier === stored.request) return stored;
+  return { ...stored, request: earlier };
+}
+
 /** A loaded list left out an id it had already shown for this member. */
 function omittedByLoadedList(
   userId: string,
@@ -158,7 +184,23 @@ function readKept(
   if (omittedByLoadedList(userId, requestId, requests, remembered)) return null;
   const stored = retained.get(keptKey(userId, requestId)) ?? null;
   if (!stored || stored.userId !== userId) return null;
-  return withLoadedBody(stored, userId, requests);
+  return shownFiling(stored, userId, requests, remembered);
+}
+
+/** Newest filing this sign-in can still show. This read does not change the maps. */
+function newestVisible(
+  userId: string,
+  requests: EvidenceList<AccessRequest>,
+  retained: ReadonlyMap<string, KeptStatement>,
+  remembered: ReadonlyMap<string, AccessRequest>,
+): KeptStatement | null {
+  let best: KeptStatement | null = null;
+  for (const row of retained.values()) {
+    const shown = readKept(userId, row.request.id, requests, retained, remembered);
+    if (!shown) continue;
+    if (!best || shown.flight > best.flight) best = shown;
+  }
+  return best;
 }
 
 function resolveKept(
@@ -222,7 +264,7 @@ function reconcileLoaded(
  */
 export function useStatementRequests(input: StatementModelInput) {
   const [ask, setAsk] = useState<StatementFlight | null>(null);
-  const [notice, setNotice] = useState<KeptStatement | null>(null);
+  const [, setNotice] = useState<KeptStatement | null>(null);
   const inputRef = useRef(input);
   const visits = useRef<StatementVisits>({ next: 0, mounted: 0 });
   const draft = useRef<StatementDraft>({ formId: 0, revision: 0, site: '' });
@@ -248,6 +290,8 @@ export function useStatementRequests(input: StatementModelInput) {
       retiredFlight.current.clear();
       revoked.current.clear();
       busy.current = null;
+      visits.current.mounted = 0;
+      draft.current = { formId: 0, revision: 0, site: '' };
     }
     inputRef.current = input;
     if (input.requests.availability === 'loaded') {
@@ -331,7 +375,19 @@ export function useStatementRequests(input: StatementModelInput) {
 
   const file = useCallback((site: string, revision: number, formId: number) => {
     const seen = inputRef.current;
-    if (!seen.userId || !seen.deviceId || !site.trim()) return;
+    const open = draft.current;
+    if (
+      !seen.userId ||
+      !seen.deviceId ||
+      !site.trim() ||
+      formId === 0 ||
+      visits.current.mounted !== formId ||
+      open.formId !== formId ||
+      open.revision !== revision ||
+      open.site !== site
+    ) {
+      return;
+    }
     if (
       busy.current?.generation === generation.current &&
       busy.current.formId === formId &&
@@ -365,6 +421,11 @@ export function useStatementRequests(input: StatementModelInput) {
           return;
         }
         if (answer.request) {
+          if (revoked.current.has(stamp.deviceId)) {
+            setAsk((current) => (current && current.flight === stamp.flight ? null : current));
+            releaseBusy(stamp);
+            return;
+          }
           // Read the address bar itself. The route props can still say the form is open.
           const place = inputRef.current;
           const addressIsForm =
@@ -373,7 +434,7 @@ export function useStatementRequests(input: StatementModelInput) {
             place.openRequestId === null &&
             place.blockId === null;
           const stay = stillHere(stamp) && addressIsForm;
-          const filed: KeptStatement = {
+          const drafted: KeptStatement = {
             ...stamp,
             request: answer.request,
             refreshed: false,
@@ -386,6 +447,7 @@ export function useStatementRequests(input: StatementModelInput) {
             releaseBusy(stamp);
             return;
           }
+          const filed = shownFiling(drafted, stamp.userId, place.requests, listed.current);
           const previous = kept.current.get(key);
           if (!previous || previous.flight <= stamp.flight) kept.current.set(key, filed);
           setNotice(newestKept(kept.current, stamp.userId));
@@ -433,10 +495,7 @@ export function useStatementRequests(input: StatementModelInput) {
   }, []);
 
   const memberAsk = ask && ask.userId === input.userId ? ask : null;
-  const memberNotice =
-    notice && notice.userId === input.userId
-      ? readKept(input.userId, notice.request.id, input.requests, kept.current, listed.current)
-      : null;
+  const memberNotice = newestVisible(input.userId, input.requests, kept.current, listed.current);
   return {
     ask: memberAsk,
     notice: memberNotice,
