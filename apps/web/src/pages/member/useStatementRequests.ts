@@ -1,0 +1,369 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { post } from '../../api';
+import type { AccessRequest } from '../../types';
+
+/**
+ * Files a site a member typed and remembers that request for this sign-in.
+ * The portal does not mount this yet, and nothing here turns access on.
+ * A model score and the administrator switch are not inputs.
+ * Opening evidence and repeated reading live in a later change.
+ */
+
+export interface StatementDraft {
+  formId: number;
+  revision: number;
+  site: string;
+}
+
+export interface StatementFlight {
+  userId: string;
+  deviceId: string;
+  formId: number;
+  flight: number;
+  revision: number;
+  site: string;
+  phase: 'pending' | 'settled';
+  message: string | null;
+}
+
+export interface KeptStatement {
+  userId: string;
+  deviceId: string;
+  formId: number;
+  flight: number;
+  revision: number;
+  site: string;
+  request: AccessRequest;
+  /** The request list was read again after this filing. */
+  refreshed: boolean;
+  /** The member had already left the form, so the page must not jump back. */
+  parked: boolean;
+}
+
+/** One mounted form. `next` only grows, so a new visit never reuses an old id. */
+export interface StatementVisits {
+  next: number;
+  mounted: number;
+}
+
+/** Home does not follow a filed request into another view. */
+export type StatementView = 'home' | 'request' | 'requests' | 'devices' | 'block';
+
+/**
+ * `loaded` is the only state whose rows are evidence.
+ * `error` and `unloaded` are not an empty result.
+ * A row already taken from a loaded list stays until a later loaded list omits it,
+ * or this sign-in ends.
+ */
+export type ListAvailability = 'loaded' | 'error' | 'unloaded';
+
+export interface EvidenceList<T> {
+  availability: ListAvailability;
+  rows: readonly T[];
+}
+
+export interface ResolvedRequest {
+  request: AccessRequest | null;
+  source: 'listed' | 'retained' | 'none';
+  /** The follow-up read finished and the list still has no row for this id. */
+  filedButUnlisted: boolean;
+}
+
+export interface StatementModelInput {
+  userId: string;
+  deviceId: string;
+  view: StatementView;
+  openRequestId: string | null;
+  blockId: string | null;
+  requests: EvidenceList<AccessRequest>;
+  /** Reads the request list again. It does not read the device. */
+  reloadEvidence: () => Promise<void>;
+}
+
+interface StatementAnswer {
+  matched: boolean;
+  message: string;
+  request?: AccessRequest;
+}
+
+interface Stamp {
+  userId: string;
+  deviceId: string;
+  site: string;
+  revision: number;
+  formId: number;
+  flight: number;
+  /** Which sign-in filed this. Returning to the same member is a later one. */
+  generation: number;
+}
+
+interface Busy {
+  formId: number;
+  revision: number;
+  deviceId: string;
+  flight: number;
+  generation: number;
+}
+
+const keptKey = (userId: string, requestId: string) => `${userId}:${requestId}`;
+
+/** The note on the form names the latest request. Older ones stay reachable by id. */
+function newestKept(rows: ReadonlyMap<string, KeptStatement>, userId: string) {
+  let best: KeptStatement | null = null;
+  for (const row of rows.values()) {
+    if (row.userId !== userId) continue;
+    if (!best || row.flight > best.flight) best = row;
+  }
+  return best;
+}
+
+function resolveKept(
+  userId: string,
+  requestId: string,
+  requests: EvidenceList<AccessRequest>,
+  retained: ReadonlyMap<string, KeptStatement>,
+  remembered: ReadonlyMap<string, AccessRequest>,
+): ResolvedRequest {
+  const key = keptKey(userId, requestId);
+  if (requests.availability === 'loaded') {
+    const listed = requests.rows.find((row) => row.id === requestId) ?? null;
+    if (listed) return { request: listed, source: 'listed', filedButUnlisted: false };
+  } else {
+    const earlier = remembered.get(key) ?? null;
+    if (earlier) return { request: earlier, source: 'listed', filedButUnlisted: false };
+  }
+  const kept = retained.get(key) ?? null;
+  if (kept && kept.userId === userId) {
+    return { request: kept.request, source: 'retained', filedButUnlisted: kept.refreshed };
+  }
+  return { request: null, source: 'none', filedButUnlisted: false };
+}
+
+/**
+ * Owns the visit, the draft, and every accepted request for this sign-in.
+ * The device id is the one the API already returned. This hook does not decide it.
+ */
+export function useStatementRequests(input: StatementModelInput) {
+  const [ask, setAsk] = useState<StatementFlight | null>(null);
+  const [notice, setNotice] = useState<KeptStatement | null>(null);
+  const inputRef = useRef(input);
+  const visits = useRef<StatementVisits>({ next: 0, mounted: 0 });
+  const draft = useRef<StatementDraft>({ formId: 0, revision: 0, site: '' });
+  const kept = useRef(new Map<string, KeptStatement>());
+  const listed = useRef(new Map<string, AccessRequest>());
+  const flight = useRef(0);
+  const generation = useRef(0);
+  const seenUser = useRef(input.userId);
+  const left = useRef(false);
+  const busy = useRef<Busy | null>(null);
+  const revoked = useRef(new Set<string>());
+  inputRef.current = input;
+
+  if (seenUser.current !== input.userId) {
+    seenUser.current = input.userId;
+    generation.current += 1;
+    kept.current.clear();
+    listed.current.clear();
+    revoked.current.clear();
+    busy.current = null;
+  }
+
+  if (input.requests.availability === 'loaded') {
+    const prefix = `${input.userId}:`;
+    const seen = new Set<string>();
+    for (const row of input.requests.rows) {
+      const key = keptKey(input.userId, row.id);
+      seen.add(key);
+      listed.current.set(key, row);
+      const stored = kept.current.get(key);
+      if (stored) kept.current.set(key, { ...stored, request: row });
+    }
+    for (const key of [...listed.current.keys()]) {
+      if (key.startsWith(prefix) && !seen.has(key)) listed.current.delete(key);
+    }
+  }
+
+  useEffect(() => {
+    left.current = false;
+    return () => {
+      left.current = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    setAsk((current) => (current && current.userId === input.userId ? current : null));
+    setNotice((current) => (current && current.userId === input.userId ? current : null));
+  }, [input.userId]);
+
+  const releaseBusy = (stamp: Stamp) => {
+    if (busy.current?.flight === stamp.flight) busy.current = null;
+  };
+
+  const stillHere = (stamp: Stamp) => {
+    const place = inputRef.current;
+    const current = draft.current;
+    return (
+      !left.current &&
+      generation.current === stamp.generation &&
+      !revoked.current.has(stamp.deviceId) &&
+      visits.current.mounted === stamp.formId &&
+      current.formId === stamp.formId &&
+      current.revision === stamp.revision &&
+      place.deviceId === stamp.deviceId &&
+      place.userId === stamp.userId &&
+      flight.current === stamp.flight
+    );
+  };
+
+  const clearRevoked = (stamp: Stamp) => {
+    if (revoked.current.has(stamp.deviceId) && flight.current === stamp.flight) setAsk(null);
+  };
+
+  const sameSession = (stamp: Stamp) =>
+    !left.current &&
+    inputRef.current.userId === stamp.userId &&
+    generation.current === stamp.generation;
+
+  /** Records a successful Forget before the caller reads the device again. */
+  const acceptForget = useCallback((deviceId: string) => {
+    revoked.current.add(deviceId);
+  }, []);
+
+  /** Starts one visit. A later call is a new visit and never reuses this id. */
+  const openForm = useCallback(() => {
+    const formId = ++visits.current.next;
+    visits.current.mounted = formId;
+    draft.current = { formId, revision: 0, site: '' };
+    return formId;
+  }, []);
+
+  /** Drops this visit only when a newer one has not already taken the page. */
+  const closeForm = useCallback((formId: number) => {
+    if (visits.current.mounted === formId) visits.current.mounted = 0;
+  }, []);
+
+  /** The next revision of the open visit. The text replaces what was there. */
+  const editDraft = useCallback((site: string) => {
+    const current = draft.current;
+    const revision = current.revision + 1;
+    draft.current = { ...current, revision, site };
+    return revision;
+  }, []);
+
+  const file = useCallback((site: string, revision: number, formId: number) => {
+    const seen = inputRef.current;
+    if (!seen.userId || !seen.deviceId || !site.trim()) return;
+    if (
+      busy.current?.generation === generation.current &&
+      busy.current.formId === formId &&
+      busy.current.revision === revision &&
+      busy.current.deviceId === seen.deviceId
+    ) {
+      return;
+    }
+    const stamp: Stamp = {
+      userId: seen.userId,
+      deviceId: seen.deviceId,
+      site,
+      revision,
+      formId,
+      flight: ++flight.current,
+      generation: generation.current,
+    };
+    busy.current = {
+      formId,
+      revision,
+      deviceId: seen.deviceId,
+      flight: stamp.flight,
+      generation: stamp.generation,
+    };
+    setAsk({ ...stamp, phase: 'pending', message: null });
+    void (async () => {
+      try {
+        const answer = await post<StatementAnswer>('/statements', { domain: site });
+        if (!sameSession(stamp)) {
+          releaseBusy(stamp);
+          return;
+        }
+        if (answer.request) {
+          // Read the address bar itself. The route props can still say the form is open.
+          const place = inputRef.current;
+          const addressIsForm =
+            window.location.hash === '#/portal' &&
+            place.view === 'home' &&
+            place.openRequestId === null &&
+            place.blockId === null;
+          const stay = stillHere(stamp) && addressIsForm;
+          const filed: KeptStatement = {
+            ...stamp,
+            request: answer.request,
+            refreshed: false,
+            parked: !stay,
+          };
+          const key = keptKey(stamp.userId, answer.request.id);
+          const previous = kept.current.get(key);
+          if (!previous || previous.flight <= stamp.flight) kept.current.set(key, filed);
+          setNotice(newestKept(kept.current, stamp.userId));
+          if (stay) window.location.hash = `/portal?request=${answer.request.id}`;
+          let refreshed = false;
+          try {
+            await place.reloadEvidence();
+            refreshed = true;
+          } catch {
+            refreshed = false;
+          }
+          if (!sameSession(stamp)) {
+            releaseBusy(stamp);
+            return;
+          }
+          const stored = kept.current.get(key);
+          if (stored?.flight === stamp.flight) {
+            kept.current.set(key, { ...stored, refreshed });
+            setNotice(newestKept(kept.current, stamp.userId));
+          }
+          if (stillHere(stamp)) setAsk({ ...stamp, phase: 'settled', message: null });
+          else clearRevoked(stamp);
+          releaseBusy(stamp);
+          return;
+        }
+        if (!stillHere(stamp)) {
+          clearRevoked(stamp);
+          releaseBusy(stamp);
+          return;
+        }
+        setAsk({ ...stamp, phase: 'settled', message: answer.message });
+        releaseBusy(stamp);
+      } catch (caught) {
+        if (!stillHere(stamp)) {
+          clearRevoked(stamp);
+          releaseBusy(stamp);
+          return;
+        }
+        const message =
+          caught instanceof Error ? caught.message : 'Nyctr could not take that request.';
+        setAsk({ ...stamp, phase: 'settled', message });
+        releaseBusy(stamp);
+      }
+    })();
+  }, []);
+
+  const memberAsk = ask && ask.userId === input.userId ? ask : null;
+  const memberNotice = notice && notice.userId === input.userId ? notice : null;
+  return {
+    ask: memberAsk,
+    notice: memberNotice,
+    visits,
+    draft,
+    openForm,
+    closeForm,
+    editDraft,
+    kept: (requestId: string) => {
+      const row = kept.current.get(keptKey(input.userId, requestId)) ?? null;
+      return row && row.userId === input.userId ? row : null;
+    },
+    resolve: (requestId: string) =>
+      resolveKept(input.userId, requestId, input.requests, kept.current, listed.current),
+    file,
+    acceptForget,
+  };
+}
