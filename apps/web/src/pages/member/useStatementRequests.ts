@@ -57,6 +57,7 @@ export type StatementView = 'home' | 'request' | 'requests' | 'devices' | 'block
  * Omitting it drops the remembered copy, and a submit already started cannot put it back.
  * A submit started after that omission can file the same request again.
  * A request this sign-in accepted, and no loaded list has shown, stays.
+ * While a loaded list is on screen, the remembered request shows that list's row.
  * The signed-in member changes only when that render commits.
  */
 export type ListAvailability = 'loaded' | 'error' | 'unloaded';
@@ -121,6 +122,20 @@ function newestKept(rows: ReadonlyMap<string, KeptStatement>, userId: string) {
   return best;
 }
 
+/** The visit stays as filed. A loaded row replaces only the request body a reader sees. */
+function withLoadedBody(
+  stored: KeptStatement,
+  userId: string,
+  requests: EvidenceList<AccessRequest>,
+): KeptStatement {
+  if (requests.availability !== 'loaded') return stored;
+  const listed =
+    requests.rows.find((row) => row.id === stored.request.id && row.requester_id === userId) ??
+    null;
+  if (!listed || listed === stored.request) return stored;
+  return { ...stored, request: listed };
+}
+
 /** A loaded list left out an id it had already shown for this member. */
 function omittedByLoadedList(
   userId: string,
@@ -131,6 +146,19 @@ function omittedByLoadedList(
   if (requests.availability !== 'loaded') return false;
   if (!remembered.has(keptKey(userId, requestId))) return false;
   return !requests.rows.some((row) => row.id === requestId && row.requester_id === userId);
+}
+
+function readKept(
+  userId: string,
+  requestId: string,
+  requests: EvidenceList<AccessRequest>,
+  retained: ReadonlyMap<string, KeptStatement>,
+  remembered: ReadonlyMap<string, AccessRequest>,
+): KeptStatement | null {
+  if (omittedByLoadedList(userId, requestId, requests, remembered)) return null;
+  const stored = retained.get(keptKey(userId, requestId)) ?? null;
+  if (!stored || stored.userId !== userId) return null;
+  return withLoadedBody(stored, userId, requests);
 }
 
 function resolveKept(
@@ -406,10 +434,8 @@ export function useStatementRequests(input: StatementModelInput) {
 
   const memberAsk = ask && ask.userId === input.userId ? ask : null;
   const memberNotice =
-    notice &&
-    notice.userId === input.userId &&
-    !omittedByLoadedList(input.userId, notice.request.id, input.requests, listed.current)
-      ? (kept.current.get(keptKey(input.userId, notice.request.id)) ?? null)
+    notice && notice.userId === input.userId
+      ? readKept(input.userId, notice.request.id, input.requests, kept.current, listed.current)
       : null;
   return {
     ask: memberAsk,
@@ -419,11 +445,8 @@ export function useStatementRequests(input: StatementModelInput) {
     openForm,
     closeForm,
     editDraft,
-    kept: (requestId: string) => {
-      if (omittedByLoadedList(input.userId, requestId, input.requests, listed.current)) return null;
-      const row = kept.current.get(keptKey(input.userId, requestId)) ?? null;
-      return row && row.userId === input.userId ? row : null;
-    },
+    kept: (requestId: string) =>
+      readKept(input.userId, requestId, input.requests, kept.current, listed.current),
     resolve: (requestId: string) =>
       resolveKept(input.userId, requestId, input.requests, kept.current, listed.current),
     file,

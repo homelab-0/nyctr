@@ -462,6 +462,39 @@ describe('remembered requests', () => {
     expect(use().kept('r-b')?.request.status).toBe('analysing');
   });
 
+  it('shows a loaded decision in the notice and on the page', async () => {
+    statements([Promise.resolve(filed({ id: 'r-ask', status: 'analysing' }))]);
+    const base = props();
+    function Page(input: StatementModelInput) {
+      const api = useStatementRequests(input);
+      model.current = api;
+      const status = api.kept('r-ask')?.request.status ?? 'none';
+      const noted = api.notice?.request.status ?? 'none';
+      return <p>{noted + ':' + status}</p>;
+    }
+    const view = render(<Page {...base} />);
+    begin('ads.example');
+    send();
+    await waitFor(() => expect(screen.getByText('analysing:analysing')).toBeTruthy());
+    const filedRow = use().kept('r-ask');
+    view.rerender(
+      <Page
+        {...base}
+        requests={{ availability: 'loaded', rows: [request({ id: 'r-ask', status: 'denied' })] }}
+      />,
+    );
+    expect(screen.getByText('denied:denied')).toBeTruthy();
+    expect(use().notice?.request.status).toBe('denied');
+    expect(use().kept('r-ask')).toMatchObject({
+      flight: filedRow?.flight,
+      site: 'ads.example',
+      refreshed: filedRow?.refreshed,
+      parked: filedRow?.parked,
+      request: { status: 'denied' },
+    });
+    expect(use().resolve('r-ask').request?.status).toBe('denied');
+  });
+
   it('drops a listed request when a later loaded list omits it, and keeps one the list never had', async () => {
     statements([
       Promise.resolve(filed({ id: 'r-a', domain: 'a.example', status: 'analysing' })),
