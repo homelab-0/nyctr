@@ -1,4 +1,5 @@
-import { act, cleanup, render, waitFor } from '@testing-library/react';
+import { Suspense, startTransition, useState } from 'react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from '../../api';
 import { mockApi } from '../../test/mock-api';
@@ -281,33 +282,21 @@ describe('filing a typed site', () => {
 });
 
 describe('forgetting and leaving the page', () => {
-  it('records Forget before the device is read, and a failed Forget still opens the request', async () => {
+  it('drops a late answer after Forget is accepted, and opens one when it was not', async () => {
     const pending = gate<unknown>();
     const calls = statements([pending.promise]);
-    const device = gate<string>();
-    const order: string[] = [];
-    const readDevice = vi.fn((id: string) => {
-      order.push(`read:${id}`);
-      return device.promise;
-    });
     render(<Host {...props()} />);
     begin('old.example');
     send();
     act(() => {
-      order.push('fence');
       use().acceptForget('laptop');
-      void readDevice('laptop');
     });
-    expect(order).toEqual(['fence', 'read:laptop']);
-    expect(readDevice).toHaveBeenCalledWith('laptop');
     await act(async () => {
       pending.resolve(filed({ id: 'r-forget' }));
     });
     await waitFor(() => expect(use().ask).toBeNull());
     expect(window.location.hash).toBe('#/portal');
     expect(calls.some((call) => call.path.includes('/me/device'))).toBe(false);
-    await act(async () => device.resolve('laptop'));
-    expect(window.location.hash).toBe('#/portal');
 
     cleanup();
     window.location.hash = '/portal';
@@ -538,5 +527,159 @@ describe('remembered requests', () => {
       source: 'listed',
       request: { requester_id: 'kim' },
     });
+  });
+
+  it('a discarded sign-in render does not drop the member who is still signed in', async () => {
+    const pending = gate<unknown>();
+    statements([pending.promise]);
+    let change: (user: string) => void = () => {};
+    const signedIn = { current: null as ReturnType<typeof useStatementRequests> | null };
+    const read = () => {
+      if (!signedIn.current) throw new Error('the form controller is not mounted');
+      return signedIn.current;
+    };
+    let attempted = false;
+    const never = new Promise<void>(() => {});
+    function Child({ user }: { user: string }) {
+      const api = useStatementRequests(props({ userId: user }));
+      if (user === 'kim') {
+        attempted = true;
+        throw never;
+      }
+      signedIn.current = api;
+      return <p>Committed {user}</p>;
+    }
+    function Parent() {
+      const [user, setUser] = useState('sam');
+      change = setUser;
+      return (
+        <Suspense fallback={<p>Loading</p>}>
+          <Child user={user} />
+        </Suspense>
+      );
+    }
+    render(<Parent />);
+    act(() => {
+      const form = read().openForm();
+      const revision = read().editDraft('ads.example');
+      read().file('ads.example', revision, form);
+    });
+    await act(async () => {
+      startTransition(() => change('kim'));
+    });
+    expect(attempted).toBe(true);
+    expect(screen.getByText('Committed sam')).toBeTruthy();
+    await act(async () => {
+      change('sam');
+    });
+    await act(async () => {
+      pending.resolve(filed({ id: 'r-ask' }));
+    });
+    expect(read().kept('r-ask')).not.toBeNull();
+    expect(window.location.hash).toBe('#/portal?request=r-ask');
+  });
+
+  it('a committed sign-in change still drops the previous member answer', async () => {
+    const pending = gate<unknown>();
+    statements([pending.promise]);
+    let change: (user: string) => void = () => {};
+    const signedIn = { current: null as ReturnType<typeof useStatementRequests> | null };
+    const read = () => {
+      if (!signedIn.current) throw new Error('the form controller is not mounted');
+      return signedIn.current;
+    };
+    function Child({ user }: { user: string }) {
+      signedIn.current = useStatementRequests(props({ userId: user }));
+      return <p>Committed {user}</p>;
+    }
+    function Parent() {
+      const [user, setUser] = useState('sam');
+      change = setUser;
+      return <Child user={user} />;
+    }
+    render(<Parent />);
+    act(() => {
+      const form = read().openForm();
+      const revision = read().editDraft('ads.example');
+      read().file('ads.example', revision, form);
+    });
+    await act(async () => {
+      startTransition(() => change('kim'));
+    });
+    expect(screen.getByText('Committed kim')).toBeTruthy();
+    await act(async () => {
+      pending.resolve(filed({ id: 'r-ask' }));
+    });
+    expect(window.location.hash).toBe('#/portal');
+    await act(async () => {
+      startTransition(() => change('sam'));
+    });
+    expect(screen.getByText('Committed sam')).toBeTruthy();
+    expect(read().kept('r-ask')).toBeNull();
+  });
+
+  it('a late duplicate does not restore a request a loaded list retired', async () => {
+    const first = gate<unknown>();
+    const second = gate<unknown>();
+    statements([first.promise, second.promise]);
+    const base = props();
+    const view = render(<Host {...base} />);
+    begin('https://ads.example');
+    send();
+    send('ads.example');
+    await act(async () => {
+      first.resolve(filed({ id: 'r-ask', domain: 'ads.example' }));
+    });
+    await waitFor(() => expect(use().kept('r-ask')).not.toBeNull());
+    view.rerender(
+      <Host
+        {...base}
+        requests={{ availability: 'loaded', rows: [request({ id: 'r-ask', status: 'denied' })] }}
+      />,
+    );
+    expect(use().resolve('r-ask').request?.status).toBe('denied');
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(use().resolve('r-ask').request).toBeNull();
+    await act(async () => {
+      second.resolve(filed({ id: 'r-ask', domain: 'ads.example', status: 'analysing' }));
+    });
+    expect(use().resolve('r-ask').request).toBeNull();
+    expect(use().kept('r-ask')).toBeNull();
+  });
+
+  it('a request started after a retirement can be filed again', async () => {
+    const first = gate<unknown>();
+    const again = gate<unknown>();
+    const calls = statements([first.promise, again.promise]);
+    const base = props();
+    const view = render(<Host {...base} />);
+    begin('ads.example');
+    send();
+    await act(async () => {
+      first.resolve(filed({ id: 'r-ask', status: 'analysing' }));
+    });
+    await waitFor(() => expect(use().kept('r-ask')).not.toBeNull());
+    view.rerender(
+      <Host
+        {...base}
+        requests={{ availability: 'loaded', rows: [request({ id: 'r-ask', status: 'denied' })] }}
+      />,
+    );
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(use().resolve('r-ask').request).toBeNull();
+    window.location.hash = '/portal';
+    send('ads.example');
+    await act(async () => {
+      again.resolve(filed({ id: 'r-ask', status: 'approved' }));
+    });
+    await waitFor(() => expect(use().kept('r-ask')?.request.status).toBe('approved'));
+    view.rerender(<Host {...base} requests={{ availability: 'loaded', rows: [] }} />);
+    expect(use().resolve('r-ask')).toMatchObject({
+      source: 'retained',
+      request: { status: 'approved' },
+    });
+    view.rerender(<Host {...base} requests={{ availability: 'error', rows: [] }} />);
+    expect(use().kept('r-ask')?.request.status).toBe('approved');
+    expect(calls).toHaveLength(2);
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { post } from '../../api';
 import type { AccessRequest } from '../../types';
 
@@ -54,8 +54,10 @@ export type StatementView = 'home' | 'request' | 'requests' | 'devices' | 'block
  * `error` and `unloaded` are not an empty result.
  * A loaded row belongs to this sign-in only when its requester is the signed-in member.
  * A row taken from such a list stays until a later loaded list omits it, or this sign-in ends.
- * Omitting it drops the remembered copy as well.
+ * Omitting it drops the remembered copy, and a submit already started cannot put it back.
+ * A submit started after that omission can file the same request again.
  * A request this sign-in accepted, and no loaded list has shown, stays.
+ * The signed-in member changes only when that render commits.
  */
 export type ListAvailability = 'loaded' | 'error' | 'unloaded';
 
@@ -119,6 +121,18 @@ function newestKept(rows: ReadonlyMap<string, KeptStatement>, userId: string) {
   return best;
 }
 
+/** A loaded list left out an id it had already shown for this member. */
+function omittedByLoadedList(
+  userId: string,
+  requestId: string,
+  requests: EvidenceList<AccessRequest>,
+  remembered: ReadonlyMap<string, AccessRequest>,
+): boolean {
+  if (requests.availability !== 'loaded') return false;
+  if (!remembered.has(keptKey(userId, requestId))) return false;
+  return !requests.rows.some((row) => row.id === requestId && row.requester_id === userId);
+}
+
 function resolveKept(
   userId: string,
   requestId: string,
@@ -131,6 +145,9 @@ function resolveKept(
     const listed =
       requests.rows.find((row) => row.id === requestId && row.requester_id === userId) ?? null;
     if (listed) return { request: listed, source: 'listed', filedButUnlisted: false };
+    if (omittedByLoadedList(userId, requestId, requests, remembered)) {
+      return { request: null, source: 'none', filedButUnlisted: false };
+    }
   } else {
     const earlier = remembered.get(key) ?? null;
     if (earlier?.requester_id === userId) {
@@ -142,6 +159,33 @@ function resolveKept(
     return { request: kept.request, source: 'retained', filedButUnlisted: kept.refreshed };
   }
   return { request: null, source: 'none', filedButUnlisted: false };
+}
+
+function reconcileLoaded(
+  userId: string,
+  rows: readonly AccessRequest[],
+  retained: Map<string, KeptStatement>,
+  remembered: Map<string, AccessRequest>,
+  retired: Map<string, number>,
+  flightNow: number,
+) {
+  const prefix = `${userId}:`;
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (row.requester_id !== userId) continue;
+    const key = keptKey(userId, row.id);
+    seen.add(key);
+    remembered.set(key, row);
+    const stored = retained.get(key);
+    if (stored) retained.set(key, { ...stored, request: row });
+  }
+  for (const key of [...remembered.keys()]) {
+    if (!key.startsWith(prefix) || seen.has(key)) continue;
+    const mark = retired.get(key);
+    if (mark === undefined || flightNow > mark) retired.set(key, flightNow);
+    remembered.delete(key);
+    retained.delete(key);
+  }
 }
 
 /**
@@ -158,39 +202,37 @@ export function useStatementRequests(input: StatementModelInput) {
   const listed = useRef(new Map<string, AccessRequest>());
   const flight = useRef(0);
   const generation = useRef(0);
-  const seenUser = useRef(input.userId);
+  const committedUser = useRef(input.userId);
+  /** Submit flight at which a loaded list retired this id. Older submits stay retired. */
+  const retiredFlight = useRef(new Map<string, number>());
   const left = useRef(false);
   const busy = useRef<Busy | null>(null);
   const revoked = useRef(new Set<string>());
-  inputRef.current = input;
 
-  if (seenUser.current !== input.userId) {
-    seenUser.current = input.userId;
-    generation.current += 1;
-    kept.current.clear();
-    listed.current.clear();
-    revoked.current.clear();
-    busy.current = null;
-  }
-
-  if (input.requests.availability === 'loaded') {
-    const prefix = `${input.userId}:`;
-    const seen = new Set<string>();
-    for (const row of input.requests.rows) {
-      // The served request names its member. A stale list must not be relabelled.
-      if (row.requester_id !== input.userId) continue;
-      const key = keptKey(input.userId, row.id);
-      seen.add(key);
-      listed.current.set(key, row);
-      const stored = kept.current.get(key);
-      if (stored) kept.current.set(key, { ...stored, request: row });
+  // A discarded render must not publish its member or its list. This runs before
+  // paint, so a committed sign-in blocks an older answer before that answer can land.
+  useLayoutEffect(() => {
+    if (committedUser.current !== input.userId) {
+      committedUser.current = input.userId;
+      generation.current += 1;
+      kept.current.clear();
+      listed.current.clear();
+      retiredFlight.current.clear();
+      revoked.current.clear();
+      busy.current = null;
     }
-    for (const key of [...listed.current.keys()]) {
-      if (!key.startsWith(prefix) || seen.has(key)) continue;
-      listed.current.delete(key);
-      kept.current.delete(key);
+    inputRef.current = input;
+    if (input.requests.availability === 'loaded') {
+      reconcileLoaded(
+        input.userId,
+        input.requests.rows,
+        kept.current,
+        listed.current,
+        retiredFlight.current,
+        flight.current,
+      );
     }
-  }
+  });
 
   useEffect(() => {
     left.current = false;
@@ -310,6 +352,12 @@ export function useStatementRequests(input: StatementModelInput) {
             parked: !stay,
           };
           const key = keptKey(stamp.userId, answer.request.id);
+          const retired = retiredFlight.current.get(key);
+          if (retired !== undefined && stamp.flight <= retired) {
+            if (stillHere(stamp)) setAsk(null);
+            releaseBusy(stamp);
+            return;
+          }
           const previous = kept.current.get(key);
           if (!previous || previous.flight <= stamp.flight) kept.current.set(key, filed);
           setNotice(newestKept(kept.current, stamp.userId));
@@ -358,7 +406,9 @@ export function useStatementRequests(input: StatementModelInput) {
 
   const memberAsk = ask && ask.userId === input.userId ? ask : null;
   const memberNotice =
-    notice && notice.userId === input.userId
+    notice &&
+    notice.userId === input.userId &&
+    !omittedByLoadedList(input.userId, notice.request.id, input.requests, listed.current)
       ? (kept.current.get(keptKey(input.userId, notice.request.id)) ?? null)
       : null;
   return {
@@ -370,6 +420,7 @@ export function useStatementRequests(input: StatementModelInput) {
     closeForm,
     editDraft,
     kept: (requestId: string) => {
+      if (omittedByLoadedList(input.userId, requestId, input.requests, listed.current)) return null;
       const row = kept.current.get(keptKey(input.userId, requestId)) ?? null;
       return row && row.userId === input.userId ? row : null;
     },
