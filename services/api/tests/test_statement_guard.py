@@ -43,6 +43,20 @@ from nyctr.worker import end_at_source
 
 WAITING = access.STATEMENT_WAITING
 PRIVACY = ["blocklist:hagezi-multi-pro-plusplus"]
+# Long enough for the checks made while a request is paused, short enough that a missed release ends.
+PAUSE_LIMIT = 30
+
+
+def wait_for_release(event, what, limit=PAUSE_LIMIT):
+    """Block until the test releases the pause. A missed release ends the wait."""
+    if not event.wait(limit):
+        raise TimeoutError(f"{what} was not released within {limit} seconds")
+
+
+def release_paused(thread, event):
+    """Let the paused request continue, and wait until that thread has stopped."""
+    event.set()
+    thread.join(PAUSE_LIMIT)
 
 
 def allow_statements(app, headers):
@@ -176,7 +190,7 @@ class HeldAllowlist:
         response = httpx.Response(200, json={"data": [{"id": item, "active": True} for item in self.listed]})
         if self.hold == call:
             self.reached.set()
-            await asyncio.to_thread(self.go.wait)
+            await asyncio.to_thread(wait_for_release, self.go, "the paused provider call")
         return response
 
 
@@ -362,11 +376,13 @@ def test_disabling_the_account_during_the_add_is_removed_on_upkeep(
     domain = "zz-disabled.example"
     plant_live(app, domain)
     thread, box = run_one(app, domain)
-    assert source.reached.wait(20), {"calls": source.calls, "box": box}
-    assert source.calls == ["GET", "GET", "POST"] and source.listed == [domain], source.calls
-    set_active(app, "sam", False)
-    source.go.set()
-    thread.join(30)
+    try:
+        assert source.reached.wait(20), {"calls": source.calls, "box": box}
+        assert source.calls == ["GET", "GET", "POST"] and source.listed == [domain], source.calls
+        set_active(app, "sam", False)
+    finally:
+        release_paused(thread, source.go)
+    assert not thread.is_alive(), box
     assert box.get("error") is None, box
     assert box.get("done") is True
     row, leases, notes = domain_rows(app, domain)
@@ -398,11 +414,13 @@ def test_an_entry_already_there_stays_when_the_account_is_disabled(
     source.listed.append(domain)
     plant_live(app, domain)
     thread, box = run_one(app, domain)
-    assert source.reached.wait(20), {"calls": source.calls, "box": box}
-    assert source.calls == ["GET", "GET"] and source.listed == [domain] and "POST" not in source.calls
-    set_active(app, "sam", False)
-    source.go.set()
-    thread.join(30)
+    try:
+        assert source.reached.wait(20), {"calls": source.calls, "box": box}
+        assert source.calls == ["GET", "GET"] and source.listed == [domain] and "POST" not in source.calls
+        set_active(app, "sam", False)
+    finally:
+        release_paused(thread, source.go)
+    assert not thread.is_alive(), box
     assert box.get("error") is None, box
     row, leases, notes = domain_rows(app, domain)
     assert row.status == "pending" and row.decision_note == WAITING, (row.status, row.decision_note)
@@ -506,7 +524,7 @@ def pause_after_claim(monkeypatch):
         if not once["done"]:
             once["done"] = True
             reached.set()
-            await asyncio.to_thread(go.wait)
+            await asyncio.to_thread(wait_for_release, go, "the paused entry claim")
         return claim
 
     monkeypatch.setattr(access, "hold_entry", hold)
@@ -548,11 +566,13 @@ def test_revoking_the_device_during_the_entry_wait_sends_nothing(
     domain = "zz-held.example"
     plant_live(app, domain)
     thread, box = run_one(app, domain)
-    assert reached.wait(20), {"calls": source.calls, "box": box}
-    assert source.calls == ["GET"] and "POST" not in source.calls, source.calls
-    take_sam_laptop(app)
-    go.set()
-    thread.join(30)
+    try:
+        assert reached.wait(20), {"calls": source.calls, "box": box}
+        assert source.calls == ["GET"] and "POST" not in source.calls, source.calls
+        take_sam_laptop(app)
+    finally:
+        release_paused(thread, go)
+    assert not thread.is_alive(), box
     assert box.get("error") is None, box
     assert box.get("done") is True
     row, leases, notes = domain_rows(app, domain)
