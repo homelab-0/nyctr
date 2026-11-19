@@ -19,7 +19,8 @@ WORKDIR /app
 COPY services/api/requirements.lock /tmp/requirements.lock
 RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock \
     && groupadd --gid 10001 nyctr \
-    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin nyctr
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin nyctr \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/nyctr/model-keys
 COPY services/api/nyctr/ /app/nyctr/
 COPY --from=web-build /build/web/dist/ /app/web/
 USER 10001:10001

@@ -2,6 +2,7 @@
 
 import ipaddress
 import re
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -120,6 +121,8 @@ class Settings(BaseSettings):
     # http://name:4000). The server in ai_base_url is always allowed, on its own scheme and port only.
     # Empty allows no other, so a key cannot be sent anywhere else.
     model_hosts: str = ""
+    # Optional external encryption keyring path. Startup never reads or creates this file.
+    model_key_file: str = ""
     # Servers a notice may be sent to besides public HTTPS. Same form as model_hosts.
     notice_hosts: str = ""
     # Optional shared secret that lets a network console ask Nyctr to collect now (a webhook).
@@ -189,6 +192,9 @@ class Settings(BaseSettings):
             if endpoint.scheme not in ("http", "https") or not endpoint.netloc or endpoint.username \
                     or endpoint.password or endpoint.query or endpoint.fragment:
                 raise ValueError("Assistant base URL must be a plain HTTP(S) URL")
+        if self.model_key_file and (not Path(self.model_key_file).is_absolute()
+                                    or not self.model_key_file.isprintable()):
+            raise ValueError("NYCTR_MODEL_KEY_FILE must be empty or an absolute file path")
         _ = self.model_origins  # refuses an entry that is not a server, so a typing mistake stops the start
         _ = self.notice_origins
         if self.mode == "demo" and self.oidc_issuer:
