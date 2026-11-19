@@ -17,6 +17,57 @@ publishes versioned multi-platform images with SBOM/provenance metadata after
 its release checks pass. Use a digest from a completed publication; the presence
 of the workflow does not imply that a public release image already exists.
 
+## Offline model credential keys
+
+The image includes an offline helper for encrypting model credential bytes with
+Fernet. This storage helper does not enable API-key entry in the Model card;
+the card still takes server secret references. Reference-only installations need
+no key file or extra volume.
+
+To provision a new encryption key, build the image and initialize an explicitly
+named volume once. The command runs as UID/GID 10001 and prints no key:
+
+```sh
+docker build -t nyctr:dev .
+docker volume create nyctr-model-keys
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=volume,src=nyctr-model-keys,dst=/var/lib/nyctr/model-keys \
+  --entrypoint python nyctr:dev -m nyctr.model_secrets init /var/lib/nyctr/model-keys/keyring
+```
+
+Initialization requires an existing private directory, creates a 0600 file and
+syncs the file and directory. It refuses every existing path, including a damaged
+or partial file. Startup never creates, replaces or repairs this key. Restore a
+lost key from backup instead of initializing over an existing installation.
+
+For later runtime use, mount that same volume read-only and set
+`NYCTR_MODEL_KEY_FILE=/var/lib/nyctr/model-keys/keyring`. The setting is an optional
+absolute path; startup does not read it. Do not put the key in the image, database,
+container writable layer or `/tmp`. A standalone `docker run` needs the same
+explicit volume as Compose would. Container removal preserves a named volume;
+removing the volume destroys its contents. A bind directory must already belong
+to UID/GID 10001 with mode 0700; mounting it hides the image's owned directory.
+
+Key files contain one to three distinct generated Fernet keys, one per line,
+with an optional final newline. The first encrypts; all can decrypt. Reads are
+fresh on each operation and require a regular file owned by the process or root,
+without world access or group/other write permission. Group read requires the
+process to belong to that group. Operator-controlled projected symlinks work;
+keep their directory protected from untrusted writers. POSIX file permissions
+are required; mounts that do not preserve them have not been validated.
+
+Back up the key volume separately from the database, with separate access
+controls. Lost encryption keys cannot decrypt existing ciphertext. To rotate
+while credential writers exist, stop new credential writes and wait for all
+in-flight writers to finish before installing the new primary key. Keep writers
+stopped while installing the new key first in the ring with old keys retained,
+reencrypting retained ciphertext, verifying it, and removing old keys from the
+live file. Resume writers only after rotation is complete. Keep the old keys
+for older backups.
+Replace keyring files atomically; do not edit a live file in place. There is no
+API rotation operation in this storage helper. Anyone controlling the host or
+API process can read these keys; encryption protects against database-only theft.
+
 ## Local demo
 
 Run `docker compose up --build -d` from the repository root. PostgreSQL must be

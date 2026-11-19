@@ -17,6 +17,7 @@ dependencies = [
   "graphql-core>=3.2.13,<3.3",
   "authlib>=1.9,<2",
   "joserfc>=1.6.8,<2",
+  "cryptography==50.0.2",
   "pydantic-settings>=2.7,<3",
 ]
 
