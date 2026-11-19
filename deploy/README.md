@@ -57,9 +57,13 @@ keep their directory protected from untrusted writers. POSIX file permissions
 are required; mounts that do not preserve them have not been validated.
 
 Back up the key volume separately from the database, with separate access
-controls. Lost encryption keys cannot decrypt existing ciphertext. To rotate,
-install a new key first while retaining old keys, reencrypt retained ciphertext,
-then remove old keys from the live file. Keep the old keys for older backups.
+controls. Lost encryption keys cannot decrypt existing ciphertext. To rotate
+while credential writers exist, stop new credential writes and wait for all
+in-flight writers to finish before installing the new primary key. Keep writers
+stopped while installing the new key first in the ring with old keys retained,
+reencrypting retained ciphertext, verifying it, and removing old keys from the
+live file. Resume writers only after rotation is complete. Keep the old keys
+for older backups.
 Replace keyring files atomically; do not edit a live file in place. There is no
 API rotation operation in this storage helper. Anyone controlling the host or
 API process can read these keys; encryption protects against database-only theft.
